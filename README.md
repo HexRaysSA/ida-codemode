@@ -4,7 +4,7 @@ A Code Mode MCP server for the `ida-domain` API.
 
 It uses a centralized bridge architecture:
 
-- `search(code)` — search a generated API spec built from the vendored `ida-domain` checkout
+- `search(code)` — search a generated API spec built from the active `ida-domain` checkout/package
 - `open_database(...)` — spawn a long-lived idalib bridge instance for a local target
 - `execute(code)` — run Python against an already-open `db` with `ida-domain` preloaded
 - `list_databases()` — inspect active bridge instances and their JSONL log paths
@@ -47,7 +47,7 @@ uv run ida-codemode-mcp mcp --transport http://127.0.0.1:5001
 
 ## Architecture
 
-`open_database()` starts a dedicated subprocess that opens the requested target through the vendored `ida-domain`/idalib and keeps the database alive.
+`open_database()` starts a dedicated subprocess that opens the requested target through `ida-domain`/idalib and keeps the database alive.
 
 `execute()` sends Python code to that live bridge instance, where the runtime already has:
 
@@ -79,6 +79,10 @@ tail -f ~/.ida-codemode/logs/<database-name>-<instance-id>.jsonl
 The log captures bridge lifecycle events, raw bridge output, and every request/response payload sent between the MCP server and the live IDA bridge instance.
 
 When run via the Claude Code plugin, each record is also stamped with `claude_session_id` and `claude_transcript_path` so the JSONL logs can be cross-referenced with the corresponding Claude Code session transcript under `~/.claude/projects/`. The mapping is established by the `PreToolUse` hook (`ida-codemode-mcp report-session`), which writes `~/.ida-codemode/sessions/<claude-pid>.json`; the MCP server reads that file on first JSONL write.
+
+## Shutdown behavior
+
+The MCP supervisor installs `SIGINT`/`SIGTERM` handlers and an `atexit` shutdown hook. On Claude Code exit, stdio EOF, or process termination, it asks each live bridge worker to close its database before terminating the worker process. Bridge workers also install their own `SIGINT`/`SIGTERM` handlers so a directly signaled worker closes the active database before exiting.
 
 ## Typical flow
 

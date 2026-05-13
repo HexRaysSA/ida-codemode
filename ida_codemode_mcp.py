@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import atexit
 import asyncio
 import builtins
 import importlib.metadata
@@ -20,6 +21,7 @@ import inspect
 import json
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -837,6 +839,7 @@ class _BridgeManager:
         self._instances: dict[str, _BridgeInstance] = {}
         self._current_instance_id: str | None = None
         self._lock = threading.Lock()
+        self._shutdown_started = False
 
     def open_database(
         self,
@@ -977,6 +980,9 @@ class _BridgeManager:
 
     def shutdown(self) -> None:
         with self._lock:
+            if self._shutdown_started:
+                return
+            self._shutdown_started = True
             items = list(self._instances.items())
             self._instances.clear()
             self._current_instance_id = None
@@ -994,6 +1000,19 @@ class _BridgeManager:
 
 
 BRIDGE_MANAGER = _BridgeManager()
+atexit.register(BRIDGE_MANAGER.shutdown)
+
+
+def _install_server_shutdown_handlers() -> None:
+    def cleanup_and_exit(signum: int, _frame: Any) -> None:
+        BRIDGE_MANAGER.shutdown()
+        try:
+            mcp.stop()
+        finally:
+            raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGINT, cleanup_and_exit)
+    signal.signal(signal.SIGTERM, cleanup_and_exit)
 
 
 def _bridge_emit(payload: dict[str, Any]) -> None:
@@ -1050,6 +1069,16 @@ def _bridge_instance_main() -> int:
             "saved": save_value,
             "database": info,
         }
+
+    def bridge_cleanup_and_exit(signum: int, _frame: Any) -> None:
+        try:
+            close_db(None)
+        except Exception:
+            pass
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGINT, bridge_cleanup_and_exit)
+    signal.signal(signal.SIGTERM, bridge_cleanup_and_exit)
 
     try:
         for raw_line in sys.stdin:
@@ -1291,6 +1320,8 @@ close_database() example:
 
 
 def _serve(transport: str) -> None:
+    _install_server_shutdown_handlers()
+
     if transport == "stdio":
         try:
             mcp.stdio()
