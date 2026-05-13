@@ -1,0 +1,30 @@
+{
+  "name": "ida-codemode-mcp",
+  "version": "0.1.0",
+  "description": "Code Mode MCP server for the ida-domain API, with Claude session correlation.",
+  "mcpServers": {
+    "ida-codemode": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "ida-codemode-mcp",
+        "mcp"
+      ]
+    }
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__ida-codemode__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT} ida-codemode-mcp report-session"
+          }
+        ]
+      }
+    ]
+  }
+}

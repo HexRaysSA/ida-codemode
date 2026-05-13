@@ -10,27 +10,40 @@ It uses a centralized bridge architecture:
 - `list_databases()` — inspect active bridge instances and their JSONL log paths
 - `close_database(...)` — close a bridge instance
 
-## Setup
+## Install as a Claude Code plugin
+
+Prerequisites: [uv](https://docs.astral.sh/uv/) on `PATH`, and an IDA Pro installation that `ida-domain` / `idalib` can find.
+
+Inside Claude Code:
+
+```text
+/plugin marketplace add HexRaysSA/ida-codemode-mcp
+/plugin install ida-codemode-mcp@hexrays
+/reload-plugins
+```
+
+The first invocation of any `mcp__ida-codemode__*` tool will trigger `uvx` to install the server (cached after that) and fire the `PreToolUse` hook that records the Claude session id for log correlation.
+
+## Develop the plugin locally
+
+Clone the repo and launch Claude Code pointing at the checkout:
+
+```bash
+git clone https://github.com/HexRaysSA/ida-codemode-mcp
+claude --plugin-dir ./ida-codemode-mcp
+```
+
+After editing `plugin.json`, hooks, or the Python source, run `/reload-plugins` inside Claude Code to pick up the changes without restarting. The manifest runs the MCP via `uv run --project ${CLAUDE_PLUGIN_ROOT} ...`, so local Python edits are reflected immediately — no rebuild step.
+
+## Run the MCP server standalone
 
 ```bash
 uv sync
+uv run ida-codemode-mcp mcp                              # stdio (default)
+uv run ida-codemode-mcp mcp --transport http://127.0.0.1:5001
 ```
 
 `ida-domain` is pulled directly from git (see `[tool.uv.sources]` in `pyproject.toml`). The wheel ships `docs/` and `examples/` inside the package as `ida_domain/_docs/` and `ida_domain/_examples/`, which the `search()` tool inspects via `importlib.util.find_spec`.
-
-## Run
-
-HTTP transport:
-
-```bash
-uv run python main.py --transport http://127.0.0.1:5001
-```
-
-stdio transport:
-
-```bash
-uv run python main.py --transport stdio
-```
 
 ## Architecture
 
@@ -54,16 +67,18 @@ That means the agent can open once and then focus subsequent `execute()` calls p
 Each opened database instance gets a live JSONL log file under:
 
 ```text
-.ida-codemode/logs/
+~/.ida-codemode/logs/
 ```
 
 `open_database()`, `execute()`, `list_databases()`, and `close_database()` return the `log_path` for the relevant instance. You can tail it while the agent runs:
 
 ```bash
-tail -f .ida-codemode/logs/<database-name>-<instance-id>.jsonl
+tail -f ~/.ida-codemode/logs/<database-name>-<instance-id>.jsonl
 ```
 
 The log captures bridge lifecycle events, raw bridge output, and every request/response payload sent between the MCP server and the live IDA bridge instance.
+
+When run via the Claude Code plugin, each record is also stamped with `claude_session_id` and `claude_transcript_path` so the JSONL logs can be cross-referenced with the corresponding Claude Code session transcript under `~/.claude/projects/`. The mapping is established by the `PreToolUse` hook (`ida-codemode-mcp report-session`), which writes `~/.ida-codemode/sessions/<claude-pid>.json`; the MCP server reads that file on first JSONL write.
 
 ## Typical flow
 

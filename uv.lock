@@ -5,7 +5,7 @@ requires-python = ">=3.14"
 [[package]]
 name = "ida-codemode-mcp"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "ida-domain" },
     { name = "zeromcp" },

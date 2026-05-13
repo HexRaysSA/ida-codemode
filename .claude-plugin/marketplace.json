@@ -1,0 +1,22 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "hexrays",
+  "description": "Hex-Rays Claude Code plugin marketplace.",
+  "owner": {
+    "name": "Hex-Rays SA",
+    "email": "support@hex-rays.com"
+  },
+  "plugins": [
+    {
+      "name": "ida-codemode-mcp",
+      "description": "Code Mode MCP server for the ida-domain API, with Claude session correlation.",
+      "author": {
+        "name": "Hex-Rays SA",
+        "email": "support@hex-rays.com"
+      },
+      "category": "development",
+      "source": ".",
+      "homepage": "https://github.com/HexRaysSA/ida-codemode-mcp"
+    }
+  ]
+}

@@ -18,6 +18,7 @@ import importlib.metadata
 import importlib.util
 import inspect
 import json
+import os
 import queue
 import subprocess
 import sys
@@ -35,8 +36,10 @@ from urllib.parse import urlparse
 
 from zeromcp import McpServer, McpToolError
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-JSONL_LOG_DIR = PROJECT_ROOT / ".ida-codemode" / "logs"
+MODULE_PATH = Path(__file__).resolve()
+JSONL_LOG_DIR = Path.home() / ".ida-codemode" / "logs"
+SESSIONS_DIR = Path.home() / ".ida-codemode" / "sessions"
+SESSION_FILE_MAX_AGE_SECONDS = 86400
 RESULT_MARKER = "CODEMODE_RESULT_JSON:"
 BRIDGE_MARKER = "CODEMODE_BRIDGE_JSON:"
 SEARCH_TIMEOUT_SECONDS = 15
@@ -114,9 +117,61 @@ def _jsonl_log_path(instance_id: str, database_path: str) -> Path:
     return JSONL_LOG_DIR / f"{stem}-{instance_id}.jsonl"
 
 
+_SESSION_INFO_LOADED = False
+_SESSION_INFO: dict[str, Any] | None = None
+
+
+def _session_file_path(claude_pid: int | None = None) -> Path:
+    pid = os.getppid() if claude_pid is None else claude_pid
+    return SESSIONS_DIR / f"{pid}.json"
+
+
+def _get_session_info() -> dict[str, Any] | None:
+    """Look up the Claude session info written by the PreToolUse hook.
+
+    Keyed by the Claude Code parent PID so multiple concurrent sessions don't collide.
+    Cached after first read to avoid hitting disk on every JSONL write.
+    """
+    global _SESSION_INFO_LOADED, _SESSION_INFO
+    if _SESSION_INFO_LOADED:
+        return _SESSION_INFO
+
+    _SESSION_INFO_LOADED = True
+    path = _session_file_path()
+    if not path.exists():
+        return None
+    try:
+        _SESSION_INFO = json.loads(path.read_text(encoding="utf-8"))
+    except OSError, json.JSONDecodeError:
+        _SESSION_INFO = None
+    return _SESSION_INFO
+
+
+def _session_fields() -> dict[str, Any]:
+    info = _get_session_info()
+    if info is None:
+        return {}
+    return {
+        "claude_session_id": info.get("session_id"),
+        "claude_transcript_path": info.get("transcript_path"),
+    }
+
+
+def _prune_stale_sessions() -> None:
+    if not SESSIONS_DIR.exists():
+        return
+    cutoff = time.time() - SESSION_FILE_MAX_AGE_SECONDS
+    for entry in SESSIONS_DIR.glob("*.json"):
+        try:
+            if entry.stat().st_mtime < cutoff:
+                entry.unlink()
+        except OSError:
+            pass
+
+
 def _write_jsonl(log_path: Path, event: dict[str, Any]) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    record = {"ts": _utc_now_iso(), **event}
+    record = {"ts": _utc_now_iso(), **_session_fields(), **event}
     with log_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
         f.flush()
@@ -555,9 +610,9 @@ def _run_code_in_subprocess(mode: str, code: str, timeout: int) -> Any:
     command = [
         sys.executable,
         "-u",
-        str(PROJECT_ROOT / "main.py"),
-        "--worker-mode",
-        mode,
+        str(MODULE_PATH),
+        "--internal-mode",
+        f"{mode}-worker",
     ]
 
     try:
@@ -566,7 +621,6 @@ def _run_code_in_subprocess(mode: str, code: str, timeout: int) -> Any:
             input=payload,
             text=True,
             capture_output=True,
-            cwd=str(PROJECT_ROOT),
             timeout=timeout,
             check=False,
         )
@@ -603,16 +657,15 @@ class _BridgeInstance:
             [
                 sys.executable,
                 "-u",
-                str(PROJECT_ROOT / "main.py"),
-                "--worker-mode",
-                "bridge-instance",
+                str(MODULE_PATH),
+                "--internal-mode",
+                "bridge-worker",
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            cwd=str(PROJECT_ROOT),
         )
         _write_jsonl(
             self.log_path,
@@ -1269,23 +1322,74 @@ def _serve(transport: str) -> None:
         mcp.stop()
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="IDA Domain Code Mode MCP server")
-    parser.add_argument(
-        "--transport",
-        help="Transport (stdio or http://host:port)",
-        default="http://127.0.0.1:5001",
+def _report_session_main() -> int:
+    """Record the Claude session info from a PreToolUse hook payload.
+
+    Keyed by the Claude Code parent PID so that concurrent Claude sessions —
+    each with their own MCP server child — don't overwrite one another.
+    """
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError as exc:
+        print(f"report-session: invalid JSON on stdin: {exc}", file=sys.stderr)
+        return 1
+
+    target = _session_file_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "session_id": payload.get("session_id"),
+        "transcript_path": payload.get("transcript_path"),
+        "cwd": payload.get("cwd"),
+        "hook_event_name": payload.get("hook_event_name"),
+        "tool_name": payload.get("tool_name"),
+        "claude_pid": os.getppid(),
+        "recorded_at": _utc_now_iso(),
+    }
+    target.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    _prune_stale_sessions()
+    return 0
+
+
+def cli() -> int:
+    parser = argparse.ArgumentParser(
+        prog="ida-codemode-mcp",
+        description="IDA Domain Code Mode MCP server",
     )
     parser.add_argument(
-        "--worker-mode",
-        choices=["search", "bridge-instance"],
+        "--internal-mode",
+        choices=["search-worker", "bridge-worker"],
+        default=None,
         help=argparse.SUPPRESS,
     )
+    subparsers = parser.add_subparsers(dest="command", required=False)
+
+    mcp_parser = subparsers.add_parser("mcp", help="Run the MCP server")
+    mcp_parser.add_argument(
+        "--transport",
+        default="stdio",
+        help="Transport (stdio or http://host:port). Defaults to stdio.",
+    )
+
+    subparsers.add_parser(
+        "report-session",
+        help="Record the Claude session ID from a PreToolUse hook payload on stdin.",
+    )
+
     args = parser.parse_args()
 
-    if args.worker_mode == "search":
-        raise SystemExit(_worker_main("search"))
-    if args.worker_mode == "bridge-instance":
-        raise SystemExit(_bridge_instance_main())
+    if args.internal_mode == "search-worker":
+        return _worker_main("search")
+    if args.internal_mode == "bridge-worker":
+        return _bridge_instance_main()
+    if args.command == "report-session":
+        return _report_session_main()
+    if args.command == "mcp":
+        _serve(args.transport)
+        return 0
 
-    _serve(args.transport)
+    parser.error("a subcommand is required (mcp or report-session)")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())
