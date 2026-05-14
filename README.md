@@ -113,12 +113,12 @@ Open a database:
 {
   "path": "/path/to/binary-or-idb",
   "auto_analysis": true,
-  "save_on_close": false,
   "set_current": true
 }
 ```
 
-The response includes an `instance_id` and `log_path`.
+The response includes an `instance_id` and `log_path`. The database is always
+persisted to disk when the instance is closed.
 
 Execute against the live `db`:
 
@@ -139,10 +139,10 @@ def run(db, to_jsonable):
     })
 ```
 
-Close the current database:
+Close the current database (changes are always saved to disk):
 
 ```json
 {
-  "save": false
+  "instance_id": "abc123"
 }
 ```

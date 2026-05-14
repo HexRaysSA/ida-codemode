@@ -525,7 +525,7 @@ def _database_info(db: Any, state: dict[str, Any]) -> dict[str, Any]:
         "path": state["path"],
         "auto_analysis": state.get("auto_analysis", True),
         "new_database": state.get("new_database", False),
-        "save_on_close": state.get("save_on_close", False),
+        "save_on_close": True,
         "options": state.get("options", {}),
     }
 
@@ -839,7 +839,6 @@ class _BridgeManager:
         *,
         auto_analysis: bool,
         new_database: bool,
-        save_on_close: bool,
         options: dict[str, Any] | None,
         set_current: bool,
     ) -> dict[str, Any]:
@@ -857,7 +856,6 @@ class _BridgeManager:
                     "path": resolved_path,
                     "auto_analysis": auto_analysis,
                     "new_database": new_database,
-                    "save_on_close": save_on_close,
                     "options": options or {},
                 },
                 OPEN_TIMEOUT_SECONDS,
@@ -948,15 +946,13 @@ class _BridgeManager:
             "count": len(instances),
         }
 
-    def close_database(
-        self, instance_id: str | None, save: bool | None
-    ) -> dict[str, Any]:
+    def close_database(self, instance_id: str | None) -> dict[str, Any]:
         target_id, instance = self._get_instance(instance_id)
         log_path = instance.log_path
         result: dict[str, Any]
         try:
             result = instance.request(
-                {"command": "close", "save": save}, CLOSE_TIMEOUT_SECONDS
+                {"command": "close"}, CLOSE_TIMEOUT_SECONDS
             )
         finally:
             instance.terminate()
@@ -984,7 +980,7 @@ class _BridgeManager:
                 if instance.is_alive():
                     try:
                         instance.request(
-                            {"command": "close", "save": None}, CLOSE_TIMEOUT_SECONDS
+                            {"command": "close"}, CLOSE_TIMEOUT_SECONDS
                         )
                     except Exception:
                         pass
@@ -1025,7 +1021,6 @@ def _bridge_instance_main() -> int:
         *,
         auto_analysis: bool,
         new_database: bool,
-        save_on_close: bool,
         options: dict[str, Any],
     ) -> dict[str, Any]:
         nonlocal db, state
@@ -1036,36 +1031,36 @@ def _bridge_instance_main() -> int:
             new_database=new_database,
             **options,
         )
-        db = Database.open(path, ida_options, save_on_close)
+        # Databases are always persisted to disk; opting out is not allowed.
+        db = Database.open(path, ida_options, True)
         state = {
             "path": path,
             "auto_analysis": auto_analysis,
             "new_database": new_database,
-            "save_on_close": save_on_close,
+            "save_on_close": True,
             "options": options,
         }
         return _database_info(db, state)
 
-    def close_db(save: bool | None) -> dict[str, Any]:
+    def close_db() -> dict[str, Any]:
         nonlocal db, state
         if db is None:
             return {"closed": False, "reason": "no database was open"}
         if state is None:
             raise RuntimeError("database state is missing")
-        save_value = state.get("save_on_close", False) if save is None else save
         info = _database_info(db, state)
-        db.close(save=save_value)
+        db.close(save=True)
         db = None
         state = None
         return {
             "closed": True,
-            "saved": save_value,
+            "saved": True,
             "database": info,
         }
 
     def bridge_cleanup_and_exit(signum: int, _frame: Any) -> None:
         try:
-            close_db(None)
+            close_db()
         except Exception:
             pass
         raise SystemExit(128 + signum)
@@ -1089,7 +1084,6 @@ def _bridge_instance_main() -> int:
                             request["path"],
                             auto_analysis=request.get("auto_analysis", True),
                             new_database=request.get("new_database", False),
-                            save_on_close=request.get("save_on_close", False),
                             options=request.get("options", {}),
                         ),
                     }
@@ -1115,7 +1109,7 @@ def _bridge_instance_main() -> int:
                         else None,
                     }
                 elif command == "close":
-                    result = close_db(request.get("save"))
+                    result = close_db()
                     _bridge_emit(
                         {"request_id": request_id, "ok": True, "result": result}
                     )
@@ -1136,7 +1130,7 @@ def _bridge_instance_main() -> int:
     finally:
         if db is not None:
             try:
-                db.close(save=state.get("save_on_close", False) if state else False)
+                db.close(save=True)
             except Exception:
                 pass
     return 0
@@ -1170,9 +1164,6 @@ def open_database(
     new_database: Annotated[
         bool, "Whether IDA should request creation of a new database."
     ] = False,
-    save_on_close: Annotated[
-        bool, "Whether changes should be saved when the instance is closed."
-    ] = False,
     set_current: Annotated[
         bool, "Whether the new instance should become the default target for execute()."
     ] = True,
@@ -1184,12 +1175,14 @@ def open_database(
         ),
     ] = None,
 ) -> dict[str, Any]:
-    """Open a local target in a long-lived idalib bridge instance."""
+    """Open a local target in a long-lived idalib bridge instance.
+
+    The database is always persisted to disk when the instance is closed.
+    """
     return BRIDGE_MANAGER.open_database(
         path,
         auto_analysis=auto_analysis,
         new_database=new_database,
-        save_on_close=save_on_close,
         options=options,
         set_current=set_current,
     )
@@ -1227,13 +1220,9 @@ def close_database(
         str | None,
         "Optional database instance id. If omitted, the current instance is closed.",
     ] = None,
-    save: Annotated[
-        bool | None,
-        "Override whether changes are saved before the instance closes. If omitted, use the instance default.",
-    ] = None,
 ) -> dict[str, Any]:
-    """Close an active database bridge instance."""
-    return BRIDGE_MANAGER.close_database(instance_id, save)
+    """Close an active database bridge instance, always saving changes to disk."""
+    return BRIDGE_MANAGER.close_database(instance_id)
 
 
 @mcp.resource("ida://spec-summary")
@@ -1279,7 +1268,6 @@ open_database() example:
 {
   "path": "/path/to/binary-or-idb",
   "auto_analysis": true,
-  "save_on_close": false,
   "set_current": true
 }
 ```
@@ -1303,10 +1291,10 @@ def run(db, to_jsonable):
     })
 ```
 
-close_database() example:
+close_database() example (changes are always saved to disk):
 ```json
 {
-  "save": false
+  "instance_id": "abc123"
 }
 ```
 """
