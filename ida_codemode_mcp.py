@@ -82,7 +82,7 @@ SAFE_SEARCH_BUILTINS = {
     "zip": zip,
 }
 
-mcp = McpServer("ida-codemode", version="0.2.0")
+mcp = McpServer("ida", version="0.2.0")
 _SEARCH_SPEC_CACHE: dict[str, Any] | None = None
 
 
@@ -146,7 +146,7 @@ def _get_session_info() -> dict[str, Any] | None:
     try:
         _SESSION_INFO = json.loads(path.read_text(encoding="utf-8"))
         _SESSION_INFO_MTIME = mtime
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         pass
     return _SESSION_INFO
 
@@ -1245,7 +1245,7 @@ def close_database(
     return BRIDGE_MANAGER.close_database(instance_id, save)
 
 
-@mcp.resource("ida-codemode://spec-summary")
+@mcp.resource("ida://spec-summary")
 def spec_summary_resource() -> dict[str, Any]:
     """Summary of the generated ida-domain search spec."""
     spec = _build_search_spec()
@@ -1258,7 +1258,7 @@ def spec_summary_resource() -> dict[str, Any]:
     }
 
 
-@mcp.resource("ida-codemode://instances")
+@mcp.resource("ida://instances")
 def instances_resource() -> dict[str, Any]:
     """Current database bridge instances."""
     return BRIDGE_MANAGER.list_databases()

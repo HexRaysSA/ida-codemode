@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Code Mode MCP server for the ida-domain API, with Claude session correlation.",
   "mcpServers": {
-    "ida-codemode": {
+    "ida": {
       "command": "uv",
       "args": [
         "run",
@@ -17,7 +17,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__.*ida-codemode__.*",
+        "matcher": "mcp__(.*[_:])?ida__.*",
         "hooks": [
           {
             "type": "command",

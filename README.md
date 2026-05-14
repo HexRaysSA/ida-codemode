@@ -21,7 +21,7 @@ claude plugin marketplace add HexRaysSA/ida-claude-plugins
 claude plugin install ida-codemode-mcp@ida-claude-plugins
 ```
 
-The first invocation of any `mcp__.*ida-codemode__.*` tool will trigger `uvx` to install the server (cached after that) and fire the `PreToolUse` hook that records the Claude session id for log correlation.
+The plugin registers the MCP server as `ida`, so Claude Code tool names are shorter, e.g. `mcp__plugin_ida-codemode-mcp_ida__open_database`. The first invocation of any matching `mcp__(.*[_:])?ida__.*` tool will trigger `uvx` to install the server (cached after that) and fire the `PreToolUse` hook that records the Claude session id for log correlation.
 
 ## Develop the plugin locally
 
