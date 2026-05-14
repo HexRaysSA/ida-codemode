@@ -21,7 +21,7 @@ claude plugin marketplace add HexRaysSA/ida-claude-plugins
 claude plugin install ida-codemode-mcp@ida-claude-plugins
 ```
 
-The plugin registers the MCP server as `ida`, so Claude Code tool names are shorter, e.g. `mcp__plugin_ida-codemode-mcp_ida__open_database`. The first invocation of any matching `mcp__(.*[_:])?ida__.*` tool will trigger `uvx` to install the server (cached after that) and fire the `PreToolUse` hook that records the Claude session id for log correlation.
+The plugin registers the MCP server as `ida`, so Claude Code tool names are shorter, e.g. `mcp__plugin_ida-codemode-mcp_ida__open_database`. The first invocation of any matching `mcp__(.*[_:])?ida__.*` tool will trigger `uv` to install the server (cached after that) and fire the `PreToolUse` hook that injects the Claude session id for log correlation.
 
 ## Develop the plugin locally
 
@@ -77,7 +77,7 @@ tail -f ~/.ida-codemode/logs/<database-name>-<instance-id>.jsonl
 
 The log captures bridge lifecycle events, raw bridge output, and every request/response payload sent between the MCP server and the live IDA bridge instance.
 
-When run via the Claude Code plugin, each record is also stamped with `claude_session_id` and `claude_transcript_path` so the JSONL logs can be cross-referenced with the corresponding Claude Code session transcript under `~/.claude/projects/`. The mapping is established by the `PreToolUse` hook (`ida-codemode-mcp report-session`), which writes `~/.ida-codemode/sessions/<claude-pid>.json`; the MCP server reads that file on first JSONL write.
+When run via the Claude Code plugin, each tool call is stamped with `claude_session_path` so the JSONL logs can be cross-referenced with the corresponding Claude Code session transcript under `~/.claude/projects/`. The mapping is injected by the `PreToolUse` hook (`ida-codemode-mcp report-session`) as a hidden `_meta.claude_session_path` field in the tool input. The MCP server strips `_meta` before dispatching the tool call, so it is not part of the public tool schema.
 
 ## Shutdown behavior
 

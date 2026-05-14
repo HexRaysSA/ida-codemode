@@ -19,7 +19,6 @@ import importlib.metadata
 import importlib.util
 import inspect
 import json
-import os
 import queue
 import signal
 import subprocess
@@ -39,9 +38,8 @@ from urllib.parse import urlparse
 from zeromcp import McpServer, McpToolError
 
 MODULE_PATH = Path(__file__).resolve()
-JSONL_LOG_DIR = Path.home() / ".ida-codemode" / "logs"
-SESSIONS_DIR = Path.home() / ".ida-codemode" / "sessions"
-SESSION_FILE_MAX_AGE_SECONDS = 86400
+STATE_DIR = Path.home() / ".ida-codemode"
+JSONL_LOG_DIR = STATE_DIR / "logs"
 RESULT_MARKER = "CODEMODE_RESULT_JSON:"
 BRIDGE_MARKER = "CODEMODE_BRIDGE_JSON:"
 SEARCH_TIMEOUT_SECONDS = 15
@@ -83,6 +81,7 @@ SAFE_SEARCH_BUILTINS = {
 }
 
 mcp = McpServer("ida", version="0.2.0")
+_TOOL_CALL_CONTEXT = threading.local()
 _SEARCH_SPEC_CACHE: dict[str, Any] | None = None
 
 
@@ -119,66 +118,55 @@ def _jsonl_log_path(instance_id: str, database_path: str) -> Path:
     return JSONL_LOG_DIR / f"{stem}-{instance_id}.jsonl"
 
 
-_SESSION_INFO: dict[str, Any] | None = None
-_SESSION_INFO_MTIME: float | None = None
-
-
-def _session_file_path(claude_pid: int | None = None) -> Path:
-    pid = os.getppid() if claude_pid is None else claude_pid
-    return SESSIONS_DIR / f"{pid}.json"
-
-
-def _get_session_info() -> dict[str, Any] | None:
-    """Look up the Claude session info written by the PreToolUse hook.
-
-    Keyed by the Claude Code parent PID so multiple concurrent sessions don't collide.
-    Cached by mtime so we pick up new/updated session files without re-reading on
-    every JSONL write.
-    """
-    global _SESSION_INFO, _SESSION_INFO_MTIME
-    path = _session_file_path()
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        return _SESSION_INFO
-    if mtime == _SESSION_INFO_MTIME:
-        return _SESSION_INFO
-    try:
-        _SESSION_INFO = json.loads(path.read_text(encoding="utf-8"))
-        _SESSION_INFO_MTIME = mtime
-    except OSError, json.JSONDecodeError:
-        pass
-    return _SESSION_INFO
+def _current_tool_meta() -> dict[str, Any]:
+    meta = getattr(_TOOL_CALL_CONTEXT, "meta", None)
+    return meta if isinstance(meta, dict) else {}
 
 
 def _session_fields() -> dict[str, Any]:
-    info = _get_session_info()
-    if info is None:
-        return {}
-    return {
-        "claude_session_id": info.get("session_id"),
-        "claude_transcript_path": info.get("transcript_path"),
-    }
-
-
-def _prune_stale_sessions() -> None:
-    if not SESSIONS_DIR.exists():
-        return
-    cutoff = time.time() - SESSION_FILE_MAX_AGE_SECONDS
-    for entry in SESSIONS_DIR.glob("*.json"):
-        try:
-            if entry.stat().st_mtime < cutoff:
-                entry.unlink()
-        except OSError:
-            pass
+    meta = _current_tool_meta()
+    claude_session_path = meta.get("claude_session_path")
+    if isinstance(claude_session_path, str) and claude_session_path:
+        return {"claude_session_path": claude_session_path}
+    return {}
 
 
 def _write_jsonl(log_path: Path, event: dict[str, Any]) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    record = {"ts": _utc_now_iso(), **_session_fields(), **event}
+    record = {"ts": _utc_now_iso(), **event}
     with log_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
         f.flush()
+
+
+def _install_tool_meta_interceptor() -> None:
+    original_tools_call = mcp.registry.methods["tools/call"]
+
+    def tools_call_with_meta(
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        _meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        clean_arguments = arguments
+        tool_meta: dict[str, Any] | None = None
+
+        if isinstance(arguments, dict):
+            clean_arguments = dict(arguments)
+            maybe_meta = clean_arguments.pop("_meta", None)
+            if isinstance(maybe_meta, dict):
+                tool_meta = maybe_meta
+
+        previous_meta = getattr(_TOOL_CALL_CONTEXT, "meta", None)
+        _TOOL_CALL_CONTEXT.meta = tool_meta
+        try:
+            return original_tools_call(name, clean_arguments, _meta)
+        finally:
+            _TOOL_CALL_CONTEXT.meta = previous_meta
+
+    mcp.registry.methods["tools/call"] = tools_call_with_meta
+
+
+_install_tool_meta_interceptor()
 
 
 def _summarize_text(text: str, max_lines: int = 8) -> str:
@@ -655,6 +643,7 @@ class _BridgeInstance:
                 "event": "instance_started",
                 "instance_id": self.instance_id,
                 "pid": None,
+                **_session_fields(),
             },
         )
         self.process = subprocess.Popen(
@@ -740,6 +729,7 @@ class _BridgeInstance:
                     "instance_id": self.instance_id,
                     "request_id": request_id,
                     "payload": payload,
+                    **_session_fields(),
                 },
             )
             assert self.process.stdin is not None
@@ -886,6 +876,7 @@ class _BridgeManager:
             "instance_id": instance_id,
             "current_instance_id": self._current_instance_id,
             "log_path": str(instance.log_path),
+            **_session_fields(),
         }
 
     def _get_instance(self, instance_id: str | None) -> tuple[str, _BridgeInstance]:
@@ -1356,30 +1347,41 @@ def _serve(transport: str) -> None:
 
 
 def _report_session_main() -> int:
-    """Record the Claude session info from a PreToolUse hook payload.
-
-    Keyed by the Claude Code parent PID so that concurrent Claude sessions —
-    each with their own MCP server child — don't overwrite one another.
-    """
+    """Inject the Claude transcript path into a PreToolUse tool input."""
     try:
         payload = json.load(sys.stdin)
     except json.JSONDecodeError as exc:
         print(f"report-session: invalid JSON on stdin: {exc}", file=sys.stderr)
         return 1
 
-    target = _session_file_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    record = {
-        "session_id": payload.get("session_id"),
-        "transcript_path": payload.get("transcript_path"),
-        "cwd": payload.get("cwd"),
-        "hook_event_name": payload.get("hook_event_name"),
-        "tool_name": payload.get("tool_name"),
-        "claude_pid": os.getppid(),
-        "recorded_at": _utc_now_iso(),
-    }
-    target.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    _prune_stale_sessions()
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = payload.get("input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+
+    existing_meta = tool_input.get("_meta")
+    if not isinstance(existing_meta, dict):
+        existing_meta = {}
+
+    transcript_path = payload.get("transcript_path")
+    updated_input = dict(tool_input)
+    if isinstance(transcript_path, str) and transcript_path:
+        updated_input["_meta"] = {
+            **existing_meta,
+            "claude_session_path": transcript_path,
+        }
+
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "updatedInput": updated_input,
+                }
+            }
+        )
+    )
     return 0
 
 
@@ -1405,7 +1407,7 @@ def cli() -> int:
 
     subparsers.add_parser(
         "report-session",
-        help="Record the Claude session ID from a PreToolUse hook payload on stdin.",
+        help="Inject Claude session metadata into a PreToolUse tool input.",
     )
 
     args = parser.parse_args()
