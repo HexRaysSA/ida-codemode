@@ -14,15 +14,14 @@ It uses a centralized bridge architecture:
 
 Prerequisites: [uv](https://docs.astral.sh/uv/) on `PATH`, and an IDA Pro installation that `ida-domain` / `idalib` can find.
 
-Inside Claude Code:
+To install:
 
-```text
-/plugin marketplace add HexRaysSA/ida-codemode-mcp
-/plugin install ida-codemode-mcp@hexrays
-/reload-plugins
+```bash
+claude plugin marketplace add HexRaysSA/ida-claude-plugins
+claude plugin install ida-codemode-mcp@ida-claude-plugins
 ```
 
-The first invocation of any `mcp__ida-codemode__*` tool will trigger `uvx` to install the server (cached after that) and fire the `PreToolUse` hook that records the Claude session id for log correlation.
+The first invocation of any `mcp__.*ida-codemode__.*` tool will trigger `uvx` to install the server (cached after that) and fire the `PreToolUse` hook that records the Claude session id for log correlation.
 
 ## Develop the plugin locally
 
