@@ -119,8 +119,8 @@ def _jsonl_log_path(instance_id: str, database_path: str) -> Path:
     return JSONL_LOG_DIR / f"{stem}-{instance_id}.jsonl"
 
 
-_SESSION_INFO_LOADED = False
 _SESSION_INFO: dict[str, Any] | None = None
+_SESSION_INFO_MTIME: float | None = None
 
 
 def _session_file_path(claude_pid: int | None = None) -> Path:
@@ -132,20 +132,22 @@ def _get_session_info() -> dict[str, Any] | None:
     """Look up the Claude session info written by the PreToolUse hook.
 
     Keyed by the Claude Code parent PID so multiple concurrent sessions don't collide.
-    Cached after first read to avoid hitting disk on every JSONL write.
+    Cached by mtime so we pick up new/updated session files without re-reading on
+    every JSONL write.
     """
-    global _SESSION_INFO_LOADED, _SESSION_INFO
-    if _SESSION_INFO_LOADED:
-        return _SESSION_INFO
-
-    _SESSION_INFO_LOADED = True
+    global _SESSION_INFO, _SESSION_INFO_MTIME
     path = _session_file_path()
-    if not path.exists():
-        return None
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return _SESSION_INFO
+    if mtime == _SESSION_INFO_MTIME:
+        return _SESSION_INFO
     try:
         _SESSION_INFO = json.loads(path.read_text(encoding="utf-8"))
-    except OSError, json.JSONDecodeError:
-        _SESSION_INFO = None
+        _SESSION_INFO_MTIME = mtime
+    except (OSError, json.JSONDecodeError):
+        pass
     return _SESSION_INFO
 
 

@@ -17,7 +17,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__ida-codemode__.*",
+        "matcher": "mcp__.*ida-codemode__.*",
         "hooks": [
           {
             "type": "command",
