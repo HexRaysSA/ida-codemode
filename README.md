@@ -17,8 +17,8 @@ Prerequisites: [uv](https://docs.astral.sh/uv/) on `PATH`, and an IDA Pro instal
 To install:
 
 ```bash
-claude plugin marketplace add HexRaysSA/ida-claude-plugins
-claude plugin install ida-codemode-mcp@ida-claude-plugins
+claude plugin marketplace add HexRaysSA/claude-marketplace
+claude plugin install ida-codemode-mcp@HexRaysSA
 ```
 
 The plugin registers the MCP server as `ida`, so Claude Code tool names are shorter, e.g. `mcp__plugin_ida-codemode-mcp_ida__open_database`. The first invocation of any matching `mcp__(.*[_:])?ida__.*` tool will trigger `uv` to install the server (cached after that) and fire the `PreToolUse` hook that injects the Claude session id for log correlation.
