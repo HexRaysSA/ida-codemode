@@ -125,10 +125,17 @@ def _current_tool_meta() -> dict[str, Any]:
 
 def _session_fields() -> dict[str, Any]:
     meta = _current_tool_meta()
+    fields: dict[str, Any] = {}
+
     claude_session_path = meta.get("claude_session_path")
     if isinstance(claude_session_path, str) and claude_session_path:
-        return {"claude_session_path": claude_session_path}
-    return {}
+        fields["claude_session_path"] = claude_session_path
+
+    codex_session_path = meta.get("codex_session_path")
+    if isinstance(codex_session_path, str) and codex_session_path:
+        fields["codex_session_path"] = codex_session_path
+
+    return fields
 
 
 def _write_jsonl(log_path: Path, event: dict[str, Any]) -> None:
@@ -1334,14 +1341,7 @@ def _serve(transport: str) -> None:
         mcp.stop()
 
 
-def _report_session_main() -> int:
-    """Inject the Claude transcript path into a PreToolUse tool input."""
-    try:
-        payload = json.load(sys.stdin)
-    except json.JSONDecodeError as exc:
-        print(f"report-session: invalid JSON on stdin: {exc}", file=sys.stderr)
-        return 1
-
+def _report_claude_session(payload: dict[str, Any]) -> dict[str, Any]:
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
         tool_input = payload.get("input")
@@ -1354,22 +1354,70 @@ def _report_session_main() -> int:
 
     transcript_path = payload.get("transcript_path")
     updated_input = dict(tool_input)
-    if isinstance(transcript_path, str) and transcript_path:
-        updated_input["_meta"] = {
-            **existing_meta,
-            "claude_session_path": transcript_path,
-        }
 
-    print(
-        json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "updatedInput": updated_input,
-                }
-            }
-        )
-    )
+    updated_meta = dict(existing_meta)
+    if isinstance(transcript_path, str) and transcript_path:
+        updated_meta["claude_session_path"] = transcript_path
+
+    if updated_meta:
+        updated_input["_meta"] = updated_meta
+
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "updatedInput": updated_input,
+        }
+    }
+
+
+def _report_codex_session(payload: dict[str, Any]) -> dict[str, Any]:
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = payload.get("input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+
+    existing_meta = tool_input.get("_meta")
+    if not isinstance(existing_meta, dict):
+        existing_meta = {}
+
+    transcript_path = payload.get("transcript_path")
+    updated_input = dict(tool_input)
+
+    updated_meta = dict(existing_meta)
+    if isinstance(transcript_path, str) and transcript_path:
+        updated_meta["codex_session_path"] = transcript_path
+
+    if updated_meta:
+        updated_input["_meta"] = updated_meta
+
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": updated_input,
+        }
+    }
+
+
+def _report_session_main(platform: str) -> int:
+    """Inject agent transcript/session metadata into a PreToolUse tool input."""
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError as exc:
+        print(f"report-session: invalid JSON on stdin: {exc}", file=sys.stderr)
+        return 1
+
+    match platform:
+        case "claude":
+            response = _report_claude_session(payload)
+        case "codex":
+            response = _report_codex_session(payload)
+        case _:
+            print(f"report-session: unsupported platform: {platform}", file=sys.stderr)
+            return 2
+
+    print(json.dumps(response))
     return 0
 
 
@@ -1393,9 +1441,14 @@ def cli() -> int:
         help="Transport (stdio or http://host:port). Defaults to stdio.",
     )
 
-    subparsers.add_parser(
+    report_session_parser = subparsers.add_parser(
         "report-session",
-        help="Inject Claude session metadata into a PreToolUse tool input.",
+        help="Inject agent session metadata into a PreToolUse tool input.",
+    )
+    report_session_parser.add_argument(
+        "platform",
+        choices=["claude", "codex"],
+        help="Agent runtime whose hook payload is being processed.",
     )
 
     args = parser.parse_args()
@@ -1405,7 +1458,7 @@ def cli() -> int:
     if args.internal_mode == "bridge-worker":
         return _bridge_instance_main()
     if args.command == "report-session":
-        return _report_session_main()
+        return _report_session_main(args.platform)
     if args.command == "mcp":
         _serve(args.transport)
         return 0

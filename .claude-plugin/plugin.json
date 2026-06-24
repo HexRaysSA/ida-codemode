@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT} ida-codemode-mcp report-session"
+            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT} ida-codemode-mcp report-session claude"
           }
         ]
       }

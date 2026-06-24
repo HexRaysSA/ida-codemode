@@ -1,38 +1,33 @@
 # ida-codemode-mcp
 
-A Code Mode MCP server for the `ida-domain` API.
+A [Code Mode](https://blog.cloudflare.com/code-mode/) MCP server for the [IDA Domain API](https://github.com/HexRaysSA/ida-domain).
 
 It uses a centralized bridge architecture:
 
-- `search(code)` — search a generated API spec built from the active `ida-domain` checkout/package
+- `search(code)` — search a generated API spec built from the `ida-domain` package
 - `open_database(...)` — spawn a long-lived idalib bridge instance for a local target
 - `execute(code)` — run Python against an already-open `db` with `ida-domain` preloaded
 - `list_databases()` — inspect active bridge instances and their JSONL log paths
 - `close_database(...)` — close a bridge instance
 
+## Prerequisites
+
+- [uv](https://docs.astral.sh/uv/) on `PATH`
+- IDA with [idalib](https://docs.hex-rays.com/core/idalib/overview) configured
+
 ## Install as a Claude Code plugin
-
-Prerequisites: [uv](https://docs.astral.sh/uv/) on `PATH`, and an IDA Pro installation that `ida-domain` / `idalib` can find.
-
-To install:
 
 ```bash
 claude plugin marketplace add HexRaysSA/claude-marketplace
 claude plugin install ida-codemode-mcp@HexRaysSA
 ```
 
-The plugin registers the MCP server as `ida`, so Claude Code tool names are shorter, e.g. `mcp__plugin_ida-codemode-mcp_ida__open_database`. The first invocation of any matching `mcp__(.*[_:])?ida__.*` tool will trigger `uv` to install the server (cached after that) and fire the `PreToolUse` hook that injects the Claude session id for log correlation.
-
-## Develop the plugin locally
-
-Clone the repo and launch Claude Code pointing at the checkout:
+## Install as a Codex plugin
 
 ```bash
-git clone https://github.com/HexRaysSA/ida-codemode-mcp
-claude --plugin-dir ./ida-codemode-mcp
+codex plugin marketplace add HexRaysSA/codex-marketplace
+codex plugin add ida-codemode-mcp@HexRaysSA
 ```
-
-After editing `plugin.json`, hooks, or the Python source, run `/reload-plugins` inside Claude Code to pick up the changes without restarting. The manifest runs the MCP via `uv run --project ${CLAUDE_PLUGIN_ROOT} ...`, so local Python edits are reflected immediately — no rebuild step.
 
 ## Run the MCP server standalone
 
@@ -77,7 +72,9 @@ tail -f ~/.ida-codemode/logs/<database-name>-<instance-id>.jsonl
 
 The log captures bridge lifecycle events, raw bridge output, and every request/response payload sent between the MCP server and the live IDA bridge instance.
 
-When run via the Claude Code plugin, each tool call is stamped with `claude_session_path` so the JSONL logs can be cross-referenced with the corresponding Claude Code session transcript under `~/.claude/projects/`. The mapping is injected by the `PreToolUse` hook (`ida-codemode-mcp report-session`) as a hidden `_meta.claude_session_path` field in the tool input. The MCP server strips `_meta` before dispatching the tool call, so it is not part of the public tool schema.
+When run via the Claude Code plugin, each tool call is stamped with `claude_session_path` so the JSONL logs can be cross-referenced with the corresponding Claude Code session transcript under `~/.claude/projects/`. The mapping is injected by the `PreToolUse` hook (`ida-codemode-mcp report-session claude`) as a hidden `_meta.claude_session_path` field in the tool input.
+
+When run via the Codex plugin, the bundled `.codex-plugin/hooks.json` uses the same `PreToolUse` flow through `ida-codemode-mcp report-session codex` to stamp IDA MCP tool calls with `codex_session_path`. Codex requires users to review and trust plugin-bundled hooks before they run; open `/hooks` after installing or updating the plugin if Codex reports that hooks need review. The MCP server strips `_meta` before dispatching the tool call, so this field is not part of the public tool schema.
 
 ## Shutdown behavior
 
