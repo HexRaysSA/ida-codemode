@@ -76,6 +76,28 @@ When run via the Claude Code plugin, each tool call is stamped with `claude_sess
 
 When run via the Codex plugin, the bundled `.codex-plugin/hooks.json` uses the same `PreToolUse` flow through `ida-codemode-mcp report-session codex` to stamp IDA MCP tool calls with `codex_session_path`. Codex requires users to review and trust plugin-bundled hooks before they run; open `/hooks` after installing or updating the plugin if Codex reports that hooks need review. The MCP server strips `_meta` before dispatching the tool call, so this field is not part of the public tool schema.
 
+## Dashboard
+
+A local web dashboard (stdlib only, independent of the MCP server) renders the JSONL logs visually:
+
+```bash
+uv run ida-codemode-dashboard --open           # http://127.0.0.1:8736/
+uv run ida-codemode-dashboard --port 9000 --logs-dir ~/.ida-codemode/logs
+```
+
+It shows:
+
+- an index of all bridge sessions with status (`running`, `closed`, or `killed` based on a clean-close event and PID liveness), error counts, and the estimated model cost of each session. Long all-hex target names are collapsed to `prefix…suffix`.
+- a per-session timeline pairing each request with its response — `execute()` code is syntax-highlighted, results and bridge output are collapsible. When the session is linked to an agent transcript, the agent's user prompts, messages, and reasoning are interleaved into the timeline at their real timestamps (marked with a left accent rail), so you can read what the agent was thinking around each IDA call. Each agent turn shows its tokens in/out/cached and cost inline, and the session header sums them. A "toggle transcript" button hides/shows them. A transcript shared by several bridge instances is sliced by time so each instance shows only its own conversation.
+- cost is computed from the transcript's per-message token usage using current Claude per-model pricing (input, output, cache-write at 1.25×, cache-read at 0.10×). Codex sessions show token totals but no cost (OpenAI pricing isn't tracked).
+- a standalone rendering of the linked Claude Code or Codex transcript (user/assistant messages, thinking, tool calls with their results), when the session was stamped via the plugin hooks
+
+### Sharing a session
+
+Each session page has an **export HTML** button that downloads a single self-contained `.html` file (all CSS/JS inlined, no external requests, navigation links and the host log path stripped). You can open it directly, email it, or host it as a static artifact to share a session with someone who doesn't have the logs. The interleaved agent transcript is included, and the interactive controls (expand/collapse, toggle transcript) still work offline.
+
+For safety, the dashboard binds to `127.0.0.1` by default and only serves transcript files that are actually referenced by a bridge log — arbitrary paths are rejected.
+
 ## Shutdown behavior
 
 The MCP supervisor installs `SIGINT`/`SIGTERM` handlers and an `atexit` shutdown hook. On Claude Code exit, stdio EOF, or process termination, it asks each live bridge worker to close its database before terminating the worker process. Bridge workers also install their own `SIGINT`/`SIGTERM` handlers so a directly signaled worker closes the active database before exiting.
