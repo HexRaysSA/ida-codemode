@@ -14,7 +14,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "ida-domain", git = "https://github.com/HexRaysSA/ida-domain?branch=include-docs-examples" },
-    { name = "zeromcp", specifier = ">=1.4.0" },
+    { name = "zeromcp", specifier = ">=1.5.0" },
 ]
 
 [[package]]
@@ -56,9 +56,9 @@ wheels = [
 
 [[package]]
 name = "zeromcp"
-version = "1.4.0"
+version = "1.5.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/5c/ab/ed8b514f6b0d958b56bbae5c562d559694105dd6b4205252a71b6c495396/zeromcp-1.4.0.tar.gz", hash = "sha256:da49d42076f2653609a3b07d2c681d93288471f89867542a5a006701dbe5be0f", size = 77215, upload-time = "2026-03-27T21:20:38.791Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/95/10/0c5018221766413c808b62f229a3b6b2cd0e4b10bc9ac25fee6152c22938/zeromcp-1.5.0.tar.gz", hash = "sha256:ef4e590ddb20a30a2ceaee86dbf893c9edb5d3e583c22a0ea7025e94763e59d2", size = 95257, upload-time = "2026-07-22T13:39:29.535Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/64/69/3e1883120839ad955f2b9ee9b1f2e40987415261271b3d5fa25d2316669b/zeromcp-1.4.0-py3-none-any.whl", hash = "sha256:70905e130a79f83436ce96cdf2bcc81b14c71311c3c24c2b78e4711e285da6cc", size = 13930, upload-time = "2026-03-27T21:20:37.768Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/46/aa0e0941b511969a3eb70ea19add43b22c7336a4bf65a4fe4ea2176faf25/zeromcp-1.5.0-py3-none-any.whl", hash = "sha256:ca3b67687850ed463a255c180a286901ea69343612dc84ef279ec75b460f77ee", size = 21875, upload-time = "2026-07-22T13:39:28.44Z" },
 ]

@@ -81,7 +81,6 @@ SAFE_SEARCH_BUILTINS = {
 }
 
 mcp = McpServer("ida", version="0.2.0")
-_TOOL_CALL_CONTEXT = threading.local()
 _SEARCH_SPEC_CACHE: dict[str, Any] | None = None
 
 
@@ -118,13 +117,8 @@ def _jsonl_log_path(instance_id: str, database_path: str) -> Path:
     return JSONL_LOG_DIR / f"{stem}-{instance_id}.jsonl"
 
 
-def _current_tool_meta() -> dict[str, Any]:
-    meta = getattr(_TOOL_CALL_CONTEXT, "meta", None)
-    return meta if isinstance(meta, dict) else {}
-
-
 def _session_fields() -> dict[str, Any]:
-    meta = _current_tool_meta()
+    meta = mcp.context.meta or {}
     fields: dict[str, Any] = {}
 
     claude_session_path = meta.get("claude_session_path")
@@ -146,7 +140,8 @@ def _write_jsonl(log_path: Path, event: dict[str, Any]) -> None:
         f.flush()
 
 
-def _install_tool_meta_interceptor() -> None:
+def _install_hook_input_meta_adapter() -> None:
+    """Promote Claude/Codex hook metadata from arguments into MCP request metadata."""
     original_tools_call = mcp.registry.methods["tools/call"]
 
     def tools_call_with_meta(
@@ -155,25 +150,20 @@ def _install_tool_meta_interceptor() -> None:
         _meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         clean_arguments = arguments
-        tool_meta: dict[str, Any] | None = None
+        request_meta = dict(_meta) if isinstance(_meta, dict) else {}
 
         if isinstance(arguments, dict):
             clean_arguments = dict(arguments)
-            maybe_meta = clean_arguments.pop("_meta", None)
-            if isinstance(maybe_meta, dict):
-                tool_meta = maybe_meta
+            input_meta = clean_arguments.pop("_meta", None)
+            if isinstance(input_meta, dict):
+                request_meta.update(input_meta)
 
-        previous_meta = getattr(_TOOL_CALL_CONTEXT, "meta", None)
-        _TOOL_CALL_CONTEXT.meta = tool_meta
-        try:
-            return original_tools_call(name, clean_arguments, _meta)
-        finally:
-            _TOOL_CALL_CONTEXT.meta = previous_meta
+        return original_tools_call(name, clean_arguments, request_meta or None)
 
     mcp.registry.methods["tools/call"] = tools_call_with_meta
 
 
-_install_tool_meta_interceptor()
+_install_hook_input_meta_adapter()
 
 
 def _summarize_text(text: str, max_lines: int = 8) -> str:
