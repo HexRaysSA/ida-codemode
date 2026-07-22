@@ -9,9 +9,13 @@ import {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
   formatSize,
+  highlightCode,
+  keyHint,
   truncateHead,
   type ExtensionAPI,
+  type Theme,
 } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CALL_TIMEOUT_MS = 360_000;
@@ -19,6 +23,41 @@ const CALL_TIMEOUT_MS = 360_000;
 type PiContent =
   | { type: "text"; text: string }
   | { type: "image"; data: string; mimeType: string };
+
+function renderToolCall(
+  toolName: string,
+  args: Record<string, unknown> | undefined,
+  theme: Theme,
+  expanded: boolean,
+): Text {
+  let text = theme.fg("toolTitle", theme.bold(toolName));
+  const mcpToolName = toolName.startsWith("ida_") ? toolName.slice(4) : toolName;
+
+  if ((mcpToolName === "execute" || mcpToolName === "search") && typeof args?.code === "string") {
+    if (mcpToolName === "execute" && typeof args.instance_id === "string") {
+      text += ` ${theme.fg("muted", args.instance_id)}`;
+    }
+
+    const lines = highlightCode(args.code.replaceAll("\t", "    "), "python");
+    const maxLines = expanded ? lines.length : 10;
+    const displayed = lines.slice(0, maxLines);
+    text += `\n\n${displayed.join("\n")}`;
+
+    const remaining = lines.length - displayed.length;
+    if (remaining > 0) {
+      text +=
+        theme.fg("muted", `\n... (${remaining} more lines,`) +
+        ` ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+    }
+    return new Text(text, 0, 0);
+  }
+
+  const serialized = args ? JSON.stringify(args, null, 2) : undefined;
+  if (serialized && serialized !== "{}") {
+    text += `\n\n${theme.fg("toolOutput", serialized)}`;
+  }
+  return new Text(text, 0, 0);
+}
 
 export default function idaCodemode(pi: ExtensionAPI) {
   let client: Client | undefined;
@@ -31,6 +70,9 @@ export default function idaCodemode(pi: ExtensionAPI) {
       command: "uv",
       args: ["run", "--project", PACKAGE_ROOT, "ida-codemode-mcp", "mcp"],
       cwd: PACKAGE_ROOT,
+      env: {
+        IDA_CODEMODE_ID: process.env.IDA_CODEMODE_ID ?? "",
+      },
     });
 
     try {
@@ -39,13 +81,22 @@ export default function idaCodemode(pi: ExtensionAPI) {
 
       const { tools } = await next.listTools();
       for (const tool of tools) {
+        const piToolName = tool.name.startsWith("ida_") ? tool.name : `ida_${tool.name}`;
         pi.registerTool({
-          name: tool.name,
+          name: piToolName,
           label: tool.annotations?.title ?? `IDA ${tool.name}`,
           description: tool.description ?? `Call the IDA MCP ${tool.name} tool`,
           // MCP and Pi both use JSON Schema for tool inputs. The SDK's type is
           // structurally compatible, but it is not branded as a TypeBox schema.
           parameters: tool.inputSchema as any,
+          renderCall(args, theme, context) {
+            return renderToolCall(
+              piToolName,
+              args as Record<string, unknown> | undefined,
+              theme,
+              context.expanded,
+            );
+          },
           async execute(_id, params, signal, onUpdate, ctx) {
             if (!client) throw new Error("The IDA MCP server is not connected");
 

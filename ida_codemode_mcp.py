@@ -19,6 +19,7 @@ import importlib.metadata
 import importlib.util
 import inspect
 import json
+import os
 import queue
 import signal
 import subprocess
@@ -120,6 +121,8 @@ def _jsonl_log_path(instance_id: str, database_path: str) -> Path:
 def _session_fields() -> dict[str, Any]:
     meta = mcp.context.meta or {}
     fields: dict[str, Any] = {}
+
+    fields["codemode_id"] = os.environ.get("IDA_CODEMODE_ID") or None
 
     claude_session_path = meta.get("claude_session_path")
     if isinstance(claude_session_path, str) and claude_session_path:

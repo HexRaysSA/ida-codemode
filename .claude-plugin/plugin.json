@@ -11,7 +11,10 @@
         "${CLAUDE_PLUGIN_ROOT}",
         "ida-codemode-mcp",
         "mcp"
-      ]
+      ],
+      "env": {
+        "IDA_CODEMODE_ID": "${IDA_CODEMODE_ID}"
+      }
     }
   },
   "hooks": {

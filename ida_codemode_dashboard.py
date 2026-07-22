@@ -178,6 +178,15 @@ def _add_usage(totals: dict[str, Any], usage: dict[str, Any]) -> None:
         totals["cost_available"] = True
 
 
+def _add_totals(totals: dict[str, Any], source: dict[str, Any]) -> None:
+    for key in ("input", "output", "cache_read", "cache_write"):
+        totals[key] += source.get(key, 0)
+    totals["has_tokens"] = totals["has_tokens"] or source.get("has_tokens", False)
+    if source.get("cost_available"):
+        totals["cost"] += source.get("cost", 0.0)
+        totals["cost_available"] = True
+
+
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 
 
@@ -212,7 +221,9 @@ class BridgeLogSummary:
     closed: bool = False
     pid: int | None = None
     database_path: str | None = None
+    codemode_id: str | None = None
     agent_sessions: dict[str, str] = field(default_factory=dict)
+    agent_session_refs: set[tuple[str, str]] = field(default_factory=set)
 
     @property
     def status(self) -> str:
@@ -222,6 +233,40 @@ class BridgeLogSummary:
         if self.pid is not None and _pid_alive(self.pid):
             return "running"
         return "killed"
+
+
+def _summary_agent_sessions(summary: BridgeLogSummary) -> set[tuple[str, str]]:
+    if summary.agent_session_refs:
+        return summary.agent_session_refs
+    return set(summary.agent_sessions.items())
+
+
+@dataclass
+class AnalysisSessionGroup:
+    group_type: str  # "codemode" | "agent"
+    group_id: str
+    summaries: list[BridgeLogSummary]
+    agent_kind: str | None = None
+
+    @property
+    def agent_sessions(self) -> dict[str, str]:
+        sessions: dict[str, str] = {}
+        for summary in self.summaries:
+            for kind, path in _summary_agent_sessions(summary):
+                sessions[path] = kind
+        return sessions
+
+    @property
+    def started(self) -> datetime | None:
+        values = [summary.started for summary in self.summaries if summary.started]
+        return min(values) if values else None
+
+    @property
+    def last_activity(self) -> datetime | None:
+        values = [
+            summary.last_activity for summary in self.summaries if summary.last_activity
+        ]
+        return max(values) if values else None
 
 
 def _pid_alive(pid: int) -> bool:
@@ -261,10 +306,15 @@ def _summarize_bridge_log(path: Path) -> BridgeLogSummary:
                 summary.started = ts
             summary.last_activity = ts
 
+        codemode_id = record.get("codemode_id")
+        if isinstance(codemode_id, str) and codemode_id:
+            summary.codemode_id = codemode_id
+
         for kind in ("claude", "codex", "pi"):
             session_path = record.get(f"{kind}_session_path")
             if isinstance(session_path, str) and session_path:
                 summary.agent_sessions[kind] = session_path
+                summary.agent_session_refs.add((kind, session_path))
 
         event = record.get("event")
         payload = record.get("payload")
@@ -295,11 +345,79 @@ def _scan_bridge_logs() -> list[BridgeLogSummary]:
     summaries = [
         _summarize_bridge_log(path) for path in sorted(LOGS_DIR.glob("*.jsonl"))
     ]
-    summaries.sort(
-        key=lambda s: s.last_activity or datetime.fromtimestamp(0).astimezone(),
-        reverse=True,
-    )
+    summaries.sort(key=lambda s: s.started or _MIN_DT, reverse=True)
     return summaries
+
+
+def _group_analysis_sessions(
+    summaries: list[BridgeLogSummary],
+) -> tuple[list[AnalysisSessionGroup], list[BridgeLogSummary]]:
+    """Build explicit-ID or shared-agent groups, leaving singleton logs flat."""
+    groups: list[AnalysisSessionGroup] = []
+    flat: list[BridgeLogSummary] = []
+
+    # IDA_CODEMODE_ID is an explicit grouping boundary for benchmarks/tests.
+    codemode_candidates: dict[str, list[BridgeLogSummary]] = {}
+    untagged: list[BridgeLogSummary] = []
+    for summary in summaries:
+        if summary.codemode_id:
+            codemode_candidates.setdefault(summary.codemode_id, []).append(summary)
+        else:
+            untagged.append(summary)
+    for codemode_id, members in codemode_candidates.items():
+        has_multiple_sessions = any(
+            len(_summary_agent_sessions(summary)) > 1 for summary in members
+        )
+        if len(members) > 1 or has_multiple_sessions:
+            groups.append(AnalysisSessionGroup("codemode", codemode_id, members))
+        else:
+            flat.extend(members)
+
+    # Untagged logs form groups only when an agent session connects multiple logs.
+    parents = list(range(len(untagged)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    session_members: dict[tuple[str, str], list[int]] = {}
+    for index, summary in enumerate(untagged):
+        for session_ref in _summary_agent_sessions(summary):
+            session_members.setdefault(session_ref, []).append(index)
+    for members in session_members.values():
+        for index in members[1:]:
+            union(members[0], index)
+
+    components: dict[int, list[BridgeLogSummary]] = {}
+    for index, summary in enumerate(untagged):
+        components.setdefault(find(index), []).append(summary)
+    for members in components.values():
+        has_multiple_sessions = any(
+            len(_summary_agent_sessions(summary)) > 1 for summary in members
+        )
+        if len(members) == 1 and not has_multiple_sessions:
+            flat.extend(members)
+            continue
+        session_refs = sorted(
+            {
+                session_ref
+                for summary in members
+                for session_ref in _summary_agent_sessions(summary)
+            }
+        )
+        agent_kind, session_path = session_refs[0]
+        groups.append(
+            AnalysisSessionGroup("agent", session_path, members, agent_kind)
+        )
+
+    return groups, flat
 
 
 def _known_agent_sessions() -> dict[str, list[BridgeLogSummary]]:
@@ -310,8 +428,16 @@ def _known_agent_sessions() -> dict[str, list[BridgeLogSummary]]:
     """
     mapping: dict[str, list[BridgeLogSummary]] = {}
     for summary in _scan_bridge_logs():
-        for session_path in summary.agent_sessions.values():
+        for _kind, session_path in _summary_agent_sessions(summary):
             mapping.setdefault(session_path, []).append(summary)
+    return mapping
+
+
+def _known_codemode_groups() -> dict[str, list[BridgeLogSummary]]:
+    mapping: dict[str, list[BridgeLogSummary]] = {}
+    for summary in _scan_bridge_logs():
+        if summary.codemode_id:
+            mapping.setdefault(summary.codemode_id, []).append(summary)
     return mapping
 
 
@@ -362,6 +488,10 @@ table.sessions th::after { content: ""; opacity: 0.6; font-size: 10px; }
 table.sessions th.sort-asc::after { content: " \\2191"; }
 table.sessions th.sort-desc::after { content: " \\2193"; }
 table.sessions tr:last-child td { border-bottom: none; }
+.analysis-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.binary-links { margin-top: 6px; display: grid; gap: 3px; }
+.binary-links a { display: flex; gap: 8px; align-items: baseline; }
+.binary-links .instance { margin-left: auto; }
 .badge { display: inline-block; padding: 1px 8px; border-radius: 10px;
   font-size: 11px; font-weight: 600; border: 1px solid var(--border); }
 .badge.claude { color: #b0530a; border-color: #b0530a55; }
@@ -453,8 +583,8 @@ function sortTable(table, col, th) {
     if (x === '' && y === '') return 0;
     if (x === '') return 1;   // blanks always sort last
     if (y === '') return -1;
-    var nx = parseFloat(x), ny = parseFloat(y);
-    if (!isNaN(nx) && !isNaN(ny) && x !== '' && y !== '') return (nx - ny) * mult;
+    var nx = Number(x), ny = Number(y);
+    if (Number.isFinite(nx) && Number.isFinite(ny)) return (nx - ny) * mult;
     return x.localeCompare(y) * mult;
   });
   rows.forEach(function (r) { tbody.appendChild(r); });
@@ -598,14 +728,126 @@ def _agent_link(kind: str, session_path: str, *, link: bool = True) -> str:
 _STATUS_CSS = {"running": "open", "closed": "closed", "killed": "killed"}
 
 
+def _status_badge_value(status: str) -> str:
+    css = _STATUS_CSS.get(status, "closed")
+    return f'<span class="badge {css}">{_e(status)}</span>'
+
+
 def _status_badge(summary: BridgeLogSummary) -> str:
-    css = _STATUS_CSS.get(summary.status, "closed")
-    return f'<span class="badge {css}">{_e(summary.status)}</span>'
+    return _status_badge_value(summary.status)
 
 
 # --------------------------------------------------------------------------
 # Index page
 # --------------------------------------------------------------------------
+
+
+def _cost_cell(totals: dict[str, Any]) -> tuple[str, str]:
+    if totals["cost_available"]:
+        return _format_cost(totals["cost"]), f"{totals['cost']:.6f}"
+    if totals["has_tokens"]:
+        return (
+            '<span class="muted" title="pricing unavailable for this model">n/a</span>',
+            "",
+        )
+    return '<span class="muted">—</span>', ""
+
+
+def _summary_index_row(summary: BridgeLogSummary) -> str:
+    status = _status_badge(summary)
+    errors = (
+        f'<span class="badge error">{summary.errors} err</span>'
+        if summary.errors
+        else ""
+    )
+    cost, cost_sort = _cost_cell(_session_usage(summary))
+    started_sort = f"{summary.started.timestamp():.6f}" if summary.started else ""
+    activity_sort = (
+        f"{summary.last_activity.timestamp():.6f}"
+        if summary.last_activity
+        else ""
+    )
+    log_href = f"/log/{quote(summary.path.name)}"
+    return (
+        "<tr>"
+        f'<td data-sort="{_e(summary.target.lower())}">'
+        f'<a href="{_e(log_href)}" title="{_e(summary.target)}">'
+        f"<strong>{_e(_display_target(summary.target))}</strong></a>"
+        f'<div class="mono muted">{_e(summary.instance_id)}</div></td>'
+        f'<td data-sort="{_e(started_sort)}">{_e(_format_ts(summary.started))}</td>'
+        f'<td data-sort="{_e(activity_sort)}">'
+        f"{_e(_format_ts(summary.last_activity))}</td>"
+        f'<td data-sort="{_e(summary.status)}">{status} {errors}</td>'
+        f'<td class="mono" data-sort="{_e(cost_sort)}">{cost}</td>'
+        "</tr>"
+    )
+
+
+def _analysis_group_status(group: AnalysisSessionGroup) -> str:
+    statuses = [summary.status for summary in group.summaries]
+    if "running" in statuses:
+        return "running"
+    if statuses and all(status == "closed" for status in statuses):
+        return "closed"
+    return "killed"
+
+
+def _analysis_group_usage(group: AnalysisSessionGroup) -> dict[str, Any]:
+    totals = _blank_totals()
+    for session_path in group.agent_sessions:
+        _items, _meta, _kind, session_totals = _load_agent_items(session_path)
+        if session_totals["has_tokens"]:
+            _add_totals(totals, session_totals)
+    return totals
+
+
+def _analysis_group_index_row(group: AnalysisSessionGroup) -> str:
+    if group.group_type == "codemode":
+        session_id = group.group_id
+        kind = "codemode"
+        analysis_href = f"/analysis?id={quote(group.group_id)}"
+    else:
+        _items, meta, detected_kind, _totals = _load_agent_items(group.group_id)
+        session_id = meta.get("id") or Path(group.group_id).stem
+        kind = detected_kind if detected_kind != "unknown" else group.agent_kind or "agent"
+        analysis_href = f"/analysis?path={quote(group.group_id)}"
+    binary_links = []
+    for summary in sorted(
+        group.summaries, key=lambda item: item.started or _MIN_DT, reverse=True
+    ):
+        log_href = f"/log/{quote(summary.path.name)}"
+        binary_links.append(
+            f'<a href="{_e(log_href)}" title="{_e(summary.target)}">'
+            f'<span>{_e(_display_target(summary.target))}</span>'
+            f'<span class="mono muted instance">{_e(summary.instance_id)}</span></a>'
+        )
+    status = _analysis_group_status(group)
+    errors_count = sum(summary.errors for summary in group.summaries)
+    errors = (
+        f'<span class="badge error">{errors_count} err</span>'
+        if errors_count
+        else ""
+    )
+    cost, cost_sort = _cost_cell(_analysis_group_usage(group))
+    started_sort = f"{group.started.timestamp():.6f}" if group.started else ""
+    activity_sort = (
+        f"{group.last_activity.timestamp():.6f}" if group.last_activity else ""
+    )
+    return (
+        "<tr>"
+        f'<td data-sort="{_e(session_id.lower())}">'
+        '<div class="analysis-title">'
+        f'<a href="{_e(analysis_href)}"><strong>Analysis session</strong></a>'
+        f'<span class="badge {kind}">{_e(kind)}</span>'
+        f'<span class="mono muted">{_e(session_id)}</span></div>'
+        f'<div class="binary-links">{"".join(binary_links)}</div></td>'
+        f'<td data-sort="{_e(started_sort)}">{_e(_format_ts(group.started))}</td>'
+        f'<td data-sort="{_e(activity_sort)}">'
+        f"{_e(_format_ts(group.last_activity))}</td>"
+        f'<td data-sort="{_e(status)}">{_status_badge_value(status)} {errors}</td>'
+        f'<td class="mono" data-sort="{_e(cost_sort)}">{cost}</td>'
+        "</tr>"
+    )
 
 
 def render_index() -> str:
@@ -618,45 +860,28 @@ def render_index() -> str:
         )
         return _page("ida-codemode dashboard", body)
 
-    rows = []
-    for s in summaries:
-        status = _status_badge(s)
-        errors = f'<span class="badge error">{s.errors} err</span>' if s.errors else ""
-        totals = _session_usage(s)
-        if totals["cost_available"]:
-            cost = _format_cost(totals["cost"])
-            cost_sort = f"{totals['cost']:.6f}"
-        elif totals["has_tokens"]:
-            cost = '<span class="muted" title="pricing unavailable for this model">n/a</span>'
-            cost_sort = ""
-        else:
-            cost = '<span class="muted">—</span>'
-            cost_sort = ""
-        started_sort = s.started.isoformat() if s.started else ""
-        activity_sort = s.last_activity.isoformat() if s.last_activity else ""
-        log_href = f"/log/{quote(s.path.name)}"
-        rows.append(
-            "<tr>"
-            f'<td data-sort="{_e(s.target.lower())}">'
-            f'<a href="{_e(log_href)}" title="{_e(s.target)}">'
-            f"<strong>{_e(_display_target(s.target))}</strong></a>"
-            f'<div class="mono muted">{_e(s.instance_id)}</div></td>'
-            f'<td data-sort="{_e(started_sort)}">{_e(_format_ts(s.started))}</td>'
-            f'<td data-sort="{_e(activity_sort)}">{_e(_format_ts(s.last_activity))}</td>'
-            f'<td data-sort="{_e(s.status)}">{status} {errors}</td>'
-            f'<td class="mono" data-sort="{_e(cost_sort)}">{cost}</td>'
-            "</tr>"
-        )
+    groups, flat = _group_analysis_sessions(summaries)
+    entries: list[tuple[datetime, str]] = [
+        (group.started or _MIN_DT, _analysis_group_index_row(group))
+        for group in groups
+    ]
+    entries.extend(
+        (summary.started or _MIN_DT, _summary_index_row(summary))
+        for summary in flat
+    )
+    entries.sort(key=lambda entry: entry[0], reverse=True)
+    rows = [row for _started, row in entries]
 
     body = f"""
-<h2>Bridge sessions <span class="muted">({len(summaries)})</span></h2>
+<h2>Binary analysis <span class="muted">({len(summaries)} logs)</span></h2>
 <table class="sessions">
 <thead><tr>
-  <th>Target</th><th>Started</th><th>Last activity</th><th>Status</th><th>Cost</th>
+  <th>Analysis / target</th><th class="sort-desc" data-dir="desc">Started</th>
+  <th>Last activity</th><th>Status</th><th>Cost</th>
 </tr></thead>
 <tbody>{"".join(rows)}</tbody>
 </table>
-<p class="muted" style="font-size:12px;margin-top:8px">Click a column header to sort.</p>
+<p class="muted" style="font-size:12px;margin-top:8px">Click a column header to sort. Related logs are grouped by explicit CodeMode ID or connected agent sessions; ungrouped logs stay flat.</p>
 """
     return _page("ida-codemode dashboard", body)
 
@@ -681,6 +906,7 @@ def _render_request_card(
     request_ts: datetime | None,
     response: dict | None,
     response_ts: datetime | None,
+    title_prefix: str = "",
 ) -> str:
     payload = request.get("payload") or {}
     command = payload.get("command", "?")
@@ -722,8 +948,104 @@ def _render_request_card(
             if traceback_text:
                 parts.append(_text_block(str(traceback_text), 200, "traceback"))
 
-    title = f"{_e(command)} {status_badge}"
+    title = f"{title_prefix}{_e(command)} {status_badge}"
     return _card(title, request_ts, "".join(parts), head_extra)
+
+
+def _add_bridge_timeline(
+    records: list[dict],
+    add_event: Callable[[datetime | None, str], None],
+    source_html: str = "",
+) -> None:
+    """Add one bridge log's cards to a merged timeline."""
+    responses_by_id: dict[str, tuple[dict, datetime | None]] = {}
+    for record in records:
+        if record.get("event") == "response":
+            request_id = record.get("request_id")
+            if isinstance(request_id, str):
+                responses_by_id[request_id] = (record, _parse_ts(record.get("ts")))
+
+    title_prefix = f"{source_html} · " if source_html else ""
+    pending_output: list[str] = []
+    pending_ts: datetime | None = None
+
+    def flush_output() -> None:
+        nonlocal pending_ts
+        if not pending_output:
+            return
+        text = "\n".join(pending_output)
+        output = _text_block(text, 800, "bridge output")
+        if source_html:
+            add_event(
+                pending_ts,
+                _card(
+                    f"{source_html} · bridge output",
+                    pending_ts,
+                    f'<div class="bridgeout">{output}</div>',
+                ),
+            )
+        else:
+            add_event(
+                pending_ts,
+                f'<div class="card"><div class="body bridgeout">{output}</div></div>',
+            )
+        pending_output.clear()
+        pending_ts = None
+
+    for record in records:
+        event = record.get("event")
+        ts = _parse_ts(record.get("ts"))
+        if event == "bridge_output":
+            if pending_ts is None:
+                pending_ts = ts
+            pending_output.append(str(record.get("line", "")))
+            continue
+        flush_output()
+
+        if event == "request":
+            request_id = record.get("request_id")
+            response, response_ts = responses_by_id.get(request_id, (None, None))
+            add_event(
+                ts,
+                _render_request_card(
+                    record, ts, response, response_ts, title_prefix=title_prefix
+                ),
+            )
+        elif event == "response":
+            continue
+        elif event in ("instance_started", "process_started"):
+            details = []
+            if record.get("pid"):
+                details.append(f"pid {record['pid']}")
+            label = " · ".join(details)
+            title = f"{title_prefix}{_e(event)}"
+            if label:
+                title += f' <span class="muted">{_e(label)}</span>'
+            add_event(ts, _card(title, ts, ""))
+        elif event in ("timeout", "request_failed"):
+            add_event(
+                ts,
+                _card(
+                    f'{title_prefix}<span style="color:var(--error)">{_e(event)}</span>',
+                    ts,
+                    _json_block(
+                        {
+                            key: value
+                            for key, value in record.items()
+                            if key not in ("ts", "event")
+                        }
+                    ),
+                ),
+            )
+        elif isinstance(event, str):
+            extra = {
+                key: value
+                for key, value in record.items()
+                if key not in ("ts", "event", "instance_id")
+            }
+            body = _json_block(extra) if extra else ""
+            add_event(ts, _card(f"{title_prefix}{_e(event)}", ts, body))
+    flush_output()
 
 
 def _transcript_window(
@@ -770,15 +1092,20 @@ def _interleave_transcript(
 ) -> int:
     """Add linked-transcript conversation items to the timeline, in time order.
 
-    Only user/assistant/thinking items are added; tool calls are skipped because
-    the code-mode calls already appear as bridge events. Returns the count added.
+    IDA calls are skipped because they already appear as bridge events. Other
+    agent tool calls remain visible so the inline transcript is complete.
+    Returns the count added.
     """
     added = 0
-    for session_path in summary.agent_sessions.values():
+    for _kind, session_path in _summary_agent_sessions(summary):
         lower, upper = _transcript_window(summary, name, session_path)
         items, _meta, _kind, _totals = _load_agent_items(session_path)
         for item in items:
-            if item.category == "tool" or not _in_window(item.ts, lower, upper):
+            if (
+                item.category == "tool"
+                and item.tool_name is not None
+                and _codemode_tool_name(item.tool_name) is not None
+            ) or not _in_window(item.ts, lower, upper):
                 continue
             add_event(item.ts, f'<div class="transcript-item">{item.html}</div>')
             added += 1
@@ -793,7 +1120,7 @@ def _session_usage(summary: BridgeLogSummary) -> dict[str, Any]:
     used as-is when the instance has no windowable per-message usage.
     """
     totals = _blank_totals()
-    for session_path in summary.agent_sessions.values():
+    for _kind, session_path in _summary_agent_sessions(summary):
         lower, upper = _transcript_window(summary, summary.path.name, session_path)
         items, _meta, kind, session_totals = _load_agent_items(session_path)
         windowed = [
@@ -836,13 +1163,6 @@ def render_bridge_log(name: str, *, export: bool = False) -> str | None:
     summary = _summarize_bridge_log(path)
     records = _read_jsonl(path)
 
-    responses_by_id: dict[str, tuple[dict, datetime | None]] = {}
-    for record in records:
-        if record.get("event") == "response":
-            request_id = record.get("request_id")
-            if isinstance(request_id, str):
-                responses_by_id[request_id] = (record, _parse_ts(record.get("ts")))
-
     # Merged timeline of bridge events and (optionally) interleaved transcript
     # items. Each entry is (sort_ts, insertion_seq, html); a stable sort by
     # (ts, seq) keeps same-timestamp events in discovery order.
@@ -854,77 +1174,7 @@ def render_bridge_log(name: str, *, export: bool = False) -> str | None:
         events.append((ts or _MIN_DT, seq, html))
         seq += 1
 
-    pending_output: list[str] = []
-    pending_ts: datetime | None = None
-
-    def flush_output() -> None:
-        nonlocal pending_ts
-        if not pending_output:
-            return
-        text = "\n".join(pending_output)
-        add_event(
-            pending_ts,
-            f'<div class="card"><div class="body bridgeout">'
-            f"{_text_block(text, 800, 'bridge output')}</div></div>",
-        )
-        pending_output.clear()
-        pending_ts = None
-
-    for record in records:
-        event = record.get("event")
-        ts = _parse_ts(record.get("ts"))
-        if event == "bridge_output":
-            if pending_ts is None:
-                pending_ts = ts
-            pending_output.append(str(record.get("line", "")))
-            continue
-        flush_output()
-
-        if event == "request":
-            request_id = record.get("request_id")
-            response, response_ts = responses_by_id.get(request_id, (None, None))
-            add_event(ts, _render_request_card(record, ts, response, response_ts))
-        elif event == "response":
-            continue  # rendered together with its request
-        elif event in ("instance_started", "process_started"):
-            details = []
-            if record.get("pid"):
-                details.append(f"pid {record['pid']}")
-            label = " · ".join(details)
-            add_event(
-                ts,
-                _card(
-                    f"{_e(event)}"
-                    + (f' <span class="muted">{_e(label)}</span>' if label else ""),
-                    ts,
-                    "",
-                ),
-            )
-        elif event in ("timeout", "request_failed"):
-            add_event(
-                ts,
-                _card(
-                    f'<span style="color:var(--error)">{_e(event)}</span>',
-                    ts,
-                    _json_block(
-                        {
-                            key: value
-                            for key, value in record.items()
-                            if key not in ("ts", "event")
-                        }
-                    ),
-                ),
-            )
-        elif isinstance(event, str):
-            extra = {
-                key: value
-                for key, value in record.items()
-                if key not in ("ts", "event", "instance_id")
-            }
-            body = _json_block(extra) if extra else ""
-            add_event(ts, _card(_e(event), ts, body))
-    flush_output()
-
+    _add_bridge_timeline(records, add_event)
     transcript_count = _interleave_transcript(summary, name, add_event)
 
     events.sort(key=lambda entry: (entry[0], entry[1]))
@@ -932,7 +1182,7 @@ def render_bridge_log(name: str, *, export: bool = False) -> str | None:
 
     agents = " ".join(
         _agent_link(kind, session_path, link=not export)
-        for kind, session_path in sorted(summary.agent_sessions.items())
+        for kind, session_path in sorted(_summary_agent_sessions(summary))
     )
     totals = _session_usage(summary)
     meta_rows = [
@@ -950,6 +1200,10 @@ def render_bridge_log(name: str, *, export: bool = False) -> str | None:
         ),
         ("Agent session", agents or '<span class="muted">none recorded</span>'),
     ]
+    if summary.codemode_id:
+        meta_rows.append(
+            ("CodeMode ID", f'<span class="mono">{_e(summary.codemode_id)}</span>')
+        )
     if totals["has_tokens"]:
         meta_rows.append(("Tokens", _totals_summary_html(totals)))
     if not export:
@@ -975,11 +1229,33 @@ def render_bridge_log(name: str, *, export: bool = False) -> str | None:
             "export HTML</a>"
         )
 
-    crumbs = (
-        ""
-        if export
-        else f'<div class="crumbs"><a href="/">sessions</a> / {_e(name)}</div>'
-    )
+    if export:
+        crumbs = ""
+    else:
+        analysis_href: str | None = None
+        if summary.codemode_id and len(
+            _known_codemode_groups().get(summary.codemode_id, [])
+        ) > 1:
+            analysis_href = f"/analysis?id={quote(summary.codemode_id)}"
+        else:
+            known_sessions = _known_agent_sessions()
+            parent_session = next(
+                (
+                    session_path
+                    for _kind, session_path in _summary_agent_sessions(summary)
+                    if len(known_sessions.get(session_path, [])) > 1
+                ),
+                None,
+            )
+            if parent_session:
+                analysis_href = f"/analysis?path={quote(parent_session)}"
+        if analysis_href:
+            crumbs = (
+                '<div class="crumbs"><a href="/">analysis</a> / '
+                f'<a href="{_e(analysis_href)}">session</a> / {_e(name)}</div>'
+            )
+        else:
+            crumbs = f'<div class="crumbs"><a href="/">analysis</a> / {_e(name)}</div>'
 
     body = f"""
 {crumbs}
@@ -997,6 +1273,154 @@ def render_bridge_log(name: str, *, export: bool = False) -> str | None:
         body,
         subtitle=name,
         standalone=export,
+    )
+
+
+def render_analysis_session(
+    session_path: str = "", codemode_id: str = ""
+) -> str | None:
+    """Render all binary logs and transcripts in one inferred or explicit group."""
+    all_summaries = _scan_bridge_logs()
+    groups, _flat = _group_analysis_sessions(all_summaries)
+    group = next(
+        (
+            candidate
+            for candidate in groups
+            if (
+                codemode_id
+                and candidate.group_type == "codemode"
+                and candidate.group_id == codemode_id
+            )
+            or (
+                session_path
+                and candidate.group_type == "agent"
+                and session_path in candidate.agent_sessions
+            )
+        ),
+        None,
+    )
+    if group is None:
+        return None
+    summaries = sorted(group.summaries, key=lambda item: item.started or _MIN_DT)
+
+    session_data: list[tuple[str, str, list[TranscriptItem], dict[str, str]]] = []
+    for path, recorded_kind in sorted(group.agent_sessions.items()):
+        items, meta, detected_kind, _totals = _load_agent_items(path)
+        kind = detected_kind if detected_kind != "unknown" else recorded_kind
+        session_data.append((path, kind, items, meta))
+
+    events: list[tuple[datetime, int, str]] = []
+    seq = 0
+
+    def add_event(ts: datetime | None, event_html: str) -> None:
+        nonlocal seq
+        events.append((ts or _MIN_DT, seq, event_html))
+        seq += 1
+
+    for summary in summaries:
+        source_html = (
+            f'<a href="/log/{quote(summary.path.name)}" '
+            f'title="{_e(summary.target)}">'
+            f"{_e(_display_target(summary.target))}</a> "
+            f'<span class="mono muted">{_e(summary.instance_id)}</span>'
+        )
+        _add_bridge_timeline(
+            _read_jsonl(summary.path), add_event, source_html=source_html
+        )
+
+    transcript_count = 0
+    for _path, _kind, items, _meta in session_data:
+        for item in items:
+            if (
+                item.category == "tool"
+                and item.tool_name is not None
+                and _codemode_tool_name(item.tool_name) is not None
+            ):
+                continue
+            add_event(item.ts, f'<div class="transcript-item">{item.html}</div>')
+            transcript_count += 1
+
+    events.sort(key=lambda entry: (entry[0], entry[1]))
+    timeline_html = "".join(entry[2] for entry in events)
+
+    if group.group_type == "codemode":
+        session_id = group.group_id
+        display_kind = "codemode"
+    else:
+        primary_meta = next(
+            (meta for path, _kind, _items, meta in session_data if path == group.group_id),
+            {},
+        )
+        session_id = primary_meta.get("id") or Path(group.group_id).stem
+        kinds = {kind for _path, kind, _items, _meta in session_data}
+        display_kind = next(iter(kinds)) if len(kinds) == 1 else "multi-agent"
+
+    binary_links = []
+    for summary in summaries:
+        binary_links.append(
+            '<div class="card"><div class="body">'
+            f'<a href="/log/{quote(summary.path.name)}" title="{_e(summary.target)}">'
+            f"<strong>{_e(_display_target(summary.target))}</strong></a> "
+            f'<span class="mono muted">{_e(summary.instance_id)}</span> '
+            f"{_status_badge(summary)}"
+            f'<div class="muted">{summary.executes} execute calls · '
+            f"{summary.errors} errors · started {_e(_format_ts(summary.started))}</div>"
+            "</div></div>"
+        )
+
+    working_directories = sorted(
+        {meta["cwd"] for _path, _kind, _items, meta in session_data if meta.get("cwd")}
+    )
+    transcript_links = " ".join(
+        _agent_link(kind, path) for path, kind, _items, _meta in session_data
+    )
+    totals = _analysis_group_usage(group)
+    meta_rows = [
+        ("Session", f'<span class="mono">{_e(session_id)}</span>'),
+        ("Grouping", f'<span class="badge {display_kind}">{_e(display_kind)}</span>'),
+        (
+            "Working directory",
+            "<br>".join(f'<span class="mono">{_e(cwd)}</span>' for cwd in working_directories)
+            or '<span class="muted">not recorded</span>',
+        ),
+        ("Started", _e(_format_ts(group.started))),
+        ("Last activity", _e(_format_ts(group.last_activity))),
+        ("Binary logs", str(len(summaries))),
+        ("Agent sessions", str(len(session_data))),
+        ("Tokens", _totals_summary_html(totals))
+        if totals["has_tokens"]
+        else ("Tokens", '<span class="muted">not recorded</span>'),
+        ("Transcripts", transcript_links or '<span class="muted">none recorded</span>'),
+    ]
+    kv = "".join(
+        f'<span class="k">{key}</span><span class="v">{value}</span>'
+        for key, value in meta_rows
+    )
+    controls = [
+        '<button onclick="setAllDetails(true)">expand all</button>',
+        '<button onclick="setAllDetails(false)">collapse all</button>',
+    ]
+    if transcript_count:
+        controls.append(
+            '<button onclick="document.body.classList.toggle(\'hide-transcript\')">'
+            f"toggle transcript ({transcript_count})</button>"
+        )
+
+    body = f"""
+<div class="crumbs"><a href="/">analysis</a> / {_e(session_id)}</div>
+<h2>Analysis session <span class="badge {display_kind}">{_e(display_kind)}</span>
+<span class="muted mono">{_e(session_id)}</span></h2>
+<div class="kv">{kv}</div>
+<h2>Binaries</h2>
+{"".join(binary_links)}
+<h2>Combined timeline</h2>
+<div class="toolbar">{"".join(controls)}</div>
+{timeline_html}
+"""
+    return _page(
+        f"Analysis {session_id} — ida-codemode",
+        body,
+        subtitle=f"{len(summaries)} binary logs",
     )
 
 
@@ -1033,8 +1457,35 @@ def _message_bubble(
     )
 
 
+_CODEMODE_TOOL_NAMES = {
+    "search",
+    "open_database",
+    "execute",
+    "list_databases",
+    "close_database",
+}
+
+
+def _codemode_tool_name(tool_name: str) -> str | None:
+    """Return the underlying IDA tool name across Claude, Codex, and Pi forms."""
+    if tool_name.startswith("ida_"):
+        candidate = tool_name[4:]
+    elif tool_name.startswith("mcp__"):
+        candidate = tool_name.rsplit("__", 1)[-1]
+    elif "." in tool_name:
+        server, _, candidate = tool_name.rpartition(".")
+        if "ida" not in server.lower():
+            return None
+    else:
+        candidate = tool_name
+    return candidate if candidate in _CODEMODE_TOOL_NAMES else None
+
+
 def _tool_display_name(tool_name: str) -> str:
-    """Shorten MCP tool names like mcp__plugin_x_ida__execute to ida · execute."""
+    """Render names consistently, including Pi's ida_ prefixed tools."""
+    codemode_name = _codemode_tool_name(tool_name)
+    if tool_name.startswith("ida_") and codemode_name:
+        return f"ida · {codemode_name}"
     if not tool_name.startswith("mcp__"):
         return tool_name
     parts = tool_name.split("__")
@@ -1049,11 +1500,7 @@ def _tool_input_html(tool_name: str, tool_input: object) -> str:
     if isinstance(tool_input, dict):
         tool_input = {k: v for k, v in tool_input.items() if k != "_meta"}
         code = tool_input.get("code")
-        is_codemode = tool_name.rsplit("__", 1)[-1] in (
-            "execute",
-            "search",
-        ) or tool_name in ("execute", "search")
-        if is_codemode and isinstance(code, str):
+        if _codemode_tool_name(tool_name) in ("execute", "search") and isinstance(code, str):
             rest = {k: v for k, v in tool_input.items() if k != "code"}
             parts = [_python_block(code)]
             if rest:
@@ -1088,6 +1535,7 @@ class TranscriptItem:
     category: str  # "user" | "assistant" | "thinking" | "tool"
     html: str
     usage: dict[str, Any] | None = None  # attached once per source record
+    tool_name: str | None = None
 
 
 def _usage_line(usage: dict[str, Any]) -> str:
@@ -1209,6 +1657,7 @@ def _claude_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, 
                                 ts,
                                 sidechain,
                             ),
+                            tool_name=tool_name,
                         )
                     )
             usage = _claude_usage(message.get("usage"), model)
@@ -1254,7 +1703,40 @@ def _pi_usage(raw: object, model: str) -> dict[str, Any] | None:
     return usage
 
 
+def _pi_active_branch_records(records: list[dict]) -> list[dict]:
+    """Select Pi's active tree branch instead of rendering abandoned branches."""
+    entries = [
+        record
+        for record in records
+        if record.get("type") != "session" and isinstance(record.get("id"), str)
+    ]
+    if not entries or any("parentId" not in entry for entry in entries):
+        return records  # Legacy linear session or incomplete data.
+
+    by_id = {entry["id"]: entry for entry in entries}
+    branch: list[dict] = []
+    current: dict | None = entries[-1]
+    seen: set[str] = set()
+    while current is not None:
+        entry_id = current["id"]
+        if entry_id in seen:
+            return records
+        seen.add(entry_id)
+        branch.append(current)
+        parent_id = current.get("parentId")
+        if parent_id is None:
+            break
+        current = by_id.get(parent_id)
+        if current is None:
+            return records
+
+    branch.reverse()
+    headers = [record for record in records if record.get("type") == "session"]
+    return headers + branch
+
+
 def _pi_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, str]]:
+    records = _pi_active_branch_records(records)
     tool_results: dict[str, dict[str, Any]] = {}
     for record in records:
         if record.get("type") != "message":
@@ -1360,6 +1842,7 @@ def _pi_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, str]
                                 "".join(body_parts),
                                 ts,
                             ),
+                            tool_name=tool_name,
                         )
                     )
             usage = _pi_usage(message.get("usage"), model)
@@ -1463,6 +1946,7 @@ def _codex_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, s
                         ts,
                         "tool",
                         _message_bubble(tool_name, "toolcall", "".join(body_parts), ts),
+                        tool_name=tool_name,
                     )
                 )
         elif record_type == "response_item":
@@ -1488,6 +1972,7 @@ def _codex_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, s
                         ts,
                         "tool",
                         _message_bubble(tool_name, "toolcall", "".join(body_parts), ts),
+                        tool_name=tool_name,
                     )
                 )
     return items, meta
@@ -1665,6 +2150,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._send_download(page, f"{Path(name).stem}.html")
                 else:
                     self._not_found()
+            elif route == "/analysis":
+                params = parse_qs(url.query)
+                session_path = (params.get("path") or [""])[0]
+                codemode_id = (params.get("id") or [""])[0]
+                page = render_analysis_session(session_path, codemode_id)
+                self._send_html(page) if page else self._not_found()
             elif route == "/agent":
                 params = parse_qs(url.query)
                 session_path = (params.get("path") or [""])[0]
