@@ -29,6 +29,12 @@ codex plugin marketplace add HexRaysSA/codex-marketplace
 codex plugin add ida-codemode-mcp@HexRaysSA
 ```
 
+## Install as a Pi package
+
+```bash
+pi install git:github.com/HexRaysSA/ida-codemode-mcp
+```
+
 ## Run the MCP server standalone
 
 ```bash
@@ -76,6 +82,8 @@ When run via the Claude Code plugin, each tool call is stamped with `claude_sess
 
 When run via the Codex plugin, the bundled `.codex-plugin/hooks.json` uses the same `PreToolUse` flow through `ida-codemode-mcp report-session codex` to stamp IDA MCP tool calls with `codex_session_path`. Codex requires users to review and trust plugin-bundled hooks before they run; open `/hooks` after installing or updating the plugin if Codex reports that hooks need review. The MCP server strips `_meta` before dispatching the tool call, so this field is not part of the public tool schema.
 
+When run through the Pi extension, each MCP `tools/call` request includes the current `pi_session_path` in the protocol-level `_meta` object. The server reads it through `mcp.context.meta`, so Pi does not need an external hook or hidden tool argument. Pi sessions created with `--no-session` have no transcript path and are intentionally left unstamped.
+
 ## Dashboard
 
 A local web dashboard (stdlib only, independent of the MCP server) renders the JSONL logs visually:
@@ -89,8 +97,8 @@ It shows:
 
 - an index of all bridge sessions with status (`running`, `closed`, or `killed` based on a clean-close event and PID liveness), error counts, and the estimated model cost of each session. Long all-hex target names are collapsed to `prefix…suffix`.
 - a per-session timeline pairing each request with its response — `execute()` code is syntax-highlighted, results and bridge output are collapsible. When the session is linked to an agent transcript, the agent's user prompts, messages, and reasoning are interleaved into the timeline at their real timestamps (marked with a left accent rail), so you can read what the agent was thinking around each IDA call. Each agent turn shows its tokens in/out/cached and cost inline, and the session header sums them. A "toggle transcript" button hides/shows them. A transcript shared by several bridge instances is sliced by time so each instance shows only its own conversation.
-- cost is computed from the transcript's per-message token usage using current Claude per-model pricing (input, output, cache-write at 1.25×, cache-read at 0.10×). Codex sessions show token totals but no cost (OpenAI pricing isn't tracked).
-- a standalone rendering of the linked Claude Code or Codex transcript (user/assistant messages, thinking, tool calls with their results), when the session was stamped via the plugin hooks
+- cost is computed from Claude transcripts using current per-model pricing (input, output, cache-write at 1.25×, cache-read at 0.10×); Pi uses the per-message cost recorded in its transcript. Codex sessions show token totals but no cost (OpenAI pricing isn't tracked).
+- a standalone rendering of the linked Claude Code, Codex, or Pi transcript (user/assistant messages, thinking, tool calls with their results), when the session was stamped via the plugin hooks
 
 ### Sharing a session
 

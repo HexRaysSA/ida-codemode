@@ -129,6 +129,10 @@ def _session_fields() -> dict[str, Any]:
     if isinstance(codex_session_path, str) and codex_session_path:
         fields["codex_session_path"] = codex_session_path
 
+    pi_session_path = meta.get("pi_session_path")
+    if isinstance(pi_session_path, str) and pi_session_path:
+        fields["pi_session_path"] = pi_session_path
+
     return fields
 
 

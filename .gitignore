@@ -6,8 +6,9 @@ dist/
 wheels/
 *.egg-info
 
-# Virtual environments
+# Virtual environments and Node dependencies
 .venv
+node_modules/
 
 # Runtime logs
 .ida-codemode/

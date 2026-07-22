@@ -2,8 +2,8 @@
 
 Serves a local HTTP UI (stdlib only, no extra dependencies) that lists the
 JSONL bridge logs in ~/.ida-codemode/logs and renders them as a timeline.
-When a bridge log references a Claude Code or Codex session transcript, the
-dashboard links to a visual rendering of that transcript as well.
+When a bridge log references a Claude Code, Codex, or Pi session transcript,
+the dashboard links to a visual rendering of that transcript as well.
 
 Run with: ida-codemode-dashboard [--host 127.0.0.1] [--port 8736] [--open]
 """
@@ -261,7 +261,7 @@ def _summarize_bridge_log(path: Path) -> BridgeLogSummary:
                 summary.started = ts
             summary.last_activity = ts
 
-        for kind in ("claude", "codex"):
+        for kind in ("claude", "codex", "pi"):
             session_path = record.get(f"{kind}_session_path")
             if isinstance(session_path, str) and session_path:
                 summary.agent_sessions[kind] = session_path
@@ -366,6 +366,7 @@ table.sessions tr:last-child td { border-bottom: none; }
   font-size: 11px; font-weight: 600; border: 1px solid var(--border); }
 .badge.claude { color: #b0530a; border-color: #b0530a55; }
 .badge.codex { color: var(--ok); border-color: var(--ok); }
+.badge.pi { color: var(--accent); border-color: var(--accent); }
 .badge.open { color: var(--ok); border-color: var(--ok); }
 .badge.closed { color: var(--muted); }
 .badge.killed { color: var(--error); border-color: var(--error); opacity: 0.75; }
@@ -787,7 +788,7 @@ def _interleave_transcript(
 def _session_usage(summary: BridgeLogSummary) -> dict[str, Any]:
     """Token/cost totals for one bridge instance, scoped to its time window.
 
-    Claude usage is summed per-message within the window. Codex has only
+    Claude and Pi usage is summed per-message within the window. Codex has only
     whole-session cumulative counts (no per-message data, no cost), so those are
     used as-is when the instance has no windowable per-message usage.
     """
@@ -1000,13 +1001,15 @@ def render_bridge_log(name: str, *, export: bool = False) -> str | None:
 
 
 # --------------------------------------------------------------------------
-# Agent transcript pages (Claude Code + Codex)
+# Agent transcript pages (Claude Code + Codex + Pi)
 # --------------------------------------------------------------------------
 
 
 def _detect_agent_kind(records: list[dict]) -> str:
     for record in records:
         record_type = record.get("type")
+        if record_type == "session" and "version" in record:
+            return "pi"
         if record_type in (
             "session_meta",
             "response_item",
@@ -1234,6 +1237,139 @@ def _claude_usage(raw: object, model: str) -> dict[str, Any] | None:
     return usage
 
 
+def _pi_usage(raw: object, model: str) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    usage = {
+        "input": int(raw.get("input", 0) or 0),
+        "output": int(raw.get("output", 0) or 0),
+        "cache_read": int(raw.get("cacheRead", 0) or 0),
+        "cache_write": int(raw.get("cacheWrite", 0) or 0),
+        "model": model,
+    }
+    if not any(usage[k] for k in ("input", "output", "cache_read", "cache_write")):
+        return None
+    cost = raw.get("cost")
+    usage["cost"] = cost.get("total") if isinstance(cost, dict) else None
+    return usage
+
+
+def _pi_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, str]]:
+    tool_results: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if record.get("type") != "message":
+            continue
+        message = record.get("message") or {}
+        if message.get("role") != "toolResult":
+            continue
+        tool_call_id = message.get("toolCallId")
+        if isinstance(tool_call_id, str):
+            tool_results[tool_call_id] = message
+
+    meta: dict[str, str] = {}
+    items: list[TranscriptItem] = []
+    for record in records:
+        record_type = record.get("type")
+        ts = _parse_ts(record.get("timestamp"))
+
+        if record_type == "session":
+            for key in ("id", "cwd", "version", "parentSession"):
+                value = record.get(key)
+                if value is not None:
+                    meta[key] = str(value)
+            continue
+        if record_type != "message":
+            continue
+
+        message = record.get("message") or {}
+        role = message.get("role")
+        content = message.get("content")
+        if role == "user":
+            texts: list[str] = []
+            if isinstance(content, str):
+                texts.append(content)
+            elif isinstance(content, list):
+                texts.extend(
+                    str(part.get("text", ""))
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                )
+            for text in texts:
+                if text.strip():
+                    items.append(
+                        TranscriptItem(
+                            ts,
+                            "user",
+                            _message_bubble(
+                                "user", "user", _render_markdownish(text), ts
+                            ),
+                        )
+                    )
+        elif role == "assistant":
+            model = str(message.get("model", ""))
+            provider = str(message.get("provider", ""))
+            who = "/".join(part for part in (provider, model) if part) or "assistant"
+            record_items: list[TranscriptItem] = []
+            for part in content if isinstance(content, list) else []:
+                if not isinstance(part, dict):
+                    continue
+                part_type = part.get("type")
+                if part_type == "text":
+                    text = str(part.get("text", "")).strip()
+                    if text:
+                        record_items.append(
+                            TranscriptItem(
+                                ts,
+                                "assistant",
+                                _message_bubble(
+                                    who, "assistant", _render_markdownish(text), ts
+                                ),
+                            )
+                        )
+                elif part_type == "thinking":
+                    thinking = str(part.get("thinking", "")).strip()
+                    if thinking:
+                        record_items.append(
+                            TranscriptItem(
+                                ts,
+                                "thinking",
+                                f"<details><summary>thinking</summary>"
+                                f'<div class="msg"><div class="text">{_e(thinking)}'
+                                f"</div></div></details>",
+                            )
+                        )
+                elif part_type == "toolCall":
+                    tool_name = str(part.get("name", "tool"))
+                    body_parts = [
+                        _tool_input_html(tool_name, part.get("arguments"))
+                    ]
+                    tool_call_id = part.get("id")
+                    result = tool_results.get(tool_call_id)
+                    if result is not None:
+                        result_text = _tool_result_text(result.get("content"))
+                        if result_text.strip():
+                            label = "error" if result.get("isError") else "result"
+                            body_parts.append(_text_block(result_text, 700, label))
+                    record_items.append(
+                        TranscriptItem(
+                            ts,
+                            "tool",
+                            _message_bubble(
+                                _tool_display_name(tool_name),
+                                "toolcall",
+                                "".join(body_parts),
+                                ts,
+                            ),
+                        )
+                    )
+            usage = _pi_usage(message.get("usage"), model)
+            if usage and record_items:
+                record_items[0].usage = usage
+                record_items[0].html += _usage_line(usage)
+            items.extend(record_items)
+    return items, meta
+
+
 def _codex_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, str]]:
     call_outputs: dict[str, str] = {}
     for record in records:
@@ -1413,6 +1549,12 @@ def _load_agent_items(
     if kind == "codex":
         items, meta = _codex_items(records)
         totals = _codex_session_totals(records)
+    elif kind == "pi":
+        items, meta = _pi_items(records)
+        totals = _blank_totals()
+        for item in items:
+            if item.usage:
+                _add_usage(totals, item.usage)
     else:
         items, meta = _claude_items(records)
         totals = _blank_totals()

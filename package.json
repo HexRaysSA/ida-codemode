@@ -1,0 +1,40 @@
+{
+  "name": "ida-codemode-mcp",
+  "version": "0.1.0",
+  "description": "IDA Code Mode MCP server and Pi extension",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "ida",
+    "reverse-engineering",
+    "mcp"
+  ],
+  "repository": "https://github.com/HexRaysSA/ida-codemode-mcp.git",
+  "pi": {
+    "extensions": [
+      "./extensions/ida-codemode.ts"
+    ]
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "overrides": {
+    "@hono/node-server": "2.0.11"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.7",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck extensions/ida-codemode.ts"
+  }
+}
