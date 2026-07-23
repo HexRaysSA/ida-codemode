@@ -1,7 +1,7 @@
 """IDA Domain Code Mode MCP server.
 
 This server exposes a compact Code Mode surface for the ida-domain API:
-- search(code): inspect a generated API spec built from the active ida-domain checkout/package
+- reference(query): look up the active ida-domain API reference
 - open_database(...): spawn a long-lived idalib bridge instance for a local target
 - execute(code): run Python against an already-open database with ida-domain preloaded
 - list_databases(): inspect active bridge instances
@@ -21,6 +21,7 @@ import inspect
 import json
 import os
 import queue
+import re
 import signal
 import subprocess
 import sys
@@ -41,48 +42,14 @@ from zeromcp import McpServer, McpToolError
 MODULE_PATH = Path(__file__).resolve()
 STATE_DIR = Path.home() / ".ida-codemode"
 JSONL_LOG_DIR = STATE_DIR / "logs"
-RESULT_MARKER = "CODEMODE_RESULT_JSON:"
 BRIDGE_MARKER = "CODEMODE_BRIDGE_JSON:"
-SEARCH_TIMEOUT_SECONDS = 15
 OPEN_TIMEOUT_SECONDS = 300
 EXECUTE_TIMEOUT_SECONDS = 300
 CLOSE_TIMEOUT_SECONDS = 60
 LOG_TAIL_LINES = 100
 
-SAFE_SEARCH_BUILTINS = {
-    "abs": abs,
-    "all": all,
-    "any": any,
-    "bool": bool,
-    "dict": dict,
-    "enumerate": enumerate,
-    "filter": filter,
-    "float": float,
-    "getattr": getattr,
-    "hasattr": hasattr,
-    "int": int,
-    "isinstance": isinstance,
-    "issubclass": issubclass,
-    "len": len,
-    "list": list,
-    "map": map,
-    "max": max,
-    "min": min,
-    "print": print,
-    "range": range,
-    "repr": repr,
-    "reversed": reversed,
-    "round": round,
-    "set": set,
-    "sorted": sorted,
-    "str": str,
-    "sum": sum,
-    "tuple": tuple,
-    "zip": zip,
-}
-
 mcp = McpServer("ida", version="0.2.0")
-_SEARCH_SPEC_CACHE: dict[str, Any] | None = None
+_REFERENCE_SPEC_CACHE: dict[str, Any] | None = None
 
 
 def _find_ida_domain_package_path() -> Path:
@@ -173,11 +140,6 @@ def _install_hook_input_meta_adapter() -> None:
 _install_hook_input_meta_adapter()
 
 
-def _summarize_text(text: str, max_lines: int = 8) -> str:
-    lines = [line.rstrip() for line in text.strip().splitlines() if line.strip()]
-    return "\n".join(lines[:max_lines])
-
-
 def _signature_from_function_node(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     def fmt_annotation(annotation: ast.AST | None) -> str:
         return ast.unparse(annotation) if annotation is not None else ""
@@ -250,15 +212,14 @@ def _public_or_private(name: str) -> str:
     return "private" if name.startswith("_") else "public"
 
 
-def _build_search_spec() -> dict[str, Any]:
-    global _SEARCH_SPEC_CACHE
-    if _SEARCH_SPEC_CACHE is not None:
-        return _SEARCH_SPEC_CACHE
+def _build_reference_spec() -> dict[str, Any]:
+    global _REFERENCE_SPEC_CACHE
+    if _REFERENCE_SPEC_CACHE is not None:
+        return _REFERENCE_SPEC_CACHE
 
     package_root = _find_ida_domain_package_path()
     source_root = _find_ida_domain_source_root()
 
-    modules: list[dict[str, Any]] = []
     entries: list[dict[str, Any]] = []
 
     for path in sorted(package_root.rglob("*.py")):
@@ -269,19 +230,6 @@ def _build_search_spec() -> dict[str, Any]:
         tree = ast.parse(source, filename=str(path))
         module_name = _module_name_for(path, package_root)
         module_doc = ast.get_docstring(tree) or ""
-        module_info: dict[str, Any] = {
-            "kind": "module",
-            "name": module_name,
-            "qualname": module_name,
-            "file": _relative_path(path, source_root),
-            "doc": module_doc,
-            "summary": _summarize_text(module_doc),
-            "line": 1,
-            "visibility": _public_or_private(path.stem),
-            "classes": [],
-            "functions": [],
-        }
-        modules.append(module_info)
         entries.append(
             {
                 "kind": "module",
@@ -291,7 +239,6 @@ def _build_search_spec() -> dict[str, Any]:
                 "file": _relative_path(path, source_root),
                 "line": 1,
                 "doc": module_doc,
-                "summary": _summarize_text(module_doc),
                 "visibility": _public_or_private(path.stem),
             }
         )
@@ -304,14 +251,13 @@ def _build_search_spec() -> dict[str, Any]:
                     "name": node.name,
                     "qualname": f"{module_name}.{node.name}",
                     "signature": _signature_from_function_node(node),
+                    "decorators": [ast.unparse(item) for item in node.decorator_list],
                     "file": _relative_path(path, source_root),
                     "line": node.lineno,
                     "doc": ast.get_docstring(node) or "",
-                    "summary": _summarize_text(ast.get_docstring(node) or ""),
                     "visibility": _public_or_private(node.name),
                     "async": isinstance(node, ast.AsyncFunctionDef),
                 }
-                module_info["functions"].append(function_info)
                 entries.append(function_info)
                 continue
 
@@ -325,11 +271,8 @@ def _build_search_spec() -> dict[str, Any]:
                     "file": _relative_path(path, source_root),
                     "line": node.lineno,
                     "doc": ast.get_docstring(node) or "",
-                    "summary": _summarize_text(ast.get_docstring(node) or ""),
                     "visibility": _public_or_private(node.name),
-                    "methods": [],
                 }
-                module_info["classes"].append(class_info)
                 entries.append(class_info)
 
                 for child in node.body:
@@ -342,36 +285,14 @@ def _build_search_spec() -> dict[str, Any]:
                         "name": child.name,
                         "qualname": f"{module_name}.{node.name}.{child.name}",
                         "signature": _signature_from_function_node(child),
+                        "decorators": [ast.unparse(item) for item in child.decorator_list],
                         "file": _relative_path(path, source_root),
                         "line": child.lineno,
                         "doc": ast.get_docstring(child) or "",
-                        "summary": _summarize_text(ast.get_docstring(child) or ""),
                         "visibility": _public_or_private(child.name),
                         "async": isinstance(child, ast.AsyncFunctionDef),
                     }
-                    class_info["methods"].append(method_info)
                     entries.append(method_info)
-
-    docs: list[dict[str, Any]] = []
-    docs_root = package_root / "_docs"
-    if docs_root.exists():
-        for path in sorted(docs_root.rglob("*.md")):
-            text = path.read_text(encoding="utf-8")
-            title = next(
-                (
-                    line.lstrip("# ").strip()
-                    for line in text.splitlines()
-                    if line.startswith("#")
-                ),
-                path.stem,
-            )
-            docs.append(
-                {
-                    "path": _relative_path(path, source_root),
-                    "title": title,
-                    "summary": _summarize_text(text),
-                }
-            )
 
     examples: list[dict[str, Any]] = []
     examples_root = package_root / "_examples"
@@ -384,27 +305,130 @@ def _build_search_spec() -> dict[str, Any]:
                 {
                     "path": _relative_path(path, source_root),
                     "name": path.stem,
-                    "summary": _summarize_text(doc or source),
+                    "doc": doc,
+                    "content": source,
                 }
             )
 
-    _SEARCH_SPEC_CACHE = {
-        "package": "ida_domain",
+    _REFERENCE_SPEC_CACHE = {
         "version": _get_ida_domain_version(),
-        "root": str(source_root),
-        "package_root": str(package_root),
-        "modules": modules,
         "entries": entries,
-        "docs": docs,
         "examples": examples,
-        "counts": {
-            "modules": len(modules),
-            "entries": len(entries),
-            "docs": len(docs),
-            "examples": len(examples),
-        },
     }
-    return _SEARCH_SPEC_CACHE
+    return _REFERENCE_SPEC_CACHE
+
+
+def _reference_tokens(query: str) -> list[str]:
+    tokens = re.findall(r"[a-z0-9_]+", query.casefold())
+    stopwords = {
+        "a",
+        "an",
+        "and",
+        "do",
+        "for",
+        "from",
+        "how",
+        "i",
+        "ida",
+        "in",
+        "of",
+        "the",
+        "to",
+        "with",
+    }
+    return [token for token in tokens if token not in stopwords]
+
+
+def _reference_score(item: dict[str, Any], query: str, tokens: list[str]) -> int:
+    item_name = str(item.get("name", "")).casefold()
+    name = " ".join(
+        str(item.get(field, "")).casefold() for field in ("name", "qualname", "title")
+    )
+    body = " ".join(
+        str(item.get(field, "")).casefold()
+        for field in ("doc", "content")
+    )
+    score = 100 if query in name or query in body else 0
+    for token in tokens:
+        variants = {token, token.removesuffix("s")}
+        score += 12 * sum(variant in name for variant in variants if variant)
+        score += 2 * sum(variant in body for variant in variants if variant)
+        if item_name in variants:
+            score += 40
+    if score and "property" in item.get("decorators", []):
+        score += 20
+    return score
+
+
+def _format_reference_entry(entry: dict[str, Any]) -> str:
+    decorators = entry.get("decorators", [])
+    prefix = "".join(f"@{decorator}\n" for decorator in decorators)
+    signature = entry.get("signature", "")
+    heading = f"{entry['kind']} {entry['qualname']}{signature}"
+    doc = str(entry.get("doc", "")).strip()
+    location = f"{entry['file']}:{entry['line']}"
+    return f"{prefix}{heading}\n{doc}\nSource: {location}".strip()
+
+
+def _render_reference(query: str) -> str:
+    query = query.strip()
+    if not query:
+        raise McpToolError("reference query must not be empty")
+
+    spec = _build_reference_spec()
+    normalized_query = query.casefold()
+    tokens = _reference_tokens(query) or [normalized_query]
+
+    entries = [
+        (_reference_score(entry, normalized_query, tokens), entry)
+        for entry in spec["entries"]
+        if entry.get("visibility") == "public"
+        and "._docs." not in entry["qualname"]
+        and "._examples." not in entry["qualname"]
+    ]
+    entries = [item for item in entries if item[0] > 0]
+    entries.sort(key=lambda item: (-item[0], item[1]["qualname"]))
+
+    examples = [
+        (
+            _reference_score(
+                {"name": example["name"], "doc": example["doc"]},
+                normalized_query,
+                tokens,
+            ),
+            example,
+        )
+        for example in spec["examples"]
+    ]
+    examples = [item for item in examples if item[0] > 0]
+    examples.sort(key=lambda item: (-item[0], item[1]["name"]))
+
+    sections = [
+        f"IDA Domain API reference {spec['version']}",
+        f"Query: {query}",
+    ]
+    if entries:
+        sections.append(
+            "API entries:\n\n"
+            + "\n\n---\n\n".join(
+                _format_reference_entry(entry) for _, entry in entries[:20]
+            )
+        )
+    if examples:
+        sections.append(
+            "Examples:\n\n"
+            + "\n\n---\n\n".join(
+                f"Example: {example['name']} ({example['path']})\n"
+                f"```python\n{example['content'].rstrip()}\n```"
+                for _, example in examples[:1]
+            )
+        )
+    if not entries and not examples:
+        sections.append(
+            "No matching public API entries or examples were found. "
+            "Try a class, method, or concept such as functions, strings, imports, or xrefs."
+        )
+    return "\n\n".join(sections)
 
 
 def _find_callable_from_code(
@@ -503,27 +527,6 @@ def _jsonify(value: Any) -> Any:
     return repr(value)
 
 
-async def _run_search_worker(code: str) -> Any:
-    spec = _build_search_spec()
-    runtime = {
-        "spec": spec,
-        "entries": spec["entries"],
-        "modules": spec["modules"],
-        "docs": spec["docs"],
-        "examples": spec["examples"],
-        "counts": spec["counts"],
-        "json": json,
-    }
-    global_ns = {
-        "__builtins__": SAFE_SEARCH_BUILTINS,
-        "__name__": "__codemode_search__",
-        **runtime,
-    }
-    func = _find_callable_from_code(code, global_ns, ["run", "search", "main"])
-    result = await _invoke_user_callable(func, runtime)
-    return _jsonify(result)
-
-
 def _database_info(db: Any, state: dict[str, Any]) -> dict[str, Any]:
     info: dict[str, Any] = {
         "path": state["path"],
@@ -566,75 +569,6 @@ async def _run_bridge_execute(code: str, runtime: dict[str, Any]) -> Any:
     func = _find_callable_from_code(code, global_ns, ["run", "execute", "main"])
     result = await _invoke_user_callable(func, runtime)
     return _jsonify(result)
-
-
-def _emit_worker_result(payload: dict[str, Any]) -> int:
-    print(f"{RESULT_MARKER}{json.dumps(payload)}")
-    return 0 if payload.get("ok") else 1
-
-
-def _worker_main(mode: str) -> int:
-    payload = json.load(sys.stdin)
-    code = payload.get("code", "")
-
-    try:
-        if mode != "search":
-            raise ValueError(f"unsupported worker mode: {mode}")
-        result = asyncio.run(_run_search_worker(code))
-        return _emit_worker_result({"ok": True, "result": result})
-    except Exception:
-        return _emit_worker_result(
-            {
-                "ok": False,
-                "error": traceback.format_exc().splitlines()[-1],
-                "traceback": traceback.format_exc(),
-            }
-        )
-
-
-def _extract_worker_payload(output: str) -> dict[str, Any]:
-    for line in reversed(output.splitlines()):
-        if line.startswith(RESULT_MARKER):
-            return json.loads(line[len(RESULT_MARKER) :])
-    raise McpToolError(
-        "worker did not produce a structured result. Raw output:\n" + output.strip()
-    )
-
-
-def _run_code_in_subprocess(mode: str, code: str, timeout: int) -> Any:
-    payload = json.dumps({"code": code})
-    command = [
-        sys.executable,
-        "-u",
-        str(MODULE_PATH),
-        "--internal-mode",
-        f"{mode}-worker",
-    ]
-
-    try:
-        completed = subprocess.run(
-            command,
-            input=payload,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise McpToolError(f"{mode} code timed out after {timeout} seconds") from exc
-
-    combined_output = "\n".join(
-        part for part in [completed.stdout.strip(), completed.stderr.strip()] if part
-    )
-    worker_payload = _extract_worker_payload(completed.stdout)
-
-    if not worker_payload.get("ok"):
-        error = worker_payload.get("error", "unknown error")
-        tb = worker_payload.get("traceback", "")
-        extra = f"\n\nWorker output:\n{combined_output}" if combined_output else ""
-        raise McpToolError(f"{error}\n\n{tb}{extra}".strip())
-
-    return worker_payload.get("result")
 
 
 class _BridgeInstance:
@@ -1141,19 +1075,14 @@ def _bridge_instance_main() -> int:
 
 
 @mcp.tool
-def search(
-    code: Annotated[
+def reference(
+    query: Annotated[
         str,
-        (
-            "Python code that searches the active ida-domain API spec. "
-            "The runtime exposes spec, entries, modules, docs, examples, and counts. "
-            "Return JSON-serializable data. Define run(...), search(...), main(...), "
-            "or pass a lambda expression."
-        ),
+        "Class, method, or reverse-engineering concept to look up in the IDA reference.",
     ],
-):
-    """Search the active ida-domain API spec."""
-    return _run_code_in_subprocess("search", code, SEARCH_TIMEOUT_SECONDS)
+) -> str:
+    """Look up the active ida-domain API and return a plain-text IDA reference."""
+    return _render_reference(query)
 
 
 @mcp.tool
@@ -1198,6 +1127,7 @@ def execute(
         str,
         (
             "Python code that runs against an already-open database bridge instance. "
+            "Use the IDA reference tool before calling execute; do not guess the API shape. "
             "The runtime exposes db, ida_domain, Database, IdaCommandOptions, database_path, "
             "database_options, json, and to_jsonable(). Return JSON-serializable data. "
             "Define run(...), execute(...), main(...), or pass a lambda expression."
@@ -1208,7 +1138,7 @@ def execute(
         "Optional database instance id. If omitted, execute() uses the current open_database() target.",
     ] = None,
 ) -> dict[str, Any]:
-    """Execute Python code against an already-open ida-domain bridge instance."""
+    """Execute Python against an open database. Use the IDA reference tool first."""
     return BRIDGE_MANAGER.execute(code, instance_id)
 
 
@@ -1227,81 +1157,6 @@ def close_database(
 ) -> dict[str, Any]:
     """Close an active database bridge instance, always saving changes to disk."""
     return BRIDGE_MANAGER.close_database(instance_id)
-
-
-@mcp.resource("ida://spec-summary")
-def spec_summary_resource() -> dict[str, Any]:
-    """Summary of the generated ida-domain search spec."""
-    spec = _build_search_spec()
-    return {
-        "root": spec["root"],
-        "counts": spec["counts"],
-        "top_modules": [module["name"] for module in spec["modules"][:10]],
-        "top_docs": spec["docs"][:10],
-        "top_examples": spec["examples"][:10],
-    }
-
-
-@mcp.resource("ida://instances")
-def instances_resource() -> dict[str, Any]:
-    """Current database bridge instances."""
-    return BRIDGE_MANAGER.list_databases()
-
-
-@mcp.prompt
-def codemode_examples() -> str:
-    """Show examples for the search(), open_database(), execute(), and close_database() tools."""
-    return """Use search() to inspect the ida-domain API metadata. Then open_database() once, run many execute() calls against the live db object, and finally close_database() when done.
-
-search() example:
-```python
-lambda entries: [
-    {
-        "qualname": entry["qualname"],
-        "signature": entry.get("signature"),
-        "summary": entry.get("summary"),
-    }
-    for entry in entries
-    if entry["kind"] in {"function", "method"}
-    and "Database.open" in entry["qualname"]
-]
-```
-
-open_database() example:
-```json
-{
-  "path": "/path/to/binary-or-idb",
-  "auto_analysis": true,
-  "set_current": true
-}
-```
-
-execute() example:
-```python
-def run(db, to_jsonable):
-    functions = []
-    for index, func in enumerate(db.functions):
-        if index >= 10:
-            break
-        functions.append({
-            "name": db.functions.get_name(func),
-            "start_ea": hex(func.start_ea),
-            "end_ea": hex(func.end_ea),
-        })
-    return to_jsonable({
-        "minimum_ea": hex(db.minimum_ea),
-        "maximum_ea": hex(db.maximum_ea),
-        "functions": functions,
-    })
-```
-
-close_database() example (changes are always saved to disk):
-```json
-{
-  "instance_id": "abc123"
-}
-```
-"""
 
 
 def _serve(transport: str) -> None:
@@ -1425,7 +1280,7 @@ def cli() -> int:
     )
     parser.add_argument(
         "--internal-mode",
-        choices=["search-worker", "bridge-worker"],
+        choices=["bridge-worker"],
         default=None,
         help=argparse.SUPPRESS,
     )
@@ -1450,8 +1305,6 @@ def cli() -> int:
 
     args = parser.parse_args()
 
-    if args.internal_mode == "search-worker":
-        return _worker_main("search")
     if args.internal_mode == "bridge-worker":
         return _bridge_instance_main()
     if args.command == "report-session":

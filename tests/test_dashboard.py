@@ -264,6 +264,8 @@ class AnalysisGroupingTests(unittest.TestCase):
 class ToolNameTests(unittest.TestCase):
     def test_pi_prefixed_ida_tools_are_recognized_and_rendered(self) -> None:
         self.assertEqual(dashboard._codemode_tool_name("ida_execute"), "execute")
+        self.assertEqual(dashboard._codemode_tool_name("ida_reference"), "reference")
+        self.assertEqual(dashboard._codemode_tool_name("ida_search"), "search")
         self.assertEqual(
             dashboard._tool_display_name("ida_open_database"),
             "ida · open_database",
@@ -276,6 +278,12 @@ class ToolNameTests(unittest.TestCase):
         self.assertIn("<pre><code>", rendered)
         self.assertIn("def", rendered)
         self.assertNotIn("other arguments", rendered)
+
+        legacy_search = dashboard._tool_input_html(
+            "ida_search", {"code": "lambda entries: entries[:1]"}
+        )
+        self.assertIn("<pre><code>", legacy_search)
+        self.assertIn("lambda", legacy_search)
 
 
 class PiSessionTests(unittest.TestCase):

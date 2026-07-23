@@ -4,7 +4,7 @@ A [Code Mode](https://blog.cloudflare.com/code-mode/) MCP server for the [IDA Do
 
 It uses a centralized bridge architecture:
 
-- `search(code)` — search a generated API spec built from the `ida-domain` package
+- `reference(query)` — look up the active `ida-domain` API reference as plain text
 - `open_database(...)` — spawn a long-lived idalib bridge instance for a local target
 - `execute(code)` — run Python against an already-open `db` with `ida-domain` preloaded
 - `list_databases()` — inspect active bridge instances and their JSONL log paths
@@ -43,7 +43,7 @@ uv run ida-codemode-mcp mcp                              # stdio (default)
 uv run ida-codemode-mcp mcp --transport http://127.0.0.1:5001
 ```
 
-`ida-domain` is pulled directly from git (see `[tool.uv.sources]` in `pyproject.toml`). The wheel ships `docs/` and `examples/` inside the package as `ida_domain/_docs/` and `ida_domain/_examples/`, which the `search()` tool inspects via `importlib.util.find_spec`.
+`ida-domain` is pulled directly from git (see `[tool.uv.sources]` in `pyproject.toml`). The wheel ships `docs/` and `examples/` inside the package as `ida_domain/_docs/` and `ida_domain/_examples/`, which the `reference()` tool indexes via `importlib.util.find_spec`.
 
 ## Architecture
 
@@ -82,7 +82,7 @@ When run via the Claude Code plugin, each tool call is stamped with `claude_sess
 
 When run via the Codex plugin, the bundled `.codex-plugin/hooks.json` uses the same `PreToolUse` flow through `ida-codemode-mcp report-session codex` to stamp IDA MCP tool calls with `codex_session_path`. Codex requires users to review and trust plugin-bundled hooks before they run; open `/hooks` after installing or updating the plugin if Codex reports that hooks need review. The MCP server strips `_meta` before dispatching the tool call, so this field is not part of the public tool schema.
 
-When run through the Pi extension, each MCP `tools/call` request includes the current `pi_session_path` in the protocol-level `_meta` object. The server reads it through `mcp.context.meta`, so Pi does not need an external hook or hidden tool argument. Pi sessions created with `--no-session` have no transcript path and are intentionally left unstamped. The Pi TUI renders tool arguments and syntax-highlights the Python passed to `ida_search()` and `ida_execute()`; snippets longer than 10 lines can be expanded with Pi's tool-expansion keybinding.
+When run through the Pi extension, each MCP `tools/call` request includes the current `pi_session_path` in the protocol-level `_meta` object. The server reads it through `mcp.context.meta`, so Pi does not need an external hook or hidden tool argument. Pi sessions created with `--no-session` have no transcript path and are intentionally left unstamped. The Pi TUI renders tool arguments and syntax-highlights the Python passed to `ida_execute()`; snippets longer than 10 lines can be expanded with Pi's tool-expansion keybinding.
 
 ## Dashboard
 
@@ -112,26 +112,19 @@ The MCP supervisor installs `SIGINT`/`SIGTERM` handlers and an `atexit` shutdown
 
 ## Typical flow
 
-1. Search the API surface if needed.
+1. Use the IDA reference to look up the API needed for the task.
 2. Open a local target.
 3. Run one or more `execute()` calls against the live `db`.
 4. Close the instance when finished.
 
 ## Examples
 
-Search the generated ida-domain spec:
+Look up the ida-domain API reference:
 
-```python
-lambda entries: [
-    {
-        "qualname": entry["qualname"],
-        "signature": entry.get("signature"),
-        "summary": entry.get("summary"),
-    }
-    for entry in entries
-    if entry["kind"] in {"function", "method"}
-    and "Database.open" in entry["qualname"]
-]
+```json
+{
+  "query": "list functions and retrieve their names and addresses"
+}
 ```
 
 Open a database:
@@ -173,3 +166,13 @@ Close the current database (changes are always saved to disk):
   "instance_id": "abc123"
 }
 ```
+
+## Testing
+
+To test the MCP server itself:
+
+```sh
+npx -y @modelcontextprotocol/inspector
+```
+
+This will open a web interface at http://localhost:5173 and allow you to interact with the MCP tools for testing.

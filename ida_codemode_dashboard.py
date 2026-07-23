@@ -1459,6 +1459,7 @@ def _message_bubble(
 
 _CODEMODE_TOOL_NAMES = {
     "search",
+    "reference",
     "open_database",
     "execute",
     "list_databases",
