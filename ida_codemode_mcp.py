@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import argparse
 import ast
-import atexit
 import asyncio
+import atexit
 import builtins
 import importlib.metadata
 import importlib.util
@@ -285,7 +285,9 @@ def _build_reference_spec() -> dict[str, Any]:
                         "name": child.name,
                         "qualname": f"{module_name}.{node.name}.{child.name}",
                         "signature": _signature_from_function_node(child),
-                        "decorators": [ast.unparse(item) for item in child.decorator_list],
+                        "decorators": [
+                            ast.unparse(item) for item in child.decorator_list
+                        ],
                         "file": _relative_path(path, source_root),
                         "line": child.lineno,
                         "doc": ast.get_docstring(child) or "",
@@ -344,10 +346,7 @@ def _reference_score(item: dict[str, Any], query: str, tokens: list[str]) -> int
     name = " ".join(
         str(item.get(field, "")).casefold() for field in ("name", "qualname", "title")
     )
-    body = " ".join(
-        str(item.get(field, "")).casefold()
-        for field in ("doc", "content")
-    )
+    body = " ".join(str(item.get(field, "")).casefold() for field in ("doc", "content"))
     score = 100 if query in name or query in body else 0
     for token in tokens:
         variants = {token, token.removesuffix("s")}
@@ -451,7 +450,7 @@ def _find_callable_from_code(
         return candidate
 
     local_ns: dict[str, Any] = {}
-    exec(stripped, global_ns, local_ns)
+    exec(stripped, global_ns, local_ns)  # noqa: S102 -- this is the Code Mode execution surface
 
     for name in preferred_names:
         value = local_ns.get(name)
@@ -546,7 +545,7 @@ def _database_info(db: Any, state: dict[str, Any]) -> dict[str, Any]:
     ]:
         try:
             value = getattr(db, attr)
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 -- ida_domain properties may raise arbitrary errors
             continue
         info[attr] = _jsonify(value)
 
@@ -554,7 +553,7 @@ def _database_info(db: Any, state: dict[str, Any]) -> dict[str, Any]:
     if metadata is not None:
         try:
             info["metadata"] = _jsonify(metadata)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 -- metadata is best-effort, never fatal
             pass
 
     return info
@@ -620,7 +619,7 @@ class _BridgeInstance:
             if line.startswith(BRIDGE_MARKER):
                 try:
                     payload = json.loads(line[len(BRIDGE_MARKER) :])
-                except Exception:
+                except json.JSONDecodeError:
                     self._logs.append(line)
                     continue
                 self._responses.put(payload)
@@ -889,9 +888,7 @@ class _BridgeManager:
         log_path = instance.log_path
         result: dict[str, Any]
         try:
-            result = instance.request(
-                {"command": "close"}, CLOSE_TIMEOUT_SECONDS
-            )
+            result = instance.request({"command": "close"}, CLOSE_TIMEOUT_SECONDS)
         finally:
             instance.terminate()
             with self._lock:
@@ -917,10 +914,8 @@ class _BridgeManager:
             try:
                 if instance.is_alive():
                     try:
-                        instance.request(
-                            {"command": "close"}, CLOSE_TIMEOUT_SECONDS
-                        )
-                    except Exception:
+                        instance.request({"command": "close"}, CLOSE_TIMEOUT_SECONDS)
+                    except Exception:  # noqa: BLE001, S110 -- best-effort close during shutdown
                         pass
             finally:
                 instance.terminate()
@@ -999,7 +994,7 @@ def _bridge_instance_main() -> int:
     def bridge_cleanup_and_exit(signum: int, _frame: Any) -> None:
         try:
             close_db()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 -- signal handler must not raise
             pass
         raise SystemExit(128 + signum)
 
@@ -1056,7 +1051,7 @@ def _bridge_instance_main() -> int:
                     raise RuntimeError(f"unsupported bridge command: {command}")
 
                 _bridge_emit({"request_id": request_id, "ok": True, "result": result})
-            except Exception:
+            except Exception:  # noqa: BLE001 -- must report arbitrary user execute() errors, not crash
                 _bridge_emit(
                     {
                         "request_id": request_id,
@@ -1069,7 +1064,7 @@ def _bridge_instance_main() -> int:
         if db is not None:
             try:
                 db.close(save=True)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 -- best-effort final save on exit
                 pass
     return 0
 

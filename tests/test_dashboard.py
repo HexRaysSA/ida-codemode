@@ -1,7 +1,7 @@
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,9 +26,7 @@ class IndexSortingTests(unittest.TestCase):
                 encoding="utf-8",
             )
             new_log.write_text(
-                json.dumps(
-                    {"ts": "2026-01-01T12:00:00Z", "event": "instance_started"}
-                )
+                json.dumps({"ts": "2026-01-01T12:00:00Z", "event": "instance_started"})
                 + "\n",
                 encoding="utf-8",
             )
@@ -288,7 +286,7 @@ class ToolNameTests(unittest.TestCase):
 
 class PiSessionTests(unittest.TestCase):
     def test_inline_transcript_keeps_non_ida_tools_only(self) -> None:
-        ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ts = datetime(2026, 1, 1, tzinfo=UTC)
         items = [
             dashboard.TranscriptItem(ts, "tool", "ida", tool_name="ida_execute"),
             dashboard.TranscriptItem(ts, "tool", "bash", tool_name="bash"),

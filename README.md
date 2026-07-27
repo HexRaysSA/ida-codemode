@@ -148,15 +148,19 @@ def run(db, to_jsonable):
     for index, func in enumerate(db.functions):
         if index >= 10:
             break
-        result.append({
-            "name": db.functions.get_name(func),
-            "start_ea": hex(func.start_ea),
-            "end_ea": hex(func.end_ea),
-        })
-    return to_jsonable({
-        "path": db.path,
-        "functions": result,
-    })
+        result.append(
+            {
+                "name": db.functions.get_name(func),
+                "start_ea": hex(func.start_ea),
+                "end_ea": hex(func.end_ea),
+            }
+        )
+    return to_jsonable(
+        {
+            "path": db.path,
+            "functions": result,
+        }
+    )
 ```
 
 Close the current database (changes are always saved to disk):

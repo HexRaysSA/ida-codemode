@@ -19,7 +19,7 @@ import threading
 import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -32,7 +32,7 @@ DEFAULT_PORT = 8736
 
 LOGS_DIR = DEFAULT_LOGS_DIR
 
-_MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
+_MIN_DT = datetime.min.replace(tzinfo=UTC)
 
 
 # --------------------------------------------------------------------------
@@ -63,7 +63,7 @@ def _parse_ts(value: object) -> datetime | None:
     if not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 
@@ -143,7 +143,7 @@ def _model_pricing(model: str) -> tuple[float, float] | None:
     return None
 
 
-def _cost_for(model: str, usage: dict[str, int]) -> float | None:
+def _cost_for(model: str, usage: dict[str, Any]) -> float | None:
     price = _model_pricing(model)
     if price is None:
         return None
@@ -413,9 +413,7 @@ def _group_analysis_sessions(
             }
         )
         agent_kind, session_path = session_refs[0]
-        groups.append(
-            AnalysisSessionGroup("agent", session_path, members, agent_kind)
-        )
+        groups.append(AnalysisSessionGroup("agent", session_path, members, agent_kind))
 
     return groups, flat
 
@@ -763,9 +761,7 @@ def _summary_index_row(summary: BridgeLogSummary) -> str:
     cost, cost_sort = _cost_cell(_session_usage(summary))
     started_sort = f"{summary.started.timestamp():.6f}" if summary.started else ""
     activity_sort = (
-        f"{summary.last_activity.timestamp():.6f}"
-        if summary.last_activity
-        else ""
+        f"{summary.last_activity.timestamp():.6f}" if summary.last_activity else ""
     )
     log_href = f"/log/{quote(summary.path.name)}"
     return (
@@ -809,7 +805,9 @@ def _analysis_group_index_row(group: AnalysisSessionGroup) -> str:
     else:
         _items, meta, detected_kind, _totals = _load_agent_items(group.group_id)
         session_id = meta.get("id") or Path(group.group_id).stem
-        kind = detected_kind if detected_kind != "unknown" else group.agent_kind or "agent"
+        kind = (
+            detected_kind if detected_kind != "unknown" else group.agent_kind or "agent"
+        )
         analysis_href = f"/analysis?path={quote(group.group_id)}"
     binary_links = []
     for summary in sorted(
@@ -818,15 +816,13 @@ def _analysis_group_index_row(group: AnalysisSessionGroup) -> str:
         log_href = f"/log/{quote(summary.path.name)}"
         binary_links.append(
             f'<a href="{_e(log_href)}" title="{_e(summary.target)}">'
-            f'<span>{_e(_display_target(summary.target))}</span>'
+            f"<span>{_e(_display_target(summary.target))}</span>"
             f'<span class="mono muted instance">{_e(summary.instance_id)}</span></a>'
         )
     status = _analysis_group_status(group)
     errors_count = sum(summary.errors for summary in group.summaries)
     errors = (
-        f'<span class="badge error">{errors_count} err</span>'
-        if errors_count
-        else ""
+        f'<span class="badge error">{errors_count} err</span>' if errors_count else ""
     )
     cost, cost_sort = _cost_cell(_analysis_group_usage(group))
     started_sort = f"{group.started.timestamp():.6f}" if group.started else ""
@@ -862,12 +858,10 @@ def render_index() -> str:
 
     groups, flat = _group_analysis_sessions(summaries)
     entries: list[tuple[datetime, str]] = [
-        (group.started or _MIN_DT, _analysis_group_index_row(group))
-        for group in groups
+        (group.started or _MIN_DT, _analysis_group_index_row(group)) for group in groups
     ]
     entries.extend(
-        (summary.started or _MIN_DT, _summary_index_row(summary))
-        for summary in flat
+        (summary.started or _MIN_DT, _summary_index_row(summary)) for summary in flat
     )
     entries.sort(key=lambda entry: entry[0], reverse=True)
     rows = [row for _started, row in entries]
@@ -1080,9 +1074,7 @@ def _in_window(
         return False
     if lower is not None and ts <= lower:
         return False
-    if upper is not None and ts >= upper:
-        return False
-    return True
+    return not (upper is not None and ts >= upper)
 
 
 def _interleave_transcript(
@@ -1233,9 +1225,10 @@ def render_bridge_log(name: str, *, export: bool = False) -> str | None:
         crumbs = ""
     else:
         analysis_href: str | None = None
-        if summary.codemode_id and len(
-            _known_codemode_groups().get(summary.codemode_id, [])
-        ) > 1:
+        if (
+            summary.codemode_id
+            and len(_known_codemode_groups().get(summary.codemode_id, [])) > 1
+        ):
             analysis_href = f"/analysis?id={quote(summary.codemode_id)}"
         else:
             known_sessions = _known_agent_sessions()
@@ -1348,7 +1341,11 @@ def render_analysis_session(
         display_kind = "codemode"
     else:
         primary_meta = next(
-            (meta for path, _kind, _items, meta in session_data if path == group.group_id),
+            (
+                meta
+                for path, _kind, _items, meta in session_data
+                if path == group.group_id
+            ),
             {},
         )
         session_id = primary_meta.get("id") or Path(group.group_id).stem
@@ -1380,7 +1377,9 @@ def render_analysis_session(
         ("Grouping", f'<span class="badge {display_kind}">{_e(display_kind)}</span>'),
         (
             "Working directory",
-            "<br>".join(f'<span class="mono">{_e(cwd)}</span>' for cwd in working_directories)
+            "<br>".join(
+                f'<span class="mono">{_e(cwd)}</span>' for cwd in working_directories
+            )
             or '<span class="muted">not recorded</span>',
         ),
         ("Started", _e(_format_ts(group.started))),
@@ -1402,7 +1401,7 @@ def render_analysis_session(
     ]
     if transcript_count:
         controls.append(
-            '<button onclick="document.body.classList.toggle(\'hide-transcript\')">'
+            "<button onclick=\"document.body.classList.toggle('hide-transcript')\">"
             f"toggle transcript ({transcript_count})</button>"
         )
 
@@ -1501,7 +1500,9 @@ def _tool_input_html(tool_name: str, tool_input: object) -> str:
     if isinstance(tool_input, dict):
         tool_input = {k: v for k, v in tool_input.items() if k != "_meta"}
         code = tool_input.get("code")
-        if _codemode_tool_name(tool_name) in ("execute", "search") and isinstance(code, str):
+        if _codemode_tool_name(tool_name) in ("execute", "search") and isinstance(
+            code, str
+        ):
             rest = {k: v for k, v in tool_input.items() if k != "code"}
             parts = [_python_block(code)]
             if rest:
@@ -1671,14 +1672,23 @@ def _claude_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, 
     return items, meta
 
 
+def _as_int(value: object) -> int:
+    if isinstance(value, (int, float, str)):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
 def _claude_usage(raw: object, model: str) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
     usage = {
-        "input": int(raw.get("input_tokens", 0) or 0),
-        "output": int(raw.get("output_tokens", 0) or 0),
-        "cache_read": int(raw.get("cache_read_input_tokens", 0) or 0),
-        "cache_write": int(raw.get("cache_creation_input_tokens", 0) or 0),
+        "input": _as_int(raw.get("input_tokens")),
+        "output": _as_int(raw.get("output_tokens")),
+        "cache_read": _as_int(raw.get("cache_read_input_tokens")),
+        "cache_write": _as_int(raw.get("cache_creation_input_tokens")),
         "model": model,
     }
     if not any(usage[k] for k in ("input", "output", "cache_read", "cache_write")):
@@ -1691,10 +1701,10 @@ def _pi_usage(raw: object, model: str) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
     usage = {
-        "input": int(raw.get("input", 0) or 0),
-        "output": int(raw.get("output", 0) or 0),
-        "cache_read": int(raw.get("cacheRead", 0) or 0),
-        "cache_write": int(raw.get("cacheWrite", 0) or 0),
+        "input": _as_int(raw.get("input")),
+        "output": _as_int(raw.get("output")),
+        "cache_read": _as_int(raw.get("cacheRead")),
+        "cache_write": _as_int(raw.get("cacheWrite")),
         "model": model,
     }
     if not any(usage[k] for k in ("input", "output", "cache_read", "cache_write")):
@@ -1823,9 +1833,7 @@ def _pi_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, str]
                         )
                 elif part_type == "toolCall":
                     tool_name = str(part.get("name", "tool"))
-                    body_parts = [
-                        _tool_input_html(tool_name, part.get("arguments"))
-                    ]
+                    body_parts = [_tool_input_html(tool_name, part.get("arguments"))]
                     tool_call_id = part.get("id")
                     result = tool_results.get(tool_call_id)
                     if result is not None:
@@ -2134,7 +2142,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             status=404,
         )
 
-    def do_GET(self) -> None:  # noqa: N802 (http.server API)
+    def do_GET(self) -> None:
         url = urlparse(self.path)
         route = url.path
 
@@ -2166,7 +2174,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._not_found()
         except BrokenPipeError:
             pass
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # noqa: BLE001 -- pragma: no cover - defensive, renders a 500 instead of crashing the handler thread
             self._send_html(
                 _page(
                     "error — ida-codemode",
