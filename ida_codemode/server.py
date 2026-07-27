@@ -4,17 +4,18 @@ import atexit
 import json
 import logging
 import os
-from pathlib import Path
 import threading
 import time
-from typing import Any, BinaryIO, Callable, Protocol
-from urllib.parse import parse_qs
 import uuid
+from collections.abc import Callable
+from io import BufferedIOBase
+from pathlib import Path
+from typing import Any, Protocol
+from urllib.parse import parse_qs
 
 from .http import HOST, HTTPResponse, LocalHTTPServer, json_response
 from .registry import InstanceIdentity, InstanceRegistration, RegistryEntry
-from .runtime import APIError, AnalysisState
-
+from .runtime import AnalysisState, APIError
 
 logger = logging.getLogger(__name__)
 DEFAULT_LEASE_GRACE_SECONDS = 20.0
@@ -151,10 +152,7 @@ class CodeModeHTTPServer:
         if registration is not None:
             registration.release()
         if self._atexit_registered:
-            try:
-                atexit.unregister(self._withdraw_registration)
-            except Exception:
-                pass
+            atexit.unregister(self._withdraw_registration)
             self._atexit_registered = False
 
     def stop(self) -> None:
@@ -266,7 +264,9 @@ class CodeModeHTTPServer:
     def _lease_response(self) -> HTTPResponse:
         if not self._lease_opened():
             return self._failure(
-                APIError("instance_draining", "The instance is shutting down", status=503)
+                APIError(
+                    "instance_draining", "The instance is shutting down", status=503
+                )
             )
         try:
             payload = json.dumps(self._health_payload(), separators=(",", ":"))
@@ -274,8 +274,8 @@ class CodeModeHTTPServer:
             self._lease_closed()
             raise
 
-        def stream(file: BinaryIO) -> None:
-            file.write(f"event: health\ndata: {payload}\n\n".encode("utf-8"))
+        def stream(file: BufferedIOBase) -> None:
+            file.write(f"event: health\ndata: {payload}\n\n".encode())
             file.flush()
             while not self._stream_stop.wait(self.heartbeat_interval):
                 file.write(b": keepalive\n\n")
@@ -361,7 +361,9 @@ class CodeModeHTTPServer:
                     payload = self._decode_object(body)
                     code = payload.get("code")
                     if not isinstance(code, str) or not code.strip():
-                        raise APIError("invalid_code", "code must be a non-empty string")
+                        raise APIError(
+                            "invalid_code", "code must be a non-empty string"
+                        )
                     return self._success(
                         self.backend.execute_python(code, self._timeout(payload))
                     )

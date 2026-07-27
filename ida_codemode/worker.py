@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
 import signal
 import sys
+from pathlib import Path
 from typing import Any
 
 from .registry import LOG_DIR, REGISTRY_DIR, InstanceIdentity, ensure_private_directory
-from .runtime import IDARuntime, AnalysisState, create_autoanalysis_hook
-from .server import CodeModeHTTPServer, DEFAULT_LEASE_GRACE_SECONDS
+from .runtime import AnalysisState, IDARuntime, create_autoanalysis_hook
+from .server import DEFAULT_LEASE_GRACE_SECONDS, CodeModeHTTPServer
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -65,30 +65,28 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     suffix = args.record_suffix or os.urandom(3).hex()
     if len(suffix) != 6 or any(c not in "0123456789abcdef" for c in suffix):
-        print("ida-codemode-worker: invalid record suffix", file=sys.stderr)
+        print("[ida-codemode] invalid record suffix", file=sys.stderr)
         return 2
     record_id = f"{os.getpid()}-{suffix}"
     _redirect_output(record_id)
 
     if args.lease_grace < 0:
-        print("ida-codemode-worker: lease grace must not be negative", file=sys.stderr)
+        print("[ida-codemode] lease grace must not be negative", file=sys.stderr)
         return 2
     try:
         input_path = args.input.expanduser().resolve(strict=True)
     except FileNotFoundError:
-        print(
-            f"ida-codemode-worker: input does not exist: {args.input}", file=sys.stderr
-        )
+        print(f"[ida-codemode] input does not exist: {args.input}", file=sys.stderr)
         return 2
 
     # Import IDA only after the process-specific log is installed, so import
     # and initialization failures are available to the spawning client.
-    from ida_domain import Database
-    from ida_domain.database import IdaCommandOptions
     import ida_auto
     import ida_kernwin
     import ida_loader
     import ida_nalt
+    from ida_domain import Database
+    from ida_domain.database import IdaCommandOptions
 
     # serve()/stop_serving() are available in IDA 9.4+, but older idapro
     # stubs from the pinned ida-domain Git branch do not declare them.
@@ -180,34 +178,43 @@ def main(argv: list[str] | None = None) -> int:
         if stop_signal is None:
             kernwin.serve()
         return 128 + stop_signal if stop_signal is not None else 0
-    except Exception as exc:
-        print(f"ida-codemode-worker: {exc}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 -- IDA initialization is third-party code
+        print(f"[ida-codemode] {exc}", file=sys.stderr)
         return 1
     finally:
         if server is not None:
             server.stop()
-        if database is not None and runtime is not None and runtime.database is not None:
+        if (
+            database is not None
+            and runtime is not None
+            and runtime.database is not None
+        ):
             try:
                 # We are back on the idalib main thread after serve().
                 database.close(save=True)
                 runtime.database = None
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 -- SWIG may raise arbitrary errors
                 print(
-                    f"ida-codemode-worker: failed to close database: {exc}",
+                    f"[ida-codemode] failed to close database: {exc}",
                     file=sys.stderr,
                 )
         elif database is not None and runtime is None:
             try:
                 database.close(save=True)
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 -- best-effort startup cleanup
+                print(
+                    f"[ida-codemode] failed to close database: {exc}",
+                    file=sys.stderr,
+                )
         # The lifetime lock is deliberately released only after the IDB close.
         if server is not None:
             server.release_registration()
         try:
             analysis_hook.unhook()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 -- best-effort SWIG hook cleanup
+            print(
+                f"[ida-codemode] failed to remove analysis hook: {exc}", file=sys.stderr
+            )
         for signum, previous in previous_handlers.items():
             signal.signal(signum, previous)
 

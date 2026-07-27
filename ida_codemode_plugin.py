@@ -11,20 +11,20 @@ import ida_loader
 import ida_nalt
 import idaapi
 
-from ida_codemode.registry import InstanceIdentity, REGISTRY_DIR
-from ida_codemode.runtime import IDARuntime, AnalysisState, create_autoanalysis_hook
+from ida_codemode.registry import REGISTRY_DIR, InstanceIdentity
+from ida_codemode.runtime import AnalysisState, IDARuntime, create_autoanalysis_hook
 from ida_codemode.server import CodeModeHTTPServer
 
 
 class ReadyToRunHook(ida_kernwin.UI_Hooks):
-    def __init__(self, plugin: "CodeModePlugin") -> None:
+    def __init__(self, plugin: CodeModePlugin) -> None:
         super().__init__()
         self.plugin = plugin
 
     def ready_to_run(self) -> None:
         try:
             self.plugin.start_server()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- IDA startup may raise SWIG errors
             ida_kernwin.msg(f"[ida-codemode] failed to start: {exc}\n")
         finally:
             self.unhook()
@@ -48,7 +48,7 @@ class CodeModePlugin(idaapi.plugin_t):
         # IDA's idalib UI compatibility shim reports is_idaq(), hence both checks.
         if not is_interactive_gui():
             return idaapi.PLUGIN_SKIP
-        if sys.version_info < (3, 11):
+        if sys.version_info < (3, 11):  # noqa: UP036 -- plugin bypasses package metadata
             running = ".".join(str(part) for part in sys.version_info[:3])
             ida_kernwin.msg(
                 f"[ida-codemode] Python 3.11 or newer is required (running {running})\n"
@@ -121,15 +121,19 @@ class CodeModePlugin(idaapi.plugin_t):
         if self._ui_hook is not None:
             self._ui_hook.unhook()
             self._ui_hook = None
-        if self._server is not None:
-            self._server.stop()
+        server = self._server
+        if server is not None:
+            server.stop()
             self._server = None
         if self._runtime is not None and self._runtime.database is not None:
             try:
                 self._runtime.database.unhook()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 -- best-effort SWIG cleanup
+                ida_kernwin.msg(f"[ida-codemode] failed to detach database: {exc}\n")
             self._runtime = None
+        if server is not None:
+            # Release the lifetime lock only after detaching from the GUI IDB.
+            server.release_registration()
         if self._analysis_hook is not None:
             self._analysis_hook.unhook()
             self._analysis_hook = None

@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import queue
 import sys
-import threading
-import time
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
 
-from ida_codemode.runtime import APIError, IDARuntime, AnalysisState
+from ida_codemode.runtime import AnalysisState, APIError, IDARuntime
 
 
 class FakeDatabase:
@@ -109,44 +106,7 @@ def test_analysis_and_save_use_shared_dispatcher(fake_ida):
     assert fake_ida.saved == 1
 
 
-def test_gui_save_uses_savebase_and_close_fails(fake_ida):
+def test_gui_save_uses_savebase(fake_ida):
     runtime = make_runtime("gui")
     assert runtime.save_database()["saved"] is True
     assert fake_ida.save_actions == 1
-    with pytest.raises(APIError) as raised:
-        runtime.close_database()
-    assert raised.value.code == "gui_database_owned_by_user"
-    assert runtime.database.closed is False
-
-
-def test_idalib_close_saves_owned_database(fake_ida):
-    runtime = make_runtime()
-    database = runtime.database
-    result = runtime.close_database()
-    assert result["closed"] is True
-    assert result["saved"] is True
-    assert database.closed is True
-    assert database.saved is True
-    assert runtime.database is None
-
-
-def test_idalib_close_cancels_active_python(fake_ida):
-    runtime = make_runtime()
-    outcome = queue.Queue(maxsize=1)
-
-    def execute_forever():
-        try:
-            runtime.execute_python("lambda: exec('while True: pass')", 10)
-        except APIError as exc:
-            outcome.put(exc.code)
-
-    thread = threading.Thread(target=execute_forever, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 2
-    while runtime._active_kind != "execute" and time.monotonic() < deadline:
-        time.sleep(0.001)
-
-    assert runtime.close_database()["closed"] is True
-    thread.join(timeout=2)
-    assert not thread.is_alive()
-    assert outcome.get_nowait() == "operation_cancelled"

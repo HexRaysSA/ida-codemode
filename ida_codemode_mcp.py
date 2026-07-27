@@ -13,20 +13,21 @@ from __future__ import annotations
 
 import argparse
 import atexit
-from dataclasses import asdict, dataclass, field, is_dataclass
-from datetime import UTC, datetime
-from enum import Enum
 import json
 import os
-from pathlib import Path
 import signal
 import sys
 import threading
 import time
 import traceback
-from typing import Annotated, Any, Callable
-from urllib.parse import urlparse
 import uuid
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field, is_dataclass
+from datetime import UTC, datetime
+from enum import Enum
+from pathlib import Path
+from typing import Annotated, Any
+from urllib.parse import urlparse
 
 from zeromcp import McpServer, McpToolError
 
@@ -39,13 +40,12 @@ from ida_codemode.reference import (
 from ida_codemode.registry import LOG_DIR
 from ida_codemode.resolver import ResolveError
 
-
 STATE_DIR = Path.home() / ".ida-codemode"
-MCP_LOG_DIR = STATE_DIR / "logs" / "mcp"
+SESSIONS_DIR = STATE_DIR / "sessions"
 OPEN_TIMEOUT_SECONDS = 300
 EXECUTE_TIMEOUT_SECONDS = 300
 
-mcp = McpServer("ida", version="0.3.0")
+mcp = McpServer("ida", version="0.2.0")
 
 
 def _utc_now_iso() -> str:
@@ -59,7 +59,8 @@ def _resolve_user_path(path: str) -> str:
 def _session_fields() -> dict[str, Any]:
     try:
         meta = mcp.context.meta or {}
-    except Exception:  # The shutdown path may run outside an MCP request context.
+    except (AttributeError, LookupError, RuntimeError):
+        # The shutdown path may run outside an MCP request context.
         meta = {}
     fields: dict[str, Any] = {
         "codemode_id": os.environ.get("IDA_CODEMODE_ID") or None,
@@ -96,13 +97,13 @@ class _TraceLogger:
 
     def __init__(self) -> None:
         self.server_id = uuid.uuid4().hex[:12]
-        MCP_LOG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        SESSIONS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
-            MCP_LOG_DIR.chmod(0o700)
+            SESSIONS_DIR.chmod(0o700)
         except OSError:
             if os.name != "nt":
                 raise
-        self.path = MCP_LOG_DIR / f"{self.server_id}.jsonl"
+        self.path = SESSIONS_DIR / f"{self.server_id}.jsonl"
         self._lock = threading.Lock()
 
     def emit(self, event: str, **fields: Any) -> None:
@@ -110,14 +111,18 @@ class _TraceLogger:
             "schema": 1,
             "ts": _utc_now_iso(),
             "mcp_server_id": self.server_id,
+            "pid": os.getpid(),
             "event": event,
             **fields,
         }
-        encoded = json.dumps(
-            _trace_jsonable(record),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ) + "\n"
+        encoded = (
+            json.dumps(
+                _trace_jsonable(record),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
         with self._lock:
             fd = os.open(
                 self.path,
@@ -268,6 +273,19 @@ class _DatabaseManager:
         self._lock = threading.RLock()
         self._open_lock = threading.Lock()
         self._shutdown_started = False
+        self._trace_lifecycle_started = False
+
+    def start(self, transport: str) -> None:
+        with self._lock:
+            if self._trace_lifecycle_started:
+                return
+            self._trace_lifecycle_started = True
+        TRACE.emit(
+            "mcp_started",
+            session=_session_fields(),
+            transport=transport,
+            trace_path=str(TRACE.path),
+        )
 
     def _database_info(self, session: _DatabaseSession) -> dict[str, Any]:
         return {
@@ -469,14 +487,15 @@ class _DatabaseManager:
             try:
                 with session.operation_lock:
                     session.handle.close()
-            except Exception as error:  # Best-effort lease release during shutdown.
+            except Exception as error:  # noqa: BLE001 -- best-effort shutdown tracing
                 TRACE.emit(
                     "database_release_error",
                     session=_session_fields(),
                     instance_id=session.instance_id,
                     error=_error_fields(error),
                 )
-        TRACE.emit("mcp_stopped", session=_session_fields())
+        if self._trace_lifecycle_started:
+            TRACE.emit("mcp_stopped", session=_session_fields())
 
 
 DATABASE_MANAGER = _DatabaseManager()
@@ -504,7 +523,9 @@ def reference(
 ) -> str:
     """Look up the active ida-domain API and return a plain-text IDA reference."""
 
-    return _run_traced_tool("reference", {"query": query}, lambda: render_reference(query))
+    return _run_traced_tool(
+        "reference", {"query": query}, lambda: render_reference(query)
+    )
 
 
 @mcp.tool
@@ -602,12 +623,7 @@ def close_database(
 
 def _serve(transport: str) -> None:
     _install_server_shutdown_handlers()
-    TRACE.emit(
-        "mcp_started",
-        session=_session_fields(),
-        transport=transport,
-        trace_path=str(TRACE.path),
-    )
+    DATABASE_MANAGER.start(transport)
 
     if transport == "stdio":
         try:
@@ -727,35 +743,24 @@ def cli() -> int:
         prog="ida-codemode-mcp",
         description="IDA Domain Code Mode MCP server",
     )
-    subparsers = parser.add_subparsers(dest="command", required=False)
-
-    mcp_parser = subparsers.add_parser("mcp", help="Run the MCP server")
-    mcp_parser.add_argument(
+    parser.add_argument(
         "--transport",
         default="stdio",
         help="Transport (stdio or http://host:port). Defaults to stdio.",
     )
-
-    report_session_parser = subparsers.add_parser(
-        "report-session",
-        help="Inject agent session metadata into a PreToolUse tool input.",
-    )
-    report_session_parser.add_argument(
-        "platform",
+    parser.add_argument(
+        "--report-session",
         choices=["claude", "codex"],
-        help="Agent runtime whose hook payload is being processed.",
+        help=argparse.SUPPRESS,
     )
 
     args = parser.parse_args()
 
-    if args.command == "report-session":
-        return _report_session_main(args.platform)
-    if args.command == "mcp":
-        _serve(args.transport)
-        return 0
+    if args.report_session is not None:
+        return _report_session_main(args.report_session)
 
-    parser.error("a subcommand is required (mcp or report-session)")
-    return 2
+    _serve(args.transport)
+    return 0
 
 
 if __name__ == "__main__":

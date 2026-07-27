@@ -3,15 +3,15 @@
 
 import argparse
 import gzip
-from http.client import HTTPConnection
 import json
 import os
 import queue
 import threading
 import time
+from http.client import HTTPConnection
 from urllib.parse import urlsplit
 
-from ida_codemode.registry import discover_instances, REGISTRY_DIR
+from ida_codemode.registry import REGISTRY_DIR, discover_instances
 
 
 class CheckFailed(RuntimeError):
@@ -45,17 +45,16 @@ def request(endpoint, token, method, path, payload=None, *, compressed=False):
 
 def discover_token(endpoint, registry_dir):
     port = urlsplit(endpoint).port
-    valid, unavailable = discover_instances(registry_dir)
+    valid, _unavailable = discover_instances(registry_dir)
     matches = [entry for entry in valid if entry["port"] == port]
     if len(matches) != 1:
         raise CheckFailed(f"expected one valid registry entry for port {port}")
     return matches[0]["token"]
 
 
-def run(endpoint, token, *, save=False, close=False):
+def run(endpoint, token, *, save=False):
     status, health = request(endpoint, token, "GET", "/health")
     require(status == 200 and health.get("status") == "ok", "health failed")
-    require(health.get("token") == token, "health token mismatch")
     require(health.get("backend") in {"gui", "idalib"}, "backend missing")
     for key in ("idb_path", "exe_path"):
         require(isinstance(health.get(key), str), f"health omitted {key}")
@@ -114,20 +113,9 @@ def run(endpoint, token, *, save=False, close=False):
         require(status == 200 and result.get("result", {}).get("saved"), "save failed")
         print("PASS save_database")
 
-    if health["backend"] == "gui":
-        status, result = request(endpoint, token, "POST", "/close_database", {})
-        require(status == 409, "GUI close_database did not fail")
-        require(
-            result.get("error", {}).get("code") == "gui_database_owned_by_user",
-            "unexpected GUI close error",
-        )
-        print("PASS GUI close_database is forbidden")
-    elif close:
-        status, result = request(endpoint, token, "POST", "/close_database", {})
-        require(
-            status == 200 and result.get("result", {}).get("closed"), "close failed"
-        )
-        print("PASS idalib close_database")
+    status, result = request(endpoint, token, "POST", "/close_database", {})
+    require(status == 404, "close_database unexpectedly remains exposed")
+    print("PASS close_database is not exposed")
 
 
 def main():
@@ -136,7 +124,6 @@ def main():
     parser.add_argument("--token")
     parser.add_argument("--registry-dir")
     parser.add_argument("--save", action="store_true")
-    parser.add_argument("--close", action="store_true", help="Close an idalib worker")
     args = parser.parse_args()
     endpoint = args.endpoint.rstrip("/")
     parsed = urlsplit(endpoint)
@@ -144,7 +131,7 @@ def main():
         raise SystemExit("endpoint must be http://127.0.0.1:<port>")
     token = args.token or discover_token(endpoint, args.registry_dir or REGISTRY_DIR)
     try:
-        run(endpoint, token, save=args.save, close=args.close)
+        run(endpoint, token, save=args.save)
     except CheckFailed as exc:
         print(f"FAIL {exc}")
         return 1

@@ -1,6 +1,6 @@
 {
   "name": "ida-codemode-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "IDA Code Mode MCP server and Pi extension",
   "license": "MIT",
   "type": "module",

@@ -1,6 +1,6 @@
 {
   "name": "ida-codemode-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Code Mode MCP server for the ida-domain API, with Claude session correlation.",
   "mcpServers": {
     "ida": {
@@ -9,8 +9,7 @@
         "run",
         "--project",
         "${CLAUDE_PLUGIN_ROOT}",
-        "ida-codemode-mcp",
-        "mcp"
+        "ida-codemode-mcp"
       ],
       "env": {
         "IDA_CODEMODE_ID": "${IDA_CODEMODE_ID}"
@@ -24,7 +23,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT} ida-codemode-mcp report-session claude"
+            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT} ida-codemode-mcp --report-session=claude"
           }
         ]
       }

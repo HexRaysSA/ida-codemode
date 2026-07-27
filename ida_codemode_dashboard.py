@@ -1,9 +1,8 @@
-"""Web dashboard for ida-codemode bridge sessions.
+"""Web dashboard for ida-codemode semantic sessions.
 
 Serves a local HTTP UI (stdlib only, no extra dependencies) that lists the
-JSONL bridge logs in ~/.ida-codemode/logs and renders them as a timeline.
-When a bridge log references a Claude Code, Codex, or Pi session transcript,
-the dashboard links to a visual rendering of that transcript as well.
+JSONL traces in ~/.ida-codemode/sessions and renders each MCP/agent session as
+a timeline linked to its Claude Code, Codex, or Pi transcript.
 
 Run with: ida-codemode-dashboard [--host 127.0.0.1] [--port 8736] [--open]
 """
@@ -26,11 +25,11 @@ from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
 STATE_DIR = Path.home() / ".ida-codemode"
-DEFAULT_LOGS_DIR = STATE_DIR / "logs"
+DEFAULT_SESSIONS_DIR = STATE_DIR / "sessions"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8736
 
-LOGS_DIR = DEFAULT_LOGS_DIR
+SESSIONS_DIR = DEFAULT_SESSIONS_DIR
 
 _MIN_DT = datetime.min.replace(tzinfo=UTC)
 
@@ -178,95 +177,56 @@ def _add_usage(totals: dict[str, Any], usage: dict[str, Any]) -> None:
         totals["cost_available"] = True
 
 
-def _add_totals(totals: dict[str, Any], source: dict[str, Any]) -> None:
-    for key in ("input", "output", "cache_read", "cache_write"):
-        totals[key] += source.get(key, 0)
-    totals["has_tokens"] = totals["has_tokens"] or source.get("has_tokens", False)
-    if source.get("cost_available"):
-        totals["cost"] += source.get("cost", 0.0)
-        totals["cost_available"] = True
-
-
-_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
-
-
-def _display_target(name: str) -> str:
-    """Collapse a long all-hex target name to prefix…suffix form."""
-    if "." in name:
-        base, _, ext = name.rpartition(".")
-        suffix = f".{ext}"
-    else:
-        base, suffix = name, ""
-    if _HEX_RE.match(base) and len(base) >= 24:
-        return f"{base[:8]}…{base[-8:]}{suffix}"
-    return name
-
-
 # --------------------------------------------------------------------------
-# Bridge log scanning
+# Semantic session scanning
 # --------------------------------------------------------------------------
 
 
 @dataclass
-class BridgeLogSummary:
+class SessionSummary:
     path: Path
-    target: str
-    instance_id: str
+    session_id: str
     size: int
     started: datetime | None = None
     last_activity: datetime | None = None
     events: int = 0
+    tool_calls: int = 0
     executes: int = 0
     errors: int = 0
-    closed: bool = False
+    stopped: bool = False
     pid: int | None = None
-    database_path: str | None = None
     codemode_id: str | None = None
+    targets: list[dict[str, Any]] = field(default_factory=list)
     agent_sessions: dict[str, str] = field(default_factory=dict)
     agent_session_refs: set[tuple[str, str]] = field(default_factory=set)
 
     @property
     def status(self) -> str:
-        """closed (clean exit), running (pid alive), or killed (no clean exit)."""
-        if self.closed:
+        if self.stopped:
             return "closed"
         if self.pid is not None and _pid_alive(self.pid):
             return "running"
         return "killed"
 
+    @property
+    def display_target(self) -> str:
+        names = []
+        for target in self.targets:
+            path = target.get("idb_path") or target.get("exe_path")
+            if isinstance(path, str) and path:
+                names.append(Path(path).name)
+        unique = list(dict.fromkeys(names))
+        if not unique:
+            return "No database opened"
+        if len(unique) == 1:
+            return unique[0]
+        return f"{unique[0]} +{len(unique) - 1}"
 
-def _summary_agent_sessions(summary: BridgeLogSummary) -> set[tuple[str, str]]:
+
+def _summary_agent_sessions(summary: SessionSummary) -> set[tuple[str, str]]:
     if summary.agent_session_refs:
         return summary.agent_session_refs
     return set(summary.agent_sessions.items())
-
-
-@dataclass
-class AnalysisSessionGroup:
-    group_type: str  # "codemode" | "agent"
-    group_id: str
-    summaries: list[BridgeLogSummary]
-    agent_kind: str | None = None
-
-    @property
-    def agent_sessions(self) -> dict[str, str]:
-        sessions: dict[str, str] = {}
-        for summary in self.summaries:
-            for kind, path in _summary_agent_sessions(summary):
-                sessions[path] = kind
-        return sessions
-
-    @property
-    def started(self) -> datetime | None:
-        values = [summary.started for summary in self.summaries if summary.started]
-        return min(values) if values else None
-
-    @property
-    def last_activity(self) -> datetime | None:
-        values = [
-            summary.last_activity for summary in self.summaries if summary.last_activity
-        ]
-        return max(values) if values else None
 
 
 def _pid_alive(pid: int) -> bool:
@@ -281,22 +241,37 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _split_log_filename(path: Path) -> tuple[str, str]:
-    stem = path.stem
-    target, _, instance_id = stem.rpartition("-")
-    if not target:
-        return stem, ""
-    return target, instance_id
+def _record_session_fields(record: dict[str, Any]) -> dict[str, Any]:
+    value = record.get("session")
+    return value if isinstance(value, dict) else {}
 
 
-def _summarize_bridge_log(path: Path) -> BridgeLogSummary:
-    target, instance_id = _split_log_filename(path)
-    summary = BridgeLogSummary(
-        path=path,
-        target=target,
-        instance_id=instance_id,
-        size=path.stat().st_size,
+def _target_key(target: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        target.get("record_id"),
+        target.get("instance_id"),
+        target.get("idb_path"),
     )
+
+
+def _add_target(summary: SessionSummary, value: object) -> None:
+    if not isinstance(value, dict):
+        return
+    nested = value.get("database")
+    raw_target = nested if isinstance(nested, dict) else value
+    target: dict[str, Any] = {str(key): item for key, item in raw_target.items()}
+    if not any(target.get(key) for key in ("record_id", "instance_id", "idb_path")):
+        return
+    key = _target_key(target)
+    for index, existing in enumerate(summary.targets):
+        if _target_key(existing) == key:
+            summary.targets[index] = {**existing, **target}
+            return
+    summary.targets.append(dict(target))
+
+
+def _summarize_session(path: Path) -> SessionSummary:
+    summary = SessionSummary(path, path.stem, path.stat().st_size)
     records = _read_jsonl(path)
     summary.events = len(records)
     for record in records:
@@ -305,137 +280,54 @@ def _summarize_bridge_log(path: Path) -> BridgeLogSummary:
             if summary.started is None:
                 summary.started = ts
             summary.last_activity = ts
+        if isinstance(record.get("pid"), int):
+            summary.pid = record["pid"]
+        server_id = record.get("mcp_server_id")
+        if isinstance(server_id, str) and server_id:
+            summary.session_id = server_id
 
-        codemode_id = record.get("codemode_id")
+        session = _record_session_fields(record)
+        codemode_id = session.get("codemode_id")
         if isinstance(codemode_id, str) and codemode_id:
             summary.codemode_id = codemode_id
-
         for kind in ("claude", "codex", "pi"):
-            session_path = record.get(f"{kind}_session_path")
+            session_path = session.get(f"{kind}_session_path")
             if isinstance(session_path, str) and session_path:
                 summary.agent_sessions[kind] = session_path
                 summary.agent_session_refs.add((kind, session_path))
 
         event = record.get("event")
-        payload = record.get("payload")
-        if event == "request" and isinstance(payload, dict):
-            if payload.get("command") == "execute":
+        if event == "tool_call":
+            summary.tool_calls += 1
+            if record.get("tool") == "execute":
                 summary.executes += 1
-            elif payload.get("command") == "open":
-                db_path = payload.get("path")
-                if isinstance(db_path, str):
-                    summary.database_path = db_path
-        elif event == "response" and isinstance(payload, dict):
-            if not payload.get("ok", True):
-                summary.errors += 1
-        elif event in ("timeout", "request_failed"):
+        elif event == "tool_error":
             summary.errors += 1
-        elif event == "process_started":
-            pid = record.get("pid")
-            if isinstance(pid, int):
-                summary.pid = pid
-        elif event == "process_exited":
-            summary.closed = True
+        elif event == "mcp_stopped":
+            summary.stopped = True
+        if event in {"database_opened", "database_reused", "database_rebound"}:
+            _add_target(summary, record.get("target"))
+        if event == "tool_result":
+            _add_target(summary, record.get("output"))
     return summary
 
 
-def _scan_bridge_logs() -> list[BridgeLogSummary]:
-    if not LOGS_DIR.is_dir():
+def _scan_sessions() -> list[SessionSummary]:
+    if not SESSIONS_DIR.is_dir():
         return []
     summaries = [
-        _summarize_bridge_log(path) for path in sorted(LOGS_DIR.glob("*.jsonl"))
+        _summarize_session(path) for path in sorted(SESSIONS_DIR.glob("*.jsonl"))
     ]
-    summaries.sort(key=lambda s: s.started or _MIN_DT, reverse=True)
+    summaries.sort(key=lambda item: item.started or _MIN_DT, reverse=True)
     return summaries
 
 
-def _group_analysis_sessions(
-    summaries: list[BridgeLogSummary],
-) -> tuple[list[AnalysisSessionGroup], list[BridgeLogSummary]]:
-    """Build explicit-ID or shared-agent groups, leaving singleton logs flat."""
-    groups: list[AnalysisSessionGroup] = []
-    flat: list[BridgeLogSummary] = []
-
-    # IDA_CODEMODE_ID is an explicit grouping boundary for benchmarks/tests.
-    codemode_candidates: dict[str, list[BridgeLogSummary]] = {}
-    untagged: list[BridgeLogSummary] = []
-    for summary in summaries:
-        if summary.codemode_id:
-            codemode_candidates.setdefault(summary.codemode_id, []).append(summary)
-        else:
-            untagged.append(summary)
-    for codemode_id, members in codemode_candidates.items():
-        has_multiple_sessions = any(
-            len(_summary_agent_sessions(summary)) > 1 for summary in members
-        )
-        if len(members) > 1 or has_multiple_sessions:
-            groups.append(AnalysisSessionGroup("codemode", codemode_id, members))
-        else:
-            flat.extend(members)
-
-    # Untagged logs form groups only when an agent session connects multiple logs.
-    parents = list(range(len(untagged)))
-
-    def find(index: int) -> int:
-        while parents[index] != index:
-            parents[index] = parents[parents[index]]
-            index = parents[index]
-        return index
-
-    def union(left: int, right: int) -> None:
-        left_root, right_root = find(left), find(right)
-        if left_root != right_root:
-            parents[right_root] = left_root
-
-    session_members: dict[tuple[str, str], list[int]] = {}
-    for index, summary in enumerate(untagged):
-        for session_ref in _summary_agent_sessions(summary):
-            session_members.setdefault(session_ref, []).append(index)
-    for members in session_members.values():
-        for index in members[1:]:
-            union(members[0], index)
-
-    components: dict[int, list[BridgeLogSummary]] = {}
-    for index, summary in enumerate(untagged):
-        components.setdefault(find(index), []).append(summary)
-    for members in components.values():
-        has_multiple_sessions = any(
-            len(_summary_agent_sessions(summary)) > 1 for summary in members
-        )
-        if len(members) == 1 and not has_multiple_sessions:
-            flat.extend(members)
-            continue
-        session_refs = sorted(
-            {
-                session_ref
-                for summary in members
-                for session_ref in _summary_agent_sessions(summary)
-            }
-        )
-        agent_kind, session_path = session_refs[0]
-        groups.append(AnalysisSessionGroup("agent", session_path, members, agent_kind))
-
-    return groups, flat
-
-
-def _known_agent_sessions() -> dict[str, list[BridgeLogSummary]]:
-    """Map agent session paths to the bridge logs that reference them.
-
-    Doubles as the allowlist of transcript files the dashboard may read, so
-    arbitrary paths can never be requested over HTTP.
-    """
-    mapping: dict[str, list[BridgeLogSummary]] = {}
-    for summary in _scan_bridge_logs():
+def _known_agent_sessions() -> dict[str, list[SessionSummary]]:
+    """Map referenced transcripts to sessions and provide the HTTP allowlist."""
+    mapping: dict[str, list[SessionSummary]] = {}
+    for summary in _scan_sessions():
         for _kind, session_path in _summary_agent_sessions(summary):
             mapping.setdefault(session_path, []).append(summary)
-    return mapping
-
-
-def _known_codemode_groups() -> dict[str, list[BridgeLogSummary]]:
-    mapping: dict[str, list[BridgeLogSummary]] = {}
-    for summary in _scan_bridge_logs():
-        if summary.codemode_id:
-            mapping.setdefault(summary.codemode_id, []).append(summary)
     return mapping
 
 
@@ -486,10 +378,6 @@ table.sessions th::after { content: ""; opacity: 0.6; font-size: 10px; }
 table.sessions th.sort-asc::after { content: " \\2191"; }
 table.sessions th.sort-desc::after { content: " \\2193"; }
 table.sessions tr:last-child td { border-bottom: none; }
-.analysis-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.binary-links { margin-top: 6px; display: grid; gap: 3px; }
-.binary-links a { display: flex; gap: 8px; align-items: baseline; }
-.binary-links .instance { margin-left: auto; }
 .badge { display: inline-block; padding: 1px 8px; border-radius: 10px;
   font-size: 11px; font-weight: 600; border: 1px solid var(--border); }
 .badge.claude { color: #b0530a; border-color: #b0530a55; }
@@ -537,7 +425,6 @@ details[open] > summary { margin-bottom: 4px; }
   margin: 8px 0; font-size: 13px; }
 .kv .k { color: var(--muted); }
 .kv .v { word-break: break-all; }
-.bridgeout { color: var(--muted); }
 .usage { margin-top: 6px; font-size: 11px; color: var(--muted);
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; }
 .transcript-item { position: relative; padding-left: 16px; margin: 4px 0; }
@@ -609,7 +496,7 @@ def _page(title: str, body: str, subtitle: str = "", standalone: bool = False) -
         if standalone
         else f'<h1><a href="/">{_e(heading)}</a></h1>'
     )
-    sub = subtitle if (subtitle or standalone) else str(LOGS_DIR)
+    sub = subtitle if (subtitle or standalone) else str(SESSIONS_DIR)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -731,7 +618,7 @@ def _status_badge_value(status: str) -> str:
     return f'<span class="badge {css}">{_e(status)}</span>'
 
 
-def _status_badge(summary: BridgeLogSummary) -> str:
+def _status_badge(summary: SessionSummary) -> str:
     return _status_badge_value(summary.status)
 
 
@@ -740,19 +627,27 @@ def _status_badge(summary: BridgeLogSummary) -> str:
 # --------------------------------------------------------------------------
 
 
+_STATUS_CSS = {"running": "open", "closed": "closed", "killed": "killed"}
+
+
+def _status_badge_value(status: str) -> str:
+    css = _STATUS_CSS.get(status, "closed")
+    return f'<span class="badge {css}">{_e(status)}</span>'
+
+
+def _status_badge(summary: SessionSummary) -> str:
+    return _status_badge_value(summary.status)
+
+
 def _cost_cell(totals: dict[str, Any]) -> tuple[str, str]:
     if totals["cost_available"]:
         return _format_cost(totals["cost"]), f"{totals['cost']:.6f}"
     if totals["has_tokens"]:
-        return (
-            '<span class="muted" title="pricing unavailable for this model">n/a</span>',
-            "",
-        )
+        return '<span class="muted" title="pricing unavailable">n/a</span>', ""
     return '<span class="muted">—</span>', ""
 
 
-def _summary_index_row(summary: BridgeLogSummary) -> str:
-    status = _status_badge(summary)
+def _summary_index_row(summary: SessionSummary) -> str:
     errors = (
         f'<span class="badge error">{summary.errors} err</span>'
         if summary.errors
@@ -763,125 +658,50 @@ def _summary_index_row(summary: BridgeLogSummary) -> str:
     activity_sort = (
         f"{summary.last_activity.timestamp():.6f}" if summary.last_activity else ""
     )
-    log_href = f"/log/{quote(summary.path.name)}"
+    href = f"/session/{quote(summary.path.name)}"
+    agents = " ".join(
+        _agent_link(kind, path)
+        for kind, path in sorted(_summary_agent_sessions(summary))
+    )
     return (
         "<tr>"
-        f'<td data-sort="{_e(summary.target.lower())}">'
-        f'<a href="{_e(log_href)}" title="{_e(summary.target)}">'
-        f"<strong>{_e(_display_target(summary.target))}</strong></a>"
-        f'<div class="mono muted">{_e(summary.instance_id)}</div></td>'
+        f'<td data-sort="{_e(summary.display_target.lower())}">'
+        f'<a href="{_e(href)}"><strong>{_e(summary.display_target)}</strong></a>'
+        f'<div class="mono muted">{_e(summary.session_id)}</div>{agents}</td>'
         f'<td data-sort="{_e(started_sort)}">{_e(_format_ts(summary.started))}</td>'
-        f'<td data-sort="{_e(activity_sort)}">'
-        f"{_e(_format_ts(summary.last_activity))}</td>"
-        f'<td data-sort="{_e(summary.status)}">{status} {errors}</td>'
-        f'<td class="mono" data-sort="{_e(cost_sort)}">{cost}</td>'
-        "</tr>"
-    )
-
-
-def _analysis_group_status(group: AnalysisSessionGroup) -> str:
-    statuses = [summary.status for summary in group.summaries]
-    if "running" in statuses:
-        return "running"
-    if statuses and all(status == "closed" for status in statuses):
-        return "closed"
-    return "killed"
-
-
-def _analysis_group_usage(group: AnalysisSessionGroup) -> dict[str, Any]:
-    totals = _blank_totals()
-    for session_path in group.agent_sessions:
-        _items, _meta, _kind, session_totals = _load_agent_items(session_path)
-        if session_totals["has_tokens"]:
-            _add_totals(totals, session_totals)
-    return totals
-
-
-def _analysis_group_index_row(group: AnalysisSessionGroup) -> str:
-    if group.group_type == "codemode":
-        session_id = group.group_id
-        kind = "codemode"
-        analysis_href = f"/analysis?id={quote(group.group_id)}"
-    else:
-        _items, meta, detected_kind, _totals = _load_agent_items(group.group_id)
-        session_id = meta.get("id") or Path(group.group_id).stem
-        kind = (
-            detected_kind if detected_kind != "unknown" else group.agent_kind or "agent"
-        )
-        analysis_href = f"/analysis?path={quote(group.group_id)}"
-    binary_links = []
-    for summary in sorted(
-        group.summaries, key=lambda item: item.started or _MIN_DT, reverse=True
-    ):
-        log_href = f"/log/{quote(summary.path.name)}"
-        binary_links.append(
-            f'<a href="{_e(log_href)}" title="{_e(summary.target)}">'
-            f"<span>{_e(_display_target(summary.target))}</span>"
-            f'<span class="mono muted instance">{_e(summary.instance_id)}</span></a>'
-        )
-    status = _analysis_group_status(group)
-    errors_count = sum(summary.errors for summary in group.summaries)
-    errors = (
-        f'<span class="badge error">{errors_count} err</span>' if errors_count else ""
-    )
-    cost, cost_sort = _cost_cell(_analysis_group_usage(group))
-    started_sort = f"{group.started.timestamp():.6f}" if group.started else ""
-    activity_sort = (
-        f"{group.last_activity.timestamp():.6f}" if group.last_activity else ""
-    )
-    return (
-        "<tr>"
-        f'<td data-sort="{_e(session_id.lower())}">'
-        '<div class="analysis-title">'
-        f'<a href="{_e(analysis_href)}"><strong>Analysis session</strong></a>'
-        f'<span class="badge {kind}">{_e(kind)}</span>'
-        f'<span class="mono muted">{_e(session_id)}</span></div>'
-        f'<div class="binary-links">{"".join(binary_links)}</div></td>'
-        f'<td data-sort="{_e(started_sort)}">{_e(_format_ts(group.started))}</td>'
-        f'<td data-sort="{_e(activity_sort)}">'
-        f"{_e(_format_ts(group.last_activity))}</td>"
-        f'<td data-sort="{_e(status)}">{_status_badge_value(status)} {errors}</td>'
+        f'<td data-sort="{_e(activity_sort)}">{_e(_format_ts(summary.last_activity))}</td>'
+        f'<td data-sort="{_e(summary.status)}">{_status_badge(summary)} {errors}</td>'
         f'<td class="mono" data-sort="{_e(cost_sort)}">{cost}</td>'
         "</tr>"
     )
 
 
 def render_index() -> str:
-    summaries = _scan_bridge_logs()
+    summaries = _scan_sessions()
     if not summaries:
-        body = (
-            '<div class="empty">No bridge logs found in '
-            f"<code>{_e(str(LOGS_DIR))}</code>.<br>"
-            "Open a database through the MCP server first.</div>"
+        return _page(
+            "ida-codemode dashboard",
+            '<div class="empty">No sessions found in '
+            f"<code>{_e(str(SESSIONS_DIR))}</code>.<br>"
+            "Open a database through the MCP server first.</div>",
         )
-        return _page("ida-codemode dashboard", body)
-
-    groups, flat = _group_analysis_sessions(summaries)
-    entries: list[tuple[datetime, str]] = [
-        (group.started or _MIN_DT, _analysis_group_index_row(group)) for group in groups
-    ]
-    entries.extend(
-        (summary.started or _MIN_DT, _summary_index_row(summary)) for summary in flat
-    )
-    entries.sort(key=lambda entry: entry[0], reverse=True)
-    rows = [row for _started, row in entries]
-
+    rows = "".join(_summary_index_row(summary) for summary in summaries)
     body = f"""
-<h2>Binary analysis <span class="muted">({len(summaries)} logs)</span></h2>
+<h2>Analysis sessions <span class="muted">({len(summaries)})</span></h2>
 <table class="sessions">
 <thead><tr>
-  <th>Analysis / target</th><th class="sort-desc" data-dir="desc">Started</th>
+  <th>Targets / session</th><th class="sort-desc" data-dir="desc">Started</th>
   <th>Last activity</th><th>Status</th><th>Cost</th>
 </tr></thead>
-<tbody>{"".join(rows)}</tbody>
+<tbody>{rows}</tbody>
 </table>
-<p class="muted" style="font-size:12px;margin-top:8px">Click a column header to sort. Related logs are grouped by explicit CodeMode ID or connected agent sessions; ungrouped logs stay flat.</p>
+<p class="muted" style="font-size:12px;margin-top:8px">Click a column header to sort.</p>
 """
     return _page("ida-codemode dashboard", body)
 
 
 # --------------------------------------------------------------------------
-# Bridge log page
+# Session timeline page
 # --------------------------------------------------------------------------
 
 
@@ -895,159 +715,99 @@ def _card(title: str, ts: datetime | None, body: str, extra_head: str = "") -> s
     )
 
 
-def _render_request_card(
-    request: dict,
-    request_ts: datetime | None,
-    response: dict | None,
+def _render_tool_card(
+    call: dict[str, Any],
+    response: dict[str, Any] | None,
     response_ts: datetime | None,
-    title_prefix: str = "",
 ) -> str:
-    payload = request.get("payload") or {}
-    command = payload.get("command", "?")
-
-    head_extra = ""
-    if request_ts and response_ts:
-        seconds = (response_ts - request_ts).total_seconds()
-        head_extra = f'<span class="muted">{_e(_format_duration(seconds))}</span>'
+    tool = str(call.get("tool", "?"))
+    raw_arguments = call.get("input")
+    arguments: dict[str, Any] = (
+        {str(key): value for key, value in raw_arguments.items()}
+        if isinstance(raw_arguments, dict)
+        else {}
+    )
+    call_ts = _parse_ts(call.get("ts"))
+    duration = ""
+    if response is not None and isinstance(response.get("duration_ms"), (int, float)):
+        duration = _format_duration(float(response["duration_ms"]) / 1000)
+    elif call_ts and response_ts:
+        duration = _format_duration((response_ts - call_ts).total_seconds())
+    extra_head = f'<span class="muted">{_e(duration)}</span>' if duration else ""
 
     parts: list[str] = []
-    if command == "execute":
-        code = payload.get("code", "")
-        parts.append(_python_block(code))
-    elif command == "open":
-        options = {
-            key: payload[key]
-            for key in ("path", "auto_analysis", "new_database", "options")
-            if key in payload
-        }
-        parts.append(_json_block(options))
-    elif command not in ("close", "status"):
-        parts.append(_json_block(payload, collapsed_label="payload"))
+    if tool == "execute" and isinstance(arguments.get("code"), str):
+        parts.append(_python_block(arguments["code"]))
+        rest = {key: value for key, value in arguments.items() if key != "code"}
+        if rest:
+            parts.append(_json_block(rest, collapsed_label="arguments"))
+    else:
+        parts.append(_json_block(arguments, collapsed_label="arguments"))
 
-    status_badge = '<span class="badge muted">pending</span>'
-    if response is not None:
-        response_payload = response.get("payload") or {}
-        if response_payload.get("ok"):
-            status_badge = '<span class="badge open">ok</span>'
-            result = response_payload.get("result")
-            if result is not None:
-                parts.append(_json_block(result, collapsed_label="result"))
-        else:
-            status_badge = '<span class="badge error">error</span>'
-            error = response_payload.get("error", "unknown error")
-            parts.append(
-                f'<div class="mono" style="color:var(--error)">{_e(error)}</div>'
-            )
-            traceback_text = response_payload.get("traceback")
-            if traceback_text:
-                parts.append(_text_block(str(traceback_text), 200, "traceback"))
+    badge = '<span class="badge muted">pending</span>'
+    if response is not None and response.get("event") == "tool_result":
+        badge = '<span class="badge open">ok</span>'
+        output = response.get("output")
+        if tool == "reference" and isinstance(output, str):
+            parts.append(_text_block(output, 800, "reference result"))
+        elif output is not None:
+            parts.append(_json_block(output, collapsed_label="result"))
+    elif response is not None:
+        badge = '<span class="badge error">error</span>'
+        error = response.get("error")
+        parts.append(_json_block(error, collapsed_label="error"))
 
-    title = f"{title_prefix}{_e(command)} {status_badge}"
-    return _card(title, request_ts, "".join(parts), head_extra)
+    return _card(f"{_e(tool)} {badge}", call_ts, "".join(parts), extra_head)
 
 
-def _add_bridge_timeline(
-    records: list[dict],
+def _add_session_timeline(
+    records: list[dict[str, Any]],
     add_event: Callable[[datetime | None, str], None],
-    source_html: str = "",
 ) -> None:
-    """Add one bridge log's cards to a merged timeline."""
-    responses_by_id: dict[str, tuple[dict, datetime | None]] = {}
+    responses: dict[str, tuple[dict[str, Any], datetime | None]] = {}
     for record in records:
-        if record.get("event") == "response":
-            request_id = record.get("request_id")
-            if isinstance(request_id, str):
-                responses_by_id[request_id] = (record, _parse_ts(record.get("ts")))
-
-    title_prefix = f"{source_html} · " if source_html else ""
-    pending_output: list[str] = []
-    pending_ts: datetime | None = None
-
-    def flush_output() -> None:
-        nonlocal pending_ts
-        if not pending_output:
-            return
-        text = "\n".join(pending_output)
-        output = _text_block(text, 800, "bridge output")
-        if source_html:
-            add_event(
-                pending_ts,
-                _card(
-                    f"{source_html} · bridge output",
-                    pending_ts,
-                    f'<div class="bridgeout">{output}</div>',
-                ),
-            )
-        else:
-            add_event(
-                pending_ts,
-                f'<div class="card"><div class="body bridgeout">{output}</div></div>',
-            )
-        pending_output.clear()
-        pending_ts = None
+        if record.get("event") not in {"tool_result", "tool_error"}:
+            continue
+        call_id = record.get("call_id")
+        if isinstance(call_id, str):
+            responses[call_id] = (record, _parse_ts(record.get("ts")))
 
     for record in records:
         event = record.get("event")
         ts = _parse_ts(record.get("ts"))
-        if event == "bridge_output":
-            if pending_ts is None:
-                pending_ts = ts
-            pending_output.append(str(record.get("line", "")))
-            continue
-        flush_output()
-
-        if event == "request":
-            request_id = record.get("request_id")
-            response, response_ts = responses_by_id.get(request_id, (None, None))
-            add_event(
-                ts,
-                _render_request_card(
-                    record, ts, response, response_ts, title_prefix=title_prefix
-                ),
+        if event == "tool_call":
+            response, response_ts = responses.get(
+                str(record.get("call_id")), (None, None)
             )
-        elif event == "response":
+            add_event(ts, _render_tool_card(record, response, response_ts))
+        elif event in {"tool_result", "tool_error"}:
             continue
-        elif event in ("instance_started", "process_started"):
-            details = []
-            if record.get("pid"):
-                details.append(f"pid {record['pid']}")
-            label = " · ".join(details)
-            title = f"{title_prefix}{_e(event)}"
-            if label:
-                title += f' <span class="muted">{_e(label)}</span>'
-            add_event(ts, _card(title, ts, ""))
-        elif event in ("timeout", "request_failed"):
-            add_event(
-                ts,
-                _card(
-                    f'{title_prefix}<span style="color:var(--error)">{_e(event)}</span>',
-                    ts,
-                    _json_block(
-                        {
-                            key: value
-                            for key, value in record.items()
-                            if key not in ("ts", "event")
-                        }
-                    ),
-                ),
-            )
-        elif isinstance(event, str):
-            extra = {
+        elif event in {
+            "mcp_started",
+            "mcp_stopped",
+            "database_opened",
+            "database_reused",
+            "database_rebound",
+            "database_saved",
+            "database_released",
+            "database_release_error",
+        }:
+            details = {
                 key: value
                 for key, value in record.items()
-                if key not in ("ts", "event", "instance_id")
+                if key not in {"schema", "ts", "event", "session", "mcp_server_id"}
             }
-            body = _json_block(extra) if extra else ""
-            add_event(ts, _card(f"{title_prefix}{_e(event)}", ts, body))
-    flush_output()
+            add_event(
+                ts, _card(_e(str(event)), ts, _json_block(details) if details else "")
+            )
 
 
 def _transcript_window(
-    summary: BridgeLogSummary, name: str, session_path: str
+    summary: SessionSummary, name: str, session_path: str
 ) -> tuple[datetime | None, datetime | None]:
-    """Time bounds attributing transcript items to this bridge instance.
+    """Time bounds attributing transcript items to this semantic session.
 
-    A single agent transcript may span several bridge instances. Messages from
+    A single agent transcript may span several semantic sessions. Messages from
     the moment the previous instance ended up to the moment the next instance
     started belong to this one, so the wrap-up after a close and the prompt
     before an open are both captured.
@@ -1078,13 +838,13 @@ def _in_window(
 
 
 def _interleave_transcript(
-    summary: BridgeLogSummary,
+    summary: SessionSummary,
     name: str,
     add_event: Callable[[datetime | None, str], None],
 ) -> int:
     """Add linked-transcript conversation items to the timeline, in time order.
 
-    IDA calls are skipped because they already appear as bridge events. Other
+    IDA calls are skipped because they already appear as session events. Other
     agent tool calls remain visible so the inline transcript is complete.
     Returns the count added.
     """
@@ -1104,8 +864,8 @@ def _interleave_transcript(
     return added
 
 
-def _session_usage(summary: BridgeLogSummary) -> dict[str, Any]:
-    """Token/cost totals for one bridge instance, scoped to its time window.
+def _session_usage(summary: SessionSummary) -> dict[str, Any]:
+    """Token/cost totals for one semantic session, scoped to its time window.
 
     Claude and Pi usage is summed per-message within the window. Codex has only
     whole-session cumulative counts (no per-message data, no cost), so those are
@@ -1139,56 +899,53 @@ def _totals_summary_html(totals: dict[str, Any]) -> str:
     return " · ".join(_e(p) for p in parts)
 
 
-def render_bridge_log(name: str, *, export: bool = False) -> str | None:
-    """Render a bridge session page.
-
-    With export=True, produce a fully self-contained page: navigation links are
-    dropped and server-only controls removed, so the HTML can be saved and
-    shared or hosted as a static artifact.
-    """
-    path = LOGS_DIR / name
+def render_session(name: str, *, export: bool = False) -> str | None:
+    """Render one semantic MCP session, optionally as self-contained HTML."""
     if "/" in name or "\\" in name or not name.endswith(".jsonl"):
         return None
+    path = SESSIONS_DIR / name
     if not path.is_file():
         return None
-
-    summary = _summarize_bridge_log(path)
+    summary = _summarize_session(path)
     records = _read_jsonl(path)
 
-    # Merged timeline of bridge events and (optionally) interleaved transcript
-    # items. Each entry is (sort_ts, insertion_seq, html); a stable sort by
-    # (ts, seq) keeps same-timestamp events in discovery order.
     events: list[tuple[datetime, int, str]] = []
-    seq = 0
+    sequence = 0
 
-    def add_event(ts: datetime | None, html: str) -> None:
-        nonlocal seq
-        events.append((ts or _MIN_DT, seq, html))
-        seq += 1
+    def add_event(ts: datetime | None, event_html: str) -> None:
+        nonlocal sequence
+        events.append((ts or _MIN_DT, sequence, event_html))
+        sequence += 1
 
-    _add_bridge_timeline(records, add_event)
+    _add_session_timeline(records, add_event)
     transcript_count = _interleave_transcript(summary, name, add_event)
-
-    events.sort(key=lambda entry: (entry[0], entry[1]))
-    timeline_html = "".join(entry[2] for entry in events)
+    events.sort(key=lambda item: (item[0], item[1]))
 
     agents = " ".join(
         _agent_link(kind, session_path, link=not export)
         for kind, session_path in sorted(_summary_agent_sessions(summary))
     )
+    targets = (
+        "<br>".join(
+            f'<span class="mono">{_e(str(target.get("idb_path") or target.get("exe_path") or "?"))}</span> '
+            f'<span class="badge">{_e(str(target.get("backend") or "unknown"))}</span>'
+            for target in summary.targets
+        )
+        or '<span class="muted">none recorded</span>'
+    )
     totals = _session_usage(summary)
     meta_rows = [
-        ("Database", f'<span class="mono">{_e(summary.database_path or "?")}</span>'),
-        ("Instance", f'<span class="mono">{_e(summary.instance_id)}</span>'),
+        ("Session", f'<span class="mono">{_e(summary.session_id)}</span>'),
+        ("Targets", targets),
         (
             "Duration",
             _e(
                 _format_duration(
                     (summary.last_activity - summary.started).total_seconds()
                 )
-                if summary.started and summary.last_activity
-                else "?"
-            ),
+            )
+            if summary.started and summary.last_activity
+            else "?",
         ),
         ("Agent session", agents or '<span class="muted">none recorded</span>'),
     ]
@@ -1199,13 +956,13 @@ def render_bridge_log(name: str, *, export: bool = False) -> str | None:
     if totals["has_tokens"]:
         meta_rows.append(("Tokens", _totals_summary_html(totals)))
     if not export:
-        # The absolute log path leaks the host filesystem; omit it from exports.
-        meta_rows.insert(0, ("Log file", f'<span class="mono">{_e(str(path))}</span>'))
+        meta_rows.insert(
+            0, ("Trace file", f'<span class="mono">{_e(str(path))}</span>')
+        )
     kv = "".join(
         f'<span class="k">{key}</span><span class="v">{value}</span>'
         for key, value in meta_rows
     )
-
     controls = [
         '<button onclick="setAllDetails(true)">expand all</button>',
         '<button onclick="setAllDetails(false)">collapse all</button>',
@@ -1217,209 +974,25 @@ def render_bridge_log(name: str, *, export: bool = False) -> str | None:
         )
     if not export:
         controls.append(
-            f'<a href="/export/log/{quote(name)}" style="align-self:center">'
-            "export HTML</a>"
+            f'<a href="/export/session/{quote(name)}" style="align-self:center">export HTML</a>'
         )
-
-    if export:
-        crumbs = ""
-    else:
-        analysis_href: str | None = None
-        if (
-            summary.codemode_id
-            and len(_known_codemode_groups().get(summary.codemode_id, [])) > 1
-        ):
-            analysis_href = f"/analysis?id={quote(summary.codemode_id)}"
-        else:
-            known_sessions = _known_agent_sessions()
-            parent_session = next(
-                (
-                    session_path
-                    for _kind, session_path in _summary_agent_sessions(summary)
-                    if len(known_sessions.get(session_path, [])) > 1
-                ),
-                None,
-            )
-            if parent_session:
-                analysis_href = f"/analysis?path={quote(parent_session)}"
-        if analysis_href:
-            crumbs = (
-                '<div class="crumbs"><a href="/">analysis</a> / '
-                f'<a href="{_e(analysis_href)}">session</a> / {_e(name)}</div>'
-            )
-        else:
-            crumbs = f'<div class="crumbs"><a href="/">analysis</a> / {_e(name)}</div>'
-
+    crumbs = (
+        ""
+        if export
+        else f'<div class="crumbs"><a href="/">sessions</a> / {_e(name)}</div>'
+    )
     body = f"""
 {crumbs}
-<h2><span title="{_e(summary.target)}">{_e(_display_target(summary.target))}</span>
-<span class="muted mono">{_e(summary.instance_id)}</span>
-{_status_badge(summary)}</h2>
+<h2>{_e(summary.display_target)} <span class="muted mono">{_e(summary.session_id)}</span> {_status_badge(summary)}</h2>
 <div class="kv">{kv}</div>
-<div class="toolbar">
-  {"".join(controls)}
-</div>
-{timeline_html}
+<div class="toolbar">{"".join(controls)}</div>
+{"".join(item[2] for item in events)}
 """
     return _page(
-        f"{summary.target} — ida-codemode",
+        f"{summary.display_target} — ida-codemode",
         body,
         subtitle=name,
         standalone=export,
-    )
-
-
-def render_analysis_session(
-    session_path: str = "", codemode_id: str = ""
-) -> str | None:
-    """Render all binary logs and transcripts in one inferred or explicit group."""
-    all_summaries = _scan_bridge_logs()
-    groups, _flat = _group_analysis_sessions(all_summaries)
-    group = next(
-        (
-            candidate
-            for candidate in groups
-            if (
-                codemode_id
-                and candidate.group_type == "codemode"
-                and candidate.group_id == codemode_id
-            )
-            or (
-                session_path
-                and candidate.group_type == "agent"
-                and session_path in candidate.agent_sessions
-            )
-        ),
-        None,
-    )
-    if group is None:
-        return None
-    summaries = sorted(group.summaries, key=lambda item: item.started or _MIN_DT)
-
-    session_data: list[tuple[str, str, list[TranscriptItem], dict[str, str]]] = []
-    for path, recorded_kind in sorted(group.agent_sessions.items()):
-        items, meta, detected_kind, _totals = _load_agent_items(path)
-        kind = detected_kind if detected_kind != "unknown" else recorded_kind
-        session_data.append((path, kind, items, meta))
-
-    events: list[tuple[datetime, int, str]] = []
-    seq = 0
-
-    def add_event(ts: datetime | None, event_html: str) -> None:
-        nonlocal seq
-        events.append((ts or _MIN_DT, seq, event_html))
-        seq += 1
-
-    for summary in summaries:
-        source_html = (
-            f'<a href="/log/{quote(summary.path.name)}" '
-            f'title="{_e(summary.target)}">'
-            f"{_e(_display_target(summary.target))}</a> "
-            f'<span class="mono muted">{_e(summary.instance_id)}</span>'
-        )
-        _add_bridge_timeline(
-            _read_jsonl(summary.path), add_event, source_html=source_html
-        )
-
-    transcript_count = 0
-    for _path, _kind, items, _meta in session_data:
-        for item in items:
-            if (
-                item.category == "tool"
-                and item.tool_name is not None
-                and _codemode_tool_name(item.tool_name) is not None
-            ):
-                continue
-            add_event(item.ts, f'<div class="transcript-item">{item.html}</div>')
-            transcript_count += 1
-
-    events.sort(key=lambda entry: (entry[0], entry[1]))
-    timeline_html = "".join(entry[2] for entry in events)
-
-    if group.group_type == "codemode":
-        session_id = group.group_id
-        display_kind = "codemode"
-    else:
-        primary_meta = next(
-            (
-                meta
-                for path, _kind, _items, meta in session_data
-                if path == group.group_id
-            ),
-            {},
-        )
-        session_id = primary_meta.get("id") or Path(group.group_id).stem
-        kinds = {kind for _path, kind, _items, _meta in session_data}
-        display_kind = next(iter(kinds)) if len(kinds) == 1 else "multi-agent"
-
-    binary_links = []
-    for summary in summaries:
-        binary_links.append(
-            '<div class="card"><div class="body">'
-            f'<a href="/log/{quote(summary.path.name)}" title="{_e(summary.target)}">'
-            f"<strong>{_e(_display_target(summary.target))}</strong></a> "
-            f'<span class="mono muted">{_e(summary.instance_id)}</span> '
-            f"{_status_badge(summary)}"
-            f'<div class="muted">{summary.executes} execute calls · '
-            f"{summary.errors} errors · started {_e(_format_ts(summary.started))}</div>"
-            "</div></div>"
-        )
-
-    working_directories = sorted(
-        {meta["cwd"] for _path, _kind, _items, meta in session_data if meta.get("cwd")}
-    )
-    transcript_links = " ".join(
-        _agent_link(kind, path) for path, kind, _items, _meta in session_data
-    )
-    totals = _analysis_group_usage(group)
-    meta_rows = [
-        ("Session", f'<span class="mono">{_e(session_id)}</span>'),
-        ("Grouping", f'<span class="badge {display_kind}">{_e(display_kind)}</span>'),
-        (
-            "Working directory",
-            "<br>".join(
-                f'<span class="mono">{_e(cwd)}</span>' for cwd in working_directories
-            )
-            or '<span class="muted">not recorded</span>',
-        ),
-        ("Started", _e(_format_ts(group.started))),
-        ("Last activity", _e(_format_ts(group.last_activity))),
-        ("Binary logs", str(len(summaries))),
-        ("Agent sessions", str(len(session_data))),
-        ("Tokens", _totals_summary_html(totals))
-        if totals["has_tokens"]
-        else ("Tokens", '<span class="muted">not recorded</span>'),
-        ("Transcripts", transcript_links or '<span class="muted">none recorded</span>'),
-    ]
-    kv = "".join(
-        f'<span class="k">{key}</span><span class="v">{value}</span>'
-        for key, value in meta_rows
-    )
-    controls = [
-        '<button onclick="setAllDetails(true)">expand all</button>',
-        '<button onclick="setAllDetails(false)">collapse all</button>',
-    ]
-    if transcript_count:
-        controls.append(
-            "<button onclick=\"document.body.classList.toggle('hide-transcript')\">"
-            f"toggle transcript ({transcript_count})</button>"
-        )
-
-    body = f"""
-<div class="crumbs"><a href="/">analysis</a> / {_e(session_id)}</div>
-<h2>Analysis session <span class="badge {display_kind}">{_e(display_kind)}</span>
-<span class="muted mono">{_e(session_id)}</span></h2>
-<div class="kv">{kv}</div>
-<h2>Binaries</h2>
-{"".join(binary_links)}
-<h2>Combined timeline</h2>
-<div class="toolbar">{"".join(controls)}</div>
-{timeline_html}
-"""
-    return _page(
-        f"Analysis {session_id} — ida-codemode",
-        body,
-        subtitle=f"{len(summaries)} binary logs",
     )
 
 
@@ -1462,6 +1035,7 @@ _CODEMODE_TOOL_NAMES = {
     "open_database",
     "execute",
     "list_databases",
+    "save_database",
     "close_database",
 }
 
@@ -1991,7 +1565,7 @@ def _codex_session_totals(records: list[dict]) -> dict[str, Any]:
     """Whole-session token totals from the last Codex token_count event.
 
     Codex records cumulative usage per turn rather than per message, so these
-    totals cannot be scoped to a bridge instance's time window. OpenAI pricing
+    totals cannot be scoped to a semantic session's time window. OpenAI pricing
     is not tracked, so cost is left unavailable.
     """
     totals = _blank_totals()
@@ -2078,15 +1652,15 @@ def render_agent_session(session_path: str) -> str | None:
     transcript_html = "".join(item.html for item in items)
 
     related = "".join(
-        f'<a href="/log/{quote(s.path.name)}">{_e(_display_target(s.target))} '
-        f'<span class="mono muted">{_e(s.instance_id)}</span></a><br>'
+        f'<a href="/session/{quote(s.path.name)}">{_e(s.display_target)} '
+        f'<span class="mono muted">{_e(s.session_id)}</span></a><br>'
         for s in known[session_path]
     )
     meta_rows = [("Transcript", f'<span class="mono">{_e(session_path)}</span>')]
     meta_rows += [(key, _e(value)) for key, value in meta.items()]
     if totals["has_tokens"]:
         meta_rows.append(("Tokens", _totals_summary_html(totals)))
-    meta_rows.append(("Bridge logs", related or "—"))
+    meta_rows.append(("Semantic sessions", related or "—"))
     kv = "".join(
         f'<span class="k">{key}</span><span class="v">{value}</span>'
         for key, value in meta_rows
@@ -2149,22 +1723,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             if route == "/":
                 self._send_html(render_index())
-            elif route.startswith("/log/"):
-                page = render_bridge_log(route[len("/log/") :])
+            elif route.startswith("/session/"):
+                page = render_session(route[len("/session/") :])
                 self._send_html(page) if page else self._not_found()
-            elif route.startswith("/export/log/"):
-                name = route[len("/export/log/") :]
-                page = render_bridge_log(name, export=True)
+            elif route.startswith("/export/session/"):
+                name = route[len("/export/session/") :]
+                page = render_session(name, export=True)
                 if page:
                     self._send_download(page, f"{Path(name).stem}.html")
                 else:
                     self._not_found()
-            elif route == "/analysis":
-                params = parse_qs(url.query)
-                session_path = (params.get("path") or [""])[0]
-                codemode_id = (params.get("id") or [""])[0]
-                page = render_analysis_session(session_path, codemode_id)
-                self._send_html(page) if page else self._not_found()
             elif route == "/agent":
                 params = parse_qs(url.query)
                 session_path = (params.get("path") or [""])[0]
@@ -2188,7 +1756,7 @@ def serve(host: str, port: int, open_browser: bool = False) -> None:
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     url = f"http://{host}:{port}/"
     print(f"ida-codemode dashboard: {url}")
-    print(f"logs directory: {LOGS_DIR}")
+    print(f"sessions directory: {SESSIONS_DIR}")
     if open_browser:
         threading.Timer(0.3, webbrowser.open, args=(url,)).start()
     try:
@@ -2200,25 +1768,25 @@ def serve(host: str, port: int, open_browser: bool = False) -> None:
 
 
 def cli() -> int:
-    global LOGS_DIR
+    global SESSIONS_DIR
     parser = argparse.ArgumentParser(
         prog="ida-codemode-dashboard",
-        description="Web dashboard for ida-codemode bridge sessions",
+        description="Web dashboard for ida-codemode semantic sessions",
     )
     parser.add_argument("--host", default=DEFAULT_HOST, help="Bind address")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Bind port")
     parser.add_argument(
-        "--logs-dir",
+        "--sessions-dir",
         type=Path,
-        default=DEFAULT_LOGS_DIR,
-        help="Directory containing bridge JSONL logs",
+        default=DEFAULT_SESSIONS_DIR,
+        help="Directory containing semantic session JSONL traces",
     )
     parser.add_argument(
         "--open", action="store_true", help="Open the dashboard in a browser"
     )
     args = parser.parse_args()
 
-    LOGS_DIR = args.logs_dir.expanduser().resolve()
+    SESSIONS_DIR = args.sessions_dir.expanduser().resolve()
     serve(args.host, args.port, open_browser=args.open)
     return 0
 

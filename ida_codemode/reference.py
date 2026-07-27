@@ -1,12 +1,11 @@
 """MVP API reference function, needs to be improved"""
 
 import ast
-import re
-import importlib.util
 import importlib.metadata
-
-from typing import Any
+import importlib.util
+import re
 from pathlib import Path
+from typing import Any
 
 _REFERENCE_SPEC_CACHE: dict[str, Any] | None = None
 

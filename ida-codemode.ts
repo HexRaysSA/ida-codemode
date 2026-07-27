@@ -65,10 +65,10 @@ export default function idaCodemode(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (client) return;
 
-    const next = new Client({ name: "ida-codemode-pi", version: "0.1.0" });
+    const next = new Client({ name: "ida-codemode-pi", version: "0.2.0" });
     const transport = new StdioClientTransport({
       command: "uv",
-      args: ["run", "--project", PACKAGE_ROOT, "ida-codemode-mcp", "mcp"],
+      args: ["run", "--project", PACKAGE_ROOT, "ida-codemode-mcp"],
       cwd: PACKAGE_ROOT,
       env: {
         IDA_CODEMODE_ID: process.env.IDA_CODEMODE_ID ?? "",

@@ -1,21 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict, is_dataclass
-from enum import Enum
 import builtins
 import inspect
 import json
-from pathlib import Path
 import queue
 import sys
 import threading
 import time
 import traceback
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import asdict, is_dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any
 
 from .registry import BackendName
-
 
 DEFAULT_TIMEOUT_SECONDS = 60.0
 SAVE_TIMEOUT_SECONDS = 300.0
@@ -89,7 +89,7 @@ def _find_callable(code: str, global_ns: dict[str, Any]) -> Callable[..., Any]:
         return candidate
 
     local_ns: dict[str, Any] = {}
-    exec(stripped, global_ns, local_ns)
+    exec(stripped, global_ns, local_ns)  # noqa: S102 -- intentional Code Mode surface
     preferred_names = ("run", "execute", "main")
     for name in preferred_names:
         value = local_ns.get(name)
@@ -168,11 +168,11 @@ class IDARuntime:
         default_timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         import ida_auto
+        import ida_domain
         import ida_kernwin
         import ida_loader
         import idaapi
         import idc
-        import ida_domain
         from ida_domain import Database
         from ida_domain.database import IdaCommandOptions
 
@@ -202,14 +202,6 @@ class IDARuntime:
         self._active_generation = 0
         self._active_kind: str | None = None
         self._active_cancel_event: threading.Event | None = None
-        self._closing = threading.Event()
-
-    def _request_cancel(self) -> None:
-        with self._active_lock:
-            if self._active_kind in {"execute", "analysis"}:
-                if self._active_cancel_event is not None:
-                    self._active_cancel_event.set()
-                self.ida_kernwin.set_cancelled()
 
     def _run_sync(
         self,
@@ -223,12 +215,6 @@ class IDARuntime:
         results: queue.Queue[tuple[bool, Any, str | None]] = queue.Queue(maxsize=1)
 
         with self._operation_lock:
-            if self._closing.is_set() and kind != "close":
-                raise APIError(
-                    "database_closing",
-                    "The database is closing",
-                    status=409,
-                )
             cancel_event = threading.Event()
             with self._active_lock:
                 self._active_generation += 1
@@ -295,7 +281,7 @@ class IDARuntime:
                         sys.settrace(timeout_trace)
                     result = function()
                     results.put((True, result, None))
-                except BaseException as exc:
+                except BaseException as exc:  # noqa: BLE001 -- marshal any IDA callback failure
                     results.put((False, exc, traceback.format_exc()))
                 finally:
                     sys.settrace(old_trace)
@@ -417,42 +403,3 @@ class IDARuntime:
             timeout=SAVE_TIMEOUT_SECONDS,
             batch=False,
         )
-
-    def close_database(self) -> dict[str, Any]:
-        if self.backend == "gui":
-            raise APIError(
-                "gui_database_owned_by_user",
-                "The database belongs to an interactive IDA session and cannot be closed remotely",
-                status=409,
-            )
-        self._closing.set()
-        self._request_cancel()
-
-        def close() -> dict[str, Any]:
-            if self.database is None:
-                raise APIError(
-                    "no_database", "No database is currently open", status=409
-                )
-            path = (
-                self.ida_loader.get_path(self.ida_loader.PATH_TYPE_IDB)
-                or self.database_path
-            )
-            self.database.close(save=True)
-            self.database = None
-            return {
-                "closed": True,
-                "saved": True,
-                "idb_path": str(Path(path).resolve()) if path else "",
-            }
-
-        try:
-            return self._run_sync(
-                close,
-                kind="close",
-                timeout=SAVE_TIMEOUT_SECONDS,
-                batch=False,
-            )
-        except Exception:
-            # A failed final save leaves the owned database open and usable.
-            self._closing.clear()
-            raise

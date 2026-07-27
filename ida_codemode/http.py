@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, HTTPServer
 import hmac
 import json
 import socketserver
-from typing import BinaryIO, Callable, Mapping
-from urllib.parse import urlsplit
 import zlib
-
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from io import BufferedIOBase
+from urllib.parse import urlsplit
 
 HOST = "127.0.0.1"
 POST_BODY_LIMIT = 4 * 1024 * 1024
@@ -23,7 +23,7 @@ class HTTPResponse:
     content_type: str = "application/json"
     headers: Mapping[str, str] = field(default_factory=dict)
     after_send: Callable[[], None] | None = None
-    stream: Callable[[BinaryIO], None] | None = None
+    stream: Callable[[BufferedIOBase], None] | None = None
 
 
 def json_response(
@@ -45,7 +45,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     """Authenticated HTTP/1.1 handler with bounded request decoding."""
 
     server: LocalHTTPServer
-    server_version = "ida-codemode/0.1"
+    server_version = "ida-codemode/0.2.0"
     sys_version = ""
     protocol_version = "HTTP/1.1"
     timeout = 30
@@ -95,7 +95,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 elif response.body:
                     self.wfile.write(response.body)
                     self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+        except (
+            BrokenPipeError,
+            ConnectionResetError,
+            ConnectionAbortedError,
+            TimeoutError,
+        ):
             pass
         finally:
             # Lease accounting must finish even if the peer disconnects while
@@ -150,7 +155,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         target = urlsplit(self.path)
         try:
             response = self.server.application(method, target.path, target.query, body)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- application is an isolation boundary
             # Application dispatch should normally convert its own failures.
             response = json_response(
                 500, {"ok": False, "error": "Internal Server Error"}

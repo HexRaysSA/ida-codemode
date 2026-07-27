@@ -4,8 +4,7 @@
       "command": "uv",
       "args": [
         "run",
-        "ida-codemode-mcp",
-        "mcp"
+        "ida-codemode-mcp"
       ],
       "cwd": ".",
       "env": {

@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from enum import Enum
 import errno
 import glob
 import hashlib
 import json
 import os
-from pathlib import Path
 import socket
 import sys
 import tempfile
 import time
-from typing import Any, Literal
+from dataclasses import asdict, dataclass
+from enum import Enum
+from pathlib import Path
+from types import TracebackType
+from typing import Any, Literal, Self
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-
 
 HOST = "127.0.0.1"
 STATE_DIR = Path.home() / ".ida-codemode"
@@ -76,10 +76,7 @@ class FileLock:
         if self.file is not None:
             return
         ensure_private_directory(self.path.parent)
-        try:
-            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
-        except OSError:
-            raise
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         self.file = os.fdopen(fd, "r+b", buffering=0)
         if os.fstat(fd).st_size == 0:
             self.file.write(b"\0")
@@ -140,11 +137,16 @@ class FileLock:
                 self.file.close()
                 self.file = None
 
-    def __enter__(self) -> FileLock:
+    def __enter__(self) -> Self:
         self.acquire()
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self.close()
 
 
@@ -204,7 +206,9 @@ class InstanceRegistration:
         self.token = token
         suffix = record_suffix or os.urandom(3).hex()
         if len(suffix) != 6 or any(c not in "0123456789abcdef" for c in suffix):
-            raise ValueError("record suffix must be six lowercase hexadecimal characters")
+            raise ValueError(
+                "record suffix must be six lowercase hexadecimal characters"
+            )
         self.record_id = f"{os.getpid()}-{suffix}"
         self.lock = FileLock(self.directory / f"{self.record_id}.lock")
         self.lock.acquire(timeout=0)
@@ -220,7 +224,9 @@ class InstanceRegistration:
         if not self.identity.idb_path:
             raise ValueError("an instance cannot register without an IDB path")
         idb_path = canonical_path(self.identity.idb_path)
-        exe_path = canonical_path(self.identity.exe_path) if self.identity.exe_path else ""
+        exe_path = (
+            canonical_path(self.identity.exe_path) if self.identity.exe_path else ""
+        )
         entry = RegistryEntry(
             record_id=self.record_id,
             backend=self.identity.backend,
@@ -290,7 +296,7 @@ def load_registry_entry(path: str | os.PathLike[str]) -> RegistryEntry:
     entry_path = Path(path)
     payload = json.loads(entry_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
-        raise ValueError("registry entry must be a JSON object")
+        raise TypeError("registry entry must be a JSON object")
     required = {
         "record_id",
         "backend",
@@ -310,25 +316,35 @@ def load_registry_entry(path: str | os.PathLike[str]) -> RegistryEntry:
         raise ValueError("record ID does not match its filename")
     if payload["backend"] not in ("gui", "idalib"):
         raise ValueError("registry entry has an invalid backend")
-    if not isinstance(payload["pid"], int) or isinstance(payload["pid"], bool) or payload["pid"] <= 0:
+    if (
+        not isinstance(payload["pid"], int)
+        or isinstance(payload["pid"], bool)
+        or payload["pid"] <= 0
+    ):
         raise ValueError("registry entry has an invalid pid")
     if not payload["record_id"].startswith(f"{payload['pid']}-"):
         raise ValueError("record ID does not match its pid")
-    if not isinstance(payload["port"], int) or isinstance(payload["port"], bool) or not 1 <= payload["port"] <= 65535:
+    if (
+        not isinstance(payload["port"], int)
+        or isinstance(payload["port"], bool)
+        or not 1 <= payload["port"] <= 65535
+    ):
         raise ValueError("registry entry has an invalid port")
     if not isinstance(payload["token"], str) or not payload["token"]:
         raise ValueError("registry entry has an invalid token")
     if not isinstance(payload["version"], int) or isinstance(payload["version"], bool):
-        raise ValueError("registry entry has an invalid version")
+        raise TypeError("registry entry has an invalid version")
     for key in ("idb_path", "idb_key", "exe_path"):
         if not isinstance(payload[key], str):
-            raise ValueError(f"registry entry has an invalid {key}")
+            raise TypeError(f"registry entry has an invalid {key}")
     if payload["idb_key"] != idb_key(payload["idb_path"]):
         raise ValueError("registry entry has an invalid IDB key")
     if not isinstance(payload["managed"], bool):
-        raise ValueError("registry entry has an invalid managed flag")
-    if isinstance(payload["started_at"], bool) or not isinstance(payload["started_at"], (int, float)):
-        raise ValueError("registry entry has an invalid start time")
+        raise TypeError("registry entry has an invalid managed flag")
+    if isinstance(payload["started_at"], bool) or not isinstance(
+        payload["started_at"], (int, float)
+    ):
+        raise TypeError("registry entry has an invalid start time")
     return RegistryEntry(**payload)
 
 
@@ -337,7 +353,9 @@ def _is_timeout(error: BaseException) -> bool:
     return isinstance(reason, (TimeoutError, socket.timeout))
 
 
-def probe_health(entry: RegistryEntry, timeout: float = DEFAULT_TIMEOUT) -> tuple[bool, str | None]:
+def probe_health(
+    entry: RegistryEntry, timeout: float = DEFAULT_TIMEOUT
+) -> tuple[bool, str | None]:
     request = Request(
         f"http://{HOST}:{entry.port}/health",
         headers={
@@ -401,14 +419,16 @@ def scan_instances(
 ) -> list[DiscoveredInstance]:
     """Return live records, reaping only records whose lock is acquirable."""
 
-    directory = ensure_private_directory(REGISTRY_DIR if registry_dir is None else registry_dir)
+    directory = ensure_private_directory(
+        REGISTRY_DIR if registry_dir is None else registry_dir
+    )
     discovered: list[DiscoveredInstance] = []
     for name in sorted(glob.glob(str(directory / "*.json"))):
         path = Path(name)
         lock = FileLock(directory / f"{path.stem}.lock")
         try:
             entry = load_registry_entry(path)
-        except (OSError, ValueError, json.JSONDecodeError):
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
             try:
                 if lock.try_acquire():
                     _reap_locked_record(path, lock)

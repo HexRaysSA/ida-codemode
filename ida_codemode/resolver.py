@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import Callable
+from collections.abc import Callable
+from pathlib import Path
 
 from .registry import (
     LOG_DIR,
@@ -58,7 +58,9 @@ def _single(
         return None
     if len(instances) > 1:
         records = ", ".join(item.entry.record_id for item in instances)
-        raise AmbiguousInstance(f"multiple live instances match {description}: {records}")
+        raise AmbiguousInstance(
+            f"multiple live instances match {description}: {records}"
+        )
     return instances[0]
 
 
@@ -119,18 +121,27 @@ def spawn_worker(
     if input_path == source and source != expected_idb:
         command.extend(["--output-database", expected_idb])
 
-    kwargs: dict[str, object] = {
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-    }
+    process: subprocess.Popen[bytes]
     if os.name == "nt":
-        kwargs["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=False,
+            creationflags=(
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+            ),
         )
     else:
-        kwargs["start_new_session"] = True
-    process = subprocess.Popen(command, **kwargs)  # type: ignore[arg-type]
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=False,
+            start_new_session=True,
+        )
     log_path = ensure_private_directory(LOG_DIR) / f"{process.pid}-{suffix}.log"
     return process, log_path
 
@@ -213,7 +224,9 @@ def resolve_instance(
     if instance is not None:
         return instance
 
-    spawn_lock = FileLock(ensure_private_directory(spawn_dir) / f"{idb_key(expected_idb)}.lock")
+    spawn_lock = FileLock(
+        ensure_private_directory(spawn_dir) / f"{idb_key(expected_idb)}.lock"
+    )
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError(f"timed out resolving {expected_idb}")

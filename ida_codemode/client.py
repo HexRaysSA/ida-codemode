@@ -5,12 +5,13 @@ import json
 import socket
 import threading
 import time
-from typing import Any
+from types import TracebackType
+from typing import Any, Self
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .registry import HOST, RegistryEntry
-from .resolver import resolve_instance
+from .resolver import ResolveError, resolve_instance
 
 
 class ClientError(RuntimeError):
@@ -145,7 +146,7 @@ class DatabaseHandle:
                     entry = resolve_instance(self.path, timeout=self.resolve_timeout)
                     self._install_lease(entry)
                     break
-                except Exception:
+                except (ClientError, ResolveError, OSError, ValueError):
                     continue
 
     def _request(
@@ -178,8 +179,10 @@ class DatabaseHandle:
             try:
                 response_payload = json.loads(exc.read())
             except (UnicodeDecodeError, json.JSONDecodeError):
-                raise ClientError(f"Code Mode request failed with HTTP {status}") from exc
-        except (URLError, OSError, socket.timeout) as exc:
+                raise ClientError(
+                    f"Code Mode request failed with HTTP {status}"
+                ) from exc
+        except (TimeoutError, URLError, OSError) as exc:
             raise ClientError(f"Code Mode request failed: {exc}") from exc
         if not isinstance(response_payload, dict):
             raise ClientError("Code Mode response was not a JSON object")
@@ -239,8 +242,13 @@ class DatabaseHandle:
 
     disconnect = close
 
-    def __enter__(self) -> DatabaseHandle:
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self.close()
