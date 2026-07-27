@@ -13,7 +13,7 @@
   "repository": "https://github.com/HexRaysSA/ida-codemode-mcp.git",
   "pi": {
     "extensions": [
-      "./extensions/ida-codemode.ts"
+      "./ida-codemode.ts"
     ]
   },
   "dependencies": {
