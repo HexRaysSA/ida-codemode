@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import signal
 import sys
 from typing import Any
 
-from ida_domain import Database
-from ida_domain.database import IdaCommandOptions
-
-from .registry import InstanceIdentity, REGISTRY_DIR
+from .registry import LOG_DIR, REGISTRY_DIR, InstanceIdentity, ensure_private_directory
 from .runtime import IDARuntime, AnalysisState, create_autoanalysis_hook
-from .server import CodeModeHTTPServer
+from .server import CodeModeHTTPServer, DEFAULT_LEASE_GRACE_SECONDS
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -31,11 +29,50 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--processor", help="IDA processor module name")
     parser.add_argument("--log-file", type=Path, help="IDA kernel log file")
+    parser.add_argument(
+        "--managed",
+        action="store_true",
+        help="Exit after the last Code Mode client lease is released",
+    )
+    parser.add_argument(
+        "--record-suffix",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--lease-grace",
+        type=float,
+        default=DEFAULT_LEASE_GRACE_SECONDS,
+        help=argparse.SUPPRESS,
+    )
     return parser
+
+
+def _redirect_output(record_id: str) -> Path:
+    directory = ensure_private_directory(LOG_DIR)
+    path = directory / f"{record_id}.log"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.dup2(fd, 1)
+    os.dup2(fd, 2)
+    if fd not in (1, 2):
+        os.close(fd)
+    # Re-wrap after dup2 so Python buffering does not hide startup failures.
+    sys.stdout = os.fdopen(1, "w", buffering=1, closefd=False)
+    sys.stderr = os.fdopen(2, "w", buffering=1, closefd=False)
+    return path
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    suffix = args.record_suffix or os.urandom(3).hex()
+    if len(suffix) != 6 or any(c not in "0123456789abcdef" for c in suffix):
+        print("ida-codemode-worker: invalid record suffix", file=sys.stderr)
+        return 2
+    record_id = f"{os.getpid()}-{suffix}"
+    _redirect_output(record_id)
+
+    if args.lease_grace < 0:
+        print("ida-codemode-worker: lease grace must not be negative", file=sys.stderr)
+        return 2
     try:
         input_path = args.input.expanduser().resolve(strict=True)
     except FileNotFoundError:
@@ -44,6 +81,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    # Import IDA only after the process-specific log is installed, so import
+    # and initialization failures are available to the spawning client.
+    from ida_domain import Database
+    from ida_domain.database import IdaCommandOptions
     import ida_auto
     import ida_kernwin
     import ida_loader
@@ -100,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             idb_path=idb_path,
             exe_path=exe_path,
             backend="idalib",
+            managed=args.managed,
         )
         database_options = {
             "backend": "idalib",
@@ -124,15 +166,17 @@ def main(argv: list[str] | None = None) -> int:
             identity,
             analysis_state,
             REGISTRY_DIR,
+            record_suffix=suffix,
+            lease_grace=args.lease_grace,
             on_shutdown=kernwin.stop_serving,
         )
         server.start()
         print(f"[ida-codemode] {server.url}", flush=True)
 
         # In IDA 9.4+, serve() dispatches execute_sync requests from HTTP
-        # threads until /close_database or a signal calls stop_serving(). A
-        # signal received during database startup must not be lost before the
-        # serve loop begins.
+        # threads until managed lease shutdown or a signal calls
+        # stop_serving(). A signal received during database startup must not be
+        # lost before the serve loop begins.
         if stop_signal is None:
             kernwin.serve()
         return 128 + stop_signal if stop_signal is not None else 0
@@ -142,11 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if server is not None:
             server.stop()
-        if (
-            database is not None
-            and runtime is not None
-            and runtime.database is not None
-        ):
+        if database is not None and runtime is not None and runtime.database is not None:
             try:
                 # We are back on the idalib main thread after serve().
                 database.close(save=True)
@@ -161,6 +201,9 @@ def main(argv: list[str] | None = None) -> int:
                 database.close(save=True)
             except Exception:
                 pass
+        # The lifetime lock is deliberately released only after the IDB close.
+        if server is not None:
+            server.release_registration()
         try:
             analysis_hook.unhook()
         except Exception:

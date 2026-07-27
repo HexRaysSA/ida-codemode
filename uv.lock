@@ -41,7 +41,7 @@ dev = [
 [[package]]
 name = "ida-domain"
 version = "0.5.1.dev1"
-source = { git = "https://github.com/HexRaysSA/ida-domain?branch=include-docs-examples#a0f4ac9f2c27368a7a8cefe17c3fc715f514dc50" }
+source = { git = "https://github.com/HexRaysSA/ida-domain?branch=include-docs-examples#122e2435a71c3e767ea7e28991dae40ab73f2909" }
 dependencies = [
     { name = "idapro" },
     { name = "packaging" },
@@ -50,11 +50,11 @@ dependencies = [
 
 [[package]]
 name = "idapro"
-version = "0.0.7"
+version = "0.0.10"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/da/65/b49019b4713b852349b6516b786c8542930aca7701bb2552b18f4e4a4e25/idapro-0.0.7.tar.gz", hash = "sha256:0b2e184b19e4d8404ea48b1f17f39b21b054931315940ee9716ef8559144988f", size = 966886, upload-time = "2025-10-29T09:07:21.695Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f8/75/249c605cc144a6b3778c48381d31ff9242f3e0b7ae23a9ca9c27224e641a/idapro-0.0.10.tar.gz", hash = "sha256:417c03c4605d18417e470f6a748e397b39d6d5829ebd3bbdedd92ff5b9092d11", size = 1060989, upload-time = "2026-07-15T12:55:22.313Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fb/5d/6e6565d9a1d6ecf1b48a2bea326f0e3dbe4c3199adfc0a5456b83d235f99/idapro-0.0.7-py3-none-any.whl", hash = "sha256:3cb8d48ac21a19e6a0ef65eacd0005a1f9c40a264a7bcb675914eaa20c6e1371", size = 1999440, upload-time = "2025-10-29T09:07:19.998Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/83/7b02832cc8b057f686cccdb771fe80282f801a9b798961f8070bb468c73c/idapro-0.0.10-py3-none-any.whl", hash = "sha256:43f227953a0e348ced21c050d277b7ce34103e2ce05fc739b7d8c186ef0e1542", size = 2194897, upload-time = "2026-07-15T12:55:20.88Z" },
 ]
 
 [[package]]
@@ -68,11 +68,11 @@ wheels = [
 
 [[package]]
 name = "packaging"
-version = "26.1"
+version = "26.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/df/de/0d2b39fb4af88a0258f3bac87dfcbb48e73fbdea4a2ed0e2213f9a4c2f9a/packaging-26.1.tar.gz", hash = "sha256:f042152b681c4bfac5cae2742a55e103d27ab2ec0f3d88037136b6bfe7c9c5de", size = 215519, upload-time = "2026-04-14T21:12:49.362Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d7/f1/e7a6dd94a8d4a5626c03e4e99c87f241ba9e350cd9e6d75123f992427270/packaging-26.2.tar.gz", hash = "sha256:ff452ff5a3e828ce110190feff1178bb1f2ea2281fa2075aadb987c2fb221661", size = 228134, upload-time = "2026-04-24T20:15:23.917Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7a/c2/920ef838e2f0028c8262f16101ec09ebd5969864e5a64c4c05fad0617c56/packaging-26.1-py3-none-any.whl", hash = "sha256:5d9c0669c6285e491e0ced2eee587eaf67b670d94a19e94e3984a481aba6802f", size = 95831, upload-time = "2026-04-14T21:12:47.56Z" },
+    { url = "https://files.pythonhosted.org/packages/df/b2/87e62e8c3e2f4b32e5fe99e0b86d576da1312593b39f47d8ceef365e95ed/packaging-26.2-py3-none-any.whl", hash = "sha256:5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e", size = 100195, upload-time = "2026-04-24T20:15:22.081Z" },
 ]
 
 [[package]]
@@ -136,11 +136,11 @@ wheels = [
 
 [[package]]
 name = "typing-extensions"
-version = "4.15.0"
+version = "4.16.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/72/94/1a15dd82efb362ac84269196e94cf00f187f7ed21c242792a923cdb1c61f/typing_extensions-4.15.0.tar.gz", hash = "sha256:0cea48d173cc12fa28ecabc3b837ea3cf6f38c6d1136f85cbaaf598984861466", size = 109391, upload-time = "2025-08-25T13:49:26.313Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f6/cc/6253133b5bb138fc3306cebfbda2c520f545d36b5be2c7255cc528bb45d6/typing_extensions-4.16.0.tar.gz", hash = "sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5", size = 113555, upload-time = "2026-07-02T08:40:05.92Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/18/67/36e9267722cc04a6b9f15c7f3441c2363321a3ea07da7ae0c0707beb2a9c/typing_extensions-4.15.0-py3-none-any.whl", hash = "sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548", size = 44614, upload-time = "2025-08-25T13:49:24.86Z" },
+    { url = "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl", hash = "sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8", size = 45571, upload-time = "2026-07-02T08:40:04.659Z" },
 ]
 
 [[package]]

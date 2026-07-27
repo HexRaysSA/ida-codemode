@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import hmac
 import json
 import socketserver
-from typing import Callable, Mapping
+from typing import BinaryIO, Callable, Mapping
 from urllib.parse import urlsplit
 import zlib
 
@@ -19,10 +19,11 @@ MAX_TRAILER_BYTES = 64 * 1024
 @dataclass
 class HTTPResponse:
     status: int
-    body: bytes
+    body: bytes = b""
     content_type: str = "application/json"
     headers: Mapping[str, str] = field(default_factory=dict)
     after_send: Callable[[], None] | None = None
+    stream: Callable[[BinaryIO], None] | None = None
 
 
 def json_response(
@@ -72,24 +73,33 @@ class RequestHandler(BaseHTTPRequestHandler):
         return True
 
     def _respond(self, response: HTTPResponse) -> None:
-        self.send_response(response.status)
-        self.send_header("Content-Type", response.content_type)
-        self.send_header("Content-Length", str(len(response.body)))
-        self.send_header("X-Content-Type-Options", "nosniff")
-        if self.close_connection:
-            self.send_header("Connection", "close")
-        for name, value in response.headers.items():
-            self.send_header(name, value)
-        self.end_headers()
         try:
-            if self.command != "HEAD" and response.body:
-                self.wfile.write(response.body)
-                self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
+            self.send_response(response.status)
+            self.send_header("Content-Type", response.content_type)
+            if response.stream is None:
+                self.send_header("Content-Length", str(len(response.body)))
+            else:
+                # A lease stream owns this connection until it disconnects.
+                self.close_connection = True
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if self.close_connection and response.stream is None:
+                self.send_header("Connection", "close")
+            for name, value in response.headers.items():
+                self.send_header(name, value)
+            self.end_headers()
+            if self.command != "HEAD":
+                if response.stream is not None:
+                    response.stream(self.wfile)
+                elif response.body:
+                    self.wfile.write(response.body)
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
             pass
         finally:
-            # A close operation has already taken effect by this point. Finish
-            # shutdown even if the peer disconnected before reading its reply.
+            # Lease accounting must finish even if the peer disconnects while
+            # headers or stream data are being sent.
             if response.after_send is not None:
                 response.after_send()
 
@@ -137,9 +147,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         return True
 
     def _dispatch(self, method: str, body: bytes | None = None) -> None:
-        path = urlsplit(self.path).path
+        target = urlsplit(self.path)
         try:
-            response = self.server.application(method, path, body)
+            response = self.server.application(method, target.path, target.query, body)
         except Exception:
             # Application dispatch should normally convert its own failures.
             response = json_response(
@@ -357,7 +367,7 @@ class LocalHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
     def __init__(
         self,
         token: str,
-        application: Callable[[str, str, bytes | None], HTTPResponse],
+        application: Callable[[str, str, str, bytes | None], HTTPResponse],
     ) -> None:
         super().__init__((HOST, 0), RequestHandler)
         self.port = int(self.server_address[1])
