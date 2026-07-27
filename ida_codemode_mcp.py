@@ -11,17 +11,13 @@ This server exposes a compact Code Mode surface for the ida-domain API:
 from __future__ import annotations
 
 import argparse
-import ast
 import asyncio
 import atexit
 import builtins
-import importlib.metadata
-import importlib.util
 import inspect
 import json
 import os
 import queue
-import re
 import signal
 import subprocess
 import sys
@@ -883,7 +879,7 @@ def _serve(transport: str) -> None:
 
     try:
         input("Server is running, press Enter or Ctrl+C to stop...")
-    except KeyboardInterrupt, EOFError:
+    except (KeyboardInterrupt, EOFError):
         print("\nStopping server...")
     finally:
         BRIDGE_MANAGER.shutdown()

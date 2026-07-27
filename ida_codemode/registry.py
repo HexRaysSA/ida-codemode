@@ -120,7 +120,7 @@ def remove_entry(path: str | os.PathLike[str] | None, token: str) -> None:
         entry_path.unlink()
     except FileNotFoundError:
         pass
-    except OSError, UnicodeDecodeError, json.JSONDecodeError:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         # Shutdown cleanup is best effort. Never unlink an entry that could not
         # be authenticated as ours.
         pass
@@ -184,7 +184,7 @@ def probe_health(
         return "unavailable", f"HTTP {status}"
     try:
         payload = json.loads(body)
-    except UnicodeDecodeError, json.JSONDecodeError:
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return "mismatch", "health response was not JSON"
     expected = asdict(entry)
     expected.pop("port")
@@ -208,7 +208,7 @@ def discover_instances(
         path = Path(name)
         try:
             entry = load_registry_entry(path)
-        except OSError, ValueError, json.JSONDecodeError:
+        except (OSError, ValueError, json.JSONDecodeError):
             try:
                 path.unlink()
             except OSError:

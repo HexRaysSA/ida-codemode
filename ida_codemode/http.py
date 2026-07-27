@@ -85,7 +85,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             if self.command != "HEAD" and response.body:
                 self.wfile.write(response.body)
                 self.wfile.flush()
-        except BrokenPipeError, ConnectionResetError:
+        except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
             # A close operation has already taken effect by this point. Finish

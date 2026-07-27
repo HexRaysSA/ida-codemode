@@ -1969,7 +1969,7 @@ def _codex_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, s
                 tool_name = str(payload.get("name", "tool"))
                 try:
                     arguments = json.loads(payload.get("arguments", "{}"))
-                except json.JSONDecodeError, TypeError:
+                except (json.JSONDecodeError, TypeError):
                     arguments = payload.get("arguments")
                 body_parts = [_tool_input_html(tool_name, arguments)]
                 if isinstance(call_id, str) and call_id in call_outputs:

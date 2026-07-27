@@ -226,7 +226,7 @@ started, stopped, or restarted independently, and it only ever reads files:
   modules together with the `ida_codemode` HTTP runtime and GUI plugin entry point. It exposes
   `ida-codemode-mcp`, `ida-codemode-dashboard`, and `ida-codemode-worker` console scripts.
   `ida-domain` is pulled straight from a git branch (`[tool.uv.sources]`), not PyPI. Requires
-  Python `>=3.14`.
+  Python `>=3.11`.
   Since all three plugin manifests invoke `uv run --project <root> ida-codemode-mcp mcp`, local
   edits to the `.py` files take effect immediately — no build step in the dev loop.
 - **Node/TS extension**: `package.json` marks the package as a `pi-package` and declares
