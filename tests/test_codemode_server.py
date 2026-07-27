@@ -1,0 +1,281 @@
+from __future__ import annotations
+
+import gzip
+from http.client import HTTPConnection
+import json
+from pathlib import Path
+import socket
+import time
+
+from ida_codemode.http import POST_BODY_LIMIT
+from ida_codemode.registry import InstanceIdentity, load_registry_entry
+from ida_codemode.runtime import APIError, AnalysisState
+from ida_codemode.server import CodeModeHTTPServer
+
+
+class FakeBackend:
+    def __init__(self, analysis: AnalysisState, *, gui: bool = False) -> None:
+        self.analysis = analysis
+        self.gui = gui
+        self.calls: list[tuple[object, ...]] = []
+
+    def execute_python(self, code: str, timeout: float | None):
+        self.calls.append(("execute", code, timeout))
+        return {"code": code}
+
+    def wait_autoanalysis(self, timeout: float | None):
+        self.calls.append(("wait", timeout))
+        self.analysis.mark_complete()
+        return self.analysis.snapshot()
+
+    def save_database(self):
+        self.calls.append(("save",))
+        return {"saved": True, "idb_path": "/tmp/test.i64"}
+
+    def close_database(self):
+        self.calls.append(("close",))
+        if self.gui:
+            raise APIError(
+                "gui_database_owned_by_user",
+                "cannot close a GUI database",
+                status=409,
+            )
+        return {"closed": True, "saved": True}
+
+
+def request(
+    server: CodeModeHTTPServer,
+    method: str,
+    path: str,
+    payload: object | None = None,
+    *,
+    token: str | None = None,
+    headers: dict[str, str] | None = None,
+):
+    body = None if payload is None else json.dumps(payload).encode()
+    connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+    request_headers = {
+        "Authorization": f"Bearer {token or server.token}",
+        **(headers or {}),
+    }
+    connection.request(method, path, body=body, headers=request_headers)
+    response = connection.getresponse()
+    data = response.read()
+    result = response.status, json.loads(data), dict(response.getheaders())
+    connection.close()
+    return result
+
+
+def raw_request(server: CodeModeHTTPServer, data: bytes):
+    connection = socket.create_connection(("127.0.0.1", server.port), timeout=3)
+    try:
+        connection.sendall(data)
+        response = b""
+        while b"\r\n\r\n" not in response:
+            response += connection.recv(4096)
+        head, body = response.split(b"\r\n\r\n", 1)
+        length = 0
+        for line in head.split(b"\r\n")[1:]:
+            if line.lower().startswith(b"content-length:"):
+                length = int(line.split(b":", 1)[1])
+        while len(body) < length:
+            body += connection.recv(4096)
+        return int(head.split(b" ", 2)[1]), body[:length]
+    finally:
+        connection.close()
+
+
+def make_server(tmp_path: Path, *, gui: bool = False):
+    analysis = AnalysisState()
+    backend = FakeBackend(analysis, gui=gui)
+    identity = InstanceIdentity(
+        idb_path="/tmp/test.i64",
+        exe_path="/tmp/test.exe",
+        backend="gui" if gui else "idalib",
+    )
+    server = CodeModeHTTPServer(
+        backend,
+        identity,
+        analysis,
+        tmp_path,
+        token="test-token",
+    )
+    server.start()
+    return server, backend
+
+
+def test_health_registry_and_authentication(tmp_path: Path):
+    server, _ = make_server(tmp_path)
+    try:
+        status, payload, headers = request(server, "GET", "/health")
+        assert status == 200
+        assert payload == {
+            "status": "ok",
+            "token": "test-token",
+            "idb_path": "/tmp/test.i64",
+            "exe_path": "/tmp/test.exe",
+            "backend": "idalib",
+        }
+        assert headers["Server"].strip() == "ida-codemode/0.1"
+
+        entry = load_registry_entry(tmp_path / f"{__import__('os').getpid()}.json")
+        assert entry.backend == "idalib"
+        assert entry.token == "test-token"
+
+        status, payload, _ = request(server, "GET", "/health", token="wrong")
+        assert status == 401
+        assert payload == {"status": "unauthorized"}
+    finally:
+        server.stop()
+    assert not list(tmp_path.glob("*.json"))
+
+
+def test_execute_wait_and_save_routes(tmp_path: Path):
+    server, backend = make_server(tmp_path)
+    try:
+        status, payload, _ = request(
+            server,
+            "POST",
+            "/execute_python",
+            {"code": "lambda: 1", "timeout": 2.5},
+        )
+        assert status == 200
+        assert payload == {"ok": True, "result": {"code": "lambda: 1"}}
+
+        status, payload, _ = request(server, "GET", "/poll_autoanalysis")
+        assert payload == {"status": "running", "complete": False}
+
+        status, payload, _ = request(
+            server,
+            "POST",
+            "/wait_autoanalysis",
+            {"timeout": 4},
+        )
+        assert status == 200
+        assert payload == {"status": "complete", "complete": True}
+
+        status, payload, _ = request(server, "POST", "/save_database", {})
+        assert status == 200
+        assert payload["result"]["saved"] is True
+        assert backend.calls == [
+            ("execute", "lambda: 1", 2.5),
+            ("wait", 4.0),
+            ("save",),
+        ]
+    finally:
+        server.stop()
+
+
+def test_compressed_request_body(tmp_path: Path):
+    server, backend = make_server(tmp_path)
+    try:
+        body = gzip.compress(json.dumps({"code": "lambda: 7"}).encode())
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+        connection.request(
+            "POST",
+            "/execute_python",
+            body=body,
+            headers={
+                "Authorization": f"Bearer {server.token}",
+                "Content-Encoding": "gzip",
+                "Content-Type": "application/json",
+            },
+        )
+        response = connection.getresponse()
+        assert response.status == 200
+        response.read()
+        connection.close()
+        assert backend.calls == [("execute", "lambda: 7", None)]
+    finally:
+        server.stop()
+
+
+def test_chunked_framing_browser_gate_and_size_limit(tmp_path: Path):
+    server, backend = make_server(tmp_path)
+    try:
+        body = json.dumps({"code": "lambda: 9"}).encode()
+        chunks = (
+            b"".join(
+                f"{len(part):X}\r\n".encode() + part + b"\r\n"
+                for part in (body[:7], body[7:])
+            )
+            + b"0\r\n\r\n"
+        )
+        prefix = (
+            f"POST /execute_python HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{server.port}\r\n"
+            f"Authorization: Bearer {server.token}\r\n"
+        ).encode()
+        status, response_body = raw_request(
+            server,
+            prefix + b"Transfer-Encoding: chunked\r\n\r\n" + chunks,
+        )
+        assert status == 200
+        assert json.loads(response_body)["result"] == {"code": "lambda: 9"}
+        assert backend.calls == [("execute", "lambda: 9", None)]
+
+        status, _ = raw_request(
+            server,
+            prefix + b"Content-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n",
+        )
+        assert status == 400
+
+        status, _, _ = request(
+            server,
+            "GET",
+            "/health",
+            headers={"Origin": "http://127.0.0.1"},
+        )
+        assert status == 403
+        status, _ = raw_request(
+            server,
+            (
+                f"GET /health HTTP/1.1\r\nHost: 127.0.0.1:{server.port}\r\n"
+                f"Authorization: Bearer {server.token}\r\nContent-Length: 1\r\n\r\nx"
+            ).encode(),
+        )
+        assert status == 400
+
+        bomb = gzip.compress(b"0" * (POST_BODY_LIMIT + 1))
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+        connection.request(
+            "POST",
+            "/execute_python",
+            body=bomb,
+            headers={
+                "Authorization": f"Bearer {server.token}",
+                "Content-Encoding": "gzip",
+            },
+        )
+        response = connection.getresponse()
+        assert response.status == 413
+        response.read()
+        connection.close()
+    finally:
+        server.stop()
+
+
+def test_gui_close_fails_without_stopping_server(tmp_path: Path):
+    server, _ = make_server(tmp_path, gui=True)
+    try:
+        status, payload, _ = request(server, "POST", "/close_database", {})
+        assert status == 409
+        assert payload["error"]["code"] == "gui_database_owned_by_user"
+        assert request(server, "GET", "/health")[0] == 200
+    finally:
+        server.stop()
+
+
+def test_idalib_close_stops_after_response(tmp_path: Path):
+    server, backend = make_server(tmp_path)
+    status, payload, _ = request(server, "POST", "/close_database", {})
+    assert status == 200
+    assert payload["result"] == {"closed": True, "saved": True}
+    assert backend.calls == [("close",)]
+    deadline = time.monotonic() + 3
+    while (
+        server.port is not None or list(tmp_path.glob("*.json"))
+    ) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert server.port is None
+    assert not list(tmp_path.glob("*.json"))

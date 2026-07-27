@@ -5,20 +5,41 @@ description = "Code Mode MCP server for the ida-domain API"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "ida-domain>=0.4.0",
+    "ida-domain>=0.5.0",
     "zeromcp>=1.5.0",
 ]
 
 [project.scripts]
 ida-codemode-mcp = "ida_codemode_mcp:cli"
 ida-codemode-dashboard = "ida_codemode_dashboard:cli"
+ida-codemode-worker = "ida_codemode.worker:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.12.0",
+]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["ida_codemode_mcp.py", "ida_codemode_dashboard.py"]
+only-include = [
+    "ida_codemode_mcp.py",
+    "ida_codemode_dashboard.py",
+    "ida_codemode_plugin.py",
+    "ida_codemode",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ty.src]
+exclude = ["build"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
 
 [tool.uv.sources]
 ida-domain = { git = "https://github.com/HexRaysSA/ida-domain", branch = "include-docs-examples" }

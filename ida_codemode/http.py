@@ -1,0 +1,368 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import hmac
+import json
+import socketserver
+from typing import Callable, Mapping
+from urllib.parse import urlsplit
+import zlib
+
+
+HOST = "127.0.0.1"
+POST_BODY_LIMIT = 4 * 1024 * 1024
+MAX_CHUNK_LINE = 8192
+MAX_TRAILER_BYTES = 64 * 1024
+
+
+@dataclass
+class HTTPResponse:
+    status: int
+    body: bytes
+    content_type: str = "application/json"
+    headers: Mapping[str, str] = field(default_factory=dict)
+    after_send: Callable[[], None] | None = None
+
+
+def json_response(
+    status: int,
+    payload: object,
+    *,
+    headers: Mapping[str, str] | None = None,
+    after_send: Callable[[], None] | None = None,
+) -> HTTPResponse:
+    return HTTPResponse(
+        status=status,
+        body=json.dumps(payload).encode("utf-8") + b"\n",
+        headers=headers or {},
+        after_send=after_send,
+    )
+
+
+class RequestHandler(BaseHTTPRequestHandler):
+    """Authenticated HTTP/1.1 handler with bounded request decoding."""
+
+    server: LocalHTTPServer
+    server_version = "ida-codemode/0.1"
+    sys_version = ""
+    protocol_version = "HTTP/1.1"
+    timeout = 30
+
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except (
+            ConnectionAbortedError,
+            ConnectionResetError,
+            BrokenPipeError,
+            TimeoutError,
+        ):
+            pass
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+    def handle_expect_100(self) -> bool:
+        # BaseHTTPRequestHandler would otherwise accept the body before auth.
+        if not self._check_api_request():
+            return False
+        self.send_response_only(100)
+        self.end_headers()
+        return True
+
+    def _respond(self, response: HTTPResponse) -> None:
+        self.send_response(response.status)
+        self.send_header("Content-Type", response.content_type)
+        self.send_header("Content-Length", str(len(response.body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        for name, value in response.headers.items():
+            self.send_header(name, value)
+        self.end_headers()
+        try:
+            if self.command != "HEAD" and response.body:
+                self.wfile.write(response.body)
+                self.wfile.flush()
+        except BrokenPipeError, ConnectionResetError:
+            pass
+        finally:
+            # A close operation has already taken effect by this point. Finish
+            # shutdown even if the peer disconnected before reading its reply.
+            if response.after_send is not None:
+                response.after_send()
+
+    def _send_json(
+        self,
+        status: int,
+        payload: object,
+        *,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        self._respond(json_response(status, payload, headers=headers))
+
+    def send_error(
+        self,
+        code: int,
+        message: str | None = None,
+        explain: str | None = None,
+    ) -> None:
+        self._send_json(code, {"ok": False, "error": message or "error"})
+
+    def _check_api_request(self) -> bool:
+        hosts = self.headers.get_all("Host", [])
+        if len(hosts) != 1 or hosts[0] not in self.server.allowed_hosts:
+            self.close_connection = True
+            self.send_error(403, "Forbidden")
+            return False
+
+        # Browser JavaScript cannot suppress or forge these headers.
+        if "Origin" in self.headers or "Sec-Fetch-Site" in self.headers:
+            self.close_connection = True
+            self.send_error(403, "Forbidden")
+            return False
+
+        authorizations = self.headers.get_all("Authorization", [])
+        supplied = authorizations[0] if len(authorizations) == 1 else ""
+        expected = f"Bearer {self.server.token}"
+        if not hmac.compare_digest(supplied, expected):
+            self.close_connection = True
+            self._send_json(
+                401,
+                {"status": "unauthorized"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            return False
+        return True
+
+    def _dispatch(self, method: str, body: bytes | None = None) -> None:
+        path = urlsplit(self.path).path
+        try:
+            response = self.server.application(method, path, body)
+        except Exception:
+            # Application dispatch should normally convert its own failures.
+            response = json_response(
+                500, {"ok": False, "error": "Internal Server Error"}
+            )
+        self._respond(response)
+
+    def _has_unexpected_body(self) -> bool:
+        transfer_values = self.headers.get_all("Transfer-Encoding", [])
+        length_values = self.headers.get_all("Content-Length", [])
+        if transfer_values:
+            return True
+        if not length_values:
+            return False
+        if len(length_values) != 1:
+            return True
+        try:
+            return int(length_values[0]) != 0
+        except ValueError:
+            return True
+
+    def do_GET(self) -> None:
+        if self._check_api_request():
+            if self._has_unexpected_body():
+                self.close_connection = True
+                self.send_error(400, "Request body is not allowed")
+                return
+            self._dispatch("GET")
+
+    def do_HEAD(self) -> None:
+        if self._check_api_request():
+            if self._has_unexpected_body():
+                self.close_connection = True
+                self.send_error(400, "Request body is not allowed")
+                return
+            self._dispatch("GET")
+
+    def do_POST(self) -> None:
+        if not self._check_api_request():
+            return
+        body = self._read_body()
+        if body is not None:
+            self._dispatch("POST", body)
+
+    def _reject_other(self) -> None:
+        if self._check_api_request():
+            self.close_connection = True
+            self.send_error(404, "Not Found")
+
+    do_OPTIONS = _reject_other
+    do_PUT = _reject_other
+    do_DELETE = _reject_other
+    do_PATCH = _reject_other
+    do_TRACE = _reject_other
+    do_CONNECT = _reject_other
+
+    def _read_body(self) -> bytes | None:
+        transfer_values = self.headers.get_all("Transfer-Encoding", [])
+        length_values = self.headers.get_all("Content-Length", [])
+        if transfer_values and length_values:
+            self.close_connection = True
+            self.send_error(400, "Conflicting request framing")
+            return None
+
+        if transfer_values:
+            encodings = [
+                item.strip().lower()
+                for value in transfer_values
+                for item in value.split(",")
+                if item.strip()
+            ]
+            if encodings != ["chunked"]:
+                self.close_connection = True
+                self.send_error(400, "Unsupported Transfer-Encoding")
+                return None
+            raw = self._read_chunked()
+            if raw is None:
+                return None
+        else:
+            if len(length_values) > 1:
+                self.close_connection = True
+                self.send_error(400, "Ambiguous Content-Length")
+                return None
+            try:
+                content_length = int(length_values[0]) if length_values else 0
+            except ValueError:
+                self.close_connection = True
+                self.send_error(400, "Invalid Content-Length")
+                return None
+            if content_length < 0:
+                self.close_connection = True
+                self.send_error(400, "Invalid Content-Length")
+                return None
+            if content_length > POST_BODY_LIMIT:
+                self._send_payload_too_large()
+                return None
+            raw = self.rfile.read(content_length) if content_length else b""
+            if len(raw) != content_length:
+                self.close_connection = True
+                self.send_error(400, "Truncated request body")
+                return None
+        return self._decompress_body(raw)
+
+    def _send_payload_too_large(self) -> None:
+        self.close_connection = True
+        self.send_error(413, f"Payload exceeds {POST_BODY_LIMIT} bytes")
+
+    def _readline_bounded(self, limit: int, error_message: str) -> bytes | None:
+        line = self.rfile.readline(limit + 1)
+        if len(line) > limit or not line.endswith(b"\n"):
+            self.close_connection = True
+            self.send_error(400, error_message)
+            return None
+        return line
+
+    def _read_chunked(self) -> bytes | None:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            line = self._readline_bounded(MAX_CHUNK_LINE, "Malformed chunked encoding")
+            if line is None:
+                return None
+            size_text = line.split(b";", 1)[0].strip()
+            if not size_text or any(
+                byte not in b"0123456789abcdefABCDEF" for byte in size_text
+            ):
+                self.close_connection = True
+                self.send_error(400, "Malformed chunked encoding")
+                return None
+            chunk_size = int(size_text, 16)
+            if chunk_size == 0:
+                trailer_bytes = 0
+                while True:
+                    trailer = self._readline_bounded(
+                        MAX_CHUNK_LINE, "Malformed chunk trailer"
+                    )
+                    if trailer is None:
+                        return None
+                    trailer_bytes += len(trailer)
+                    if trailer_bytes > MAX_TRAILER_BYTES:
+                        self.close_connection = True
+                        self.send_error(400, "Chunk trailers too large")
+                        return None
+                    if trailer in (b"\r\n", b"\n"):
+                        return b"".join(chunks)
+            if total + chunk_size > POST_BODY_LIMIT:
+                self._send_payload_too_large()
+                return None
+            chunk = self.rfile.read(chunk_size)
+            if len(chunk) != chunk_size or self.rfile.read(2) != b"\r\n":
+                self.close_connection = True
+                self.send_error(400, "Malformed chunked encoding")
+                return None
+            chunks.append(chunk)
+            total += chunk_size
+
+    def _decompress_member(self, data: bytes, wbits: int) -> bytes | None:
+        output = bytearray()
+        remaining_input = data
+        while remaining_input:
+            decompressor = zlib.decompressobj(wbits)
+            pending = remaining_input
+            while pending:
+                budget = POST_BODY_LIMIT - len(output)
+                part = decompressor.decompress(pending, budget + 1)
+                if len(part) > budget:
+                    self._send_payload_too_large()
+                    return None
+                output.extend(part)
+                pending = decompressor.unconsumed_tail
+            if not decompressor.eof:
+                self.close_connection = True
+                self.send_error(400, "Invalid compressed request body")
+                return None
+            budget = POST_BODY_LIMIT - len(output)
+            tail = decompressor.flush(budget + 1)
+            if len(tail) > budget:
+                self._send_payload_too_large()
+                return None
+            output.extend(tail)
+            remaining_input = decompressor.unused_data
+            if wbits != 16 + zlib.MAX_WBITS and remaining_input:
+                self.close_connection = True
+                self.send_error(400, "Trailing compressed request data")
+                return None
+        return bytes(output)
+
+    def _decompress_body(self, data: bytes) -> bytes | None:
+        encoding = self.headers.get("Content-Encoding", "").lower().strip()
+        try:
+            if encoding in ("", "identity"):
+                return data
+            if encoding in ("gzip", "x-gzip", "deflate") and not data:
+                self.close_connection = True
+                self.send_error(400, "Invalid compressed request body")
+                return None
+            if encoding in ("gzip", "x-gzip"):
+                return self._decompress_member(data, 16 + zlib.MAX_WBITS)
+            if encoding == "deflate":
+                wbits = zlib.MAX_WBITS if data[:1] == b"\x78" else -zlib.MAX_WBITS
+                return self._decompress_member(data, wbits)
+        except zlib.error:
+            self.close_connection = True
+            self.send_error(400, "Invalid compressed request body")
+            return None
+        self.close_connection = True
+        self.send_error(415, "Unsupported Content-Encoding")
+        return None
+
+
+class LocalHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(
+        self,
+        token: str,
+        application: Callable[[str, str, bytes | None], HTTPResponse],
+    ) -> None:
+        super().__init__((HOST, 0), RequestHandler)
+        self.port = int(self.server_address[1])
+        self.token = token
+        self.application = application
+        self.allowed_hosts = frozenset(
+            {f"127.0.0.1:{self.port}", f"localhost:{self.port}"}
+        )

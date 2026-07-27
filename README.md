@@ -45,6 +45,51 @@ uv run ida-codemode-mcp mcp --transport http://127.0.0.1:5001
 
 `ida-domain` is pulled directly from git (see `[tool.uv.sources]` in `pyproject.toml`). The wheel ships `docs/` and `examples/` inside the package as `ida_domain/_docs/` and `ida_domain/_examples/`, which the `reference()` tool indexes via `importlib.util.find_spec`.
 
+## IDA plugin and standalone worker
+
+The repository also includes an authenticated local HTTP runtime for IDA 9.4+.
+It is currently independent of the existing MCP bridge layer:
+
+- `ida_codemode_plugin.py` exposes the API from an existing IDA GUI session.
+- `ida-codemode-worker` opens one target with idalib and exposes the same API.
+
+Both entry points use `ida-domain` directly from Git: the worker resolves the
+branch configured under `[tool.uv.sources]` in `pyproject.toml`, and the IDA
+plugin manifest declares the matching direct Git dependency.
+
+Install the GUI plugin from the checkout:
+
+```bash
+hcli plugin lint .
+hcli plugin install --editable .
+```
+
+Run a standalone idalib worker:
+
+```bash
+uv sync
+uv run ida-codemode-worker /path/to/executable
+```
+
+Useful worker options include `--new-database`, `--output-database`,
+`--processor`, and `--log-file`. Both backends publish their loopback endpoint,
+bearer token, target paths, and backend kind under:
+
+```text
+<IDAUSR>/lifecycle-instances/<pid>.json
+```
+
+Every request requires `Authorization: Bearer <registry token>`. The API exposes
+`/health`, `/poll_autoanalysis`, `/wait_autoanalysis`, `/execute_python`,
+`/save_database`, and `/close_database`. GUI sessions reject close requests
+because the user owns their database.
+
+A live endpoint can be smoke-tested with:
+
+```bash
+uv run python examples/test_live.py http://127.0.0.1:<port>
+```
+
 ## Architecture
 
 `open_database()` starts a dedicated subprocess that opens the requested target through `ida-domain`/idalib and keeps the database alive.

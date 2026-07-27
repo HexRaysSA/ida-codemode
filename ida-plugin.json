@@ -1,0 +1,25 @@
+{
+  "IDAMetadataDescriptorVersion": 1,
+  "plugin": {
+    "name": "ida-codemode",
+    "entryPoint": "ida_codemode_plugin.py",
+    "categories": ["api-scripting-and-automation"],
+    "keywords": ["python", "automation", "idalib", "ai"],
+    "description": "Authenticated local Python execution for IDA GUI and command-line idalib sessions.",
+    "idaVersions": ["9.4", "10.0"],
+    "version": "0.1.0",
+    "license": "MIT",
+    "authors": [
+      {
+        "name": "Hex-Rays SA",
+        "email": "support@hex-rays.com"
+      }
+    ],
+    "urls": {
+      "repository": "https://github.com/HexRaysSA/ida-codemode-mcp"
+    },
+    "pythonDependencies": [
+      "ida-domain @ git+https://github.com/HexRaysSA/ida-domain.git@include-docs-examples"
+    ]
+  }
+}
