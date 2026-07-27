@@ -12,3 +12,12 @@ node_modules/
 
 # Runtime logs
 .ida-codemode/
+
+# IDA Databases
+*.idb
+*.i64
+*.nam
+*.id0
+*.id1
+*.id2
+*.til
