@@ -5,13 +5,12 @@ from pathlib import Path
 from typing import Any
 
 import ida_auto
-import ida_diskio
 import ida_kernwin
 import ida_loader
 import ida_nalt
 import idaapi
 
-from ida_codemode.registry import InstanceIdentity, get_registry_dir
+from ida_codemode.registry import InstanceIdentity, REGISTRY_DIR
 from ida_codemode.runtime import IDARuntime, AnalysisState, create_autoanalysis_hook
 from ida_codemode.server import CodeModeHTTPServer
 
@@ -81,7 +80,7 @@ class CodeModePlugin(idaapi.plugin_t):
             runtime,
             identity,
             self.analysis_state,
-            get_registry_dir(ida_diskio.get_user_idadir()),
+            REGISTRY_DIR,
         )
         try:
             server.start()

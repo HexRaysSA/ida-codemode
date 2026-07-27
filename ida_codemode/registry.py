@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import socket
-import sys
 import tempfile
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
@@ -15,7 +14,8 @@ from urllib.request import Request, urlopen
 
 
 HOST = "127.0.0.1"
-REGISTRY_DIRECTORY = "lifecycle-instances"
+STATE_DIR = Path.home() / ".ida-codemode"
+REGISTRY_DIR = STATE_DIR / "instances"
 DEFAULT_TIMEOUT = 2.0
 BackendName = Literal["gui", "idalib"]
 
@@ -34,23 +34,6 @@ class RegistryEntry:
     exe_path: str
     token: str
     backend: BackendName
-
-
-def get_ida_user_dir() -> Path:
-    configured = os.environ.get("IDAUSR")
-    if configured:
-        return Path(configured).expanduser().resolve()
-    if sys.platform == "win32":
-        return Path(os.environ["APPDATA"]) / "Hex-Rays" / "IDA Pro"
-    return Path.home() / ".idapro"
-
-
-def get_registry_dir(ida_user_dir: str | os.PathLike[str] | None = None) -> Path:
-    return (
-        Path(ida_user_dir) / REGISTRY_DIRECTORY
-        if ida_user_dir
-        else get_ida_user_dir() / REGISTRY_DIRECTORY
-    )
 
 
 def publish_entry(
@@ -201,7 +184,7 @@ def discover_instances(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Discover valid instances and remove entries proven to be stale."""
 
-    directory = get_registry_dir() if registry_dir is None else Path(registry_dir)
+    directory = REGISTRY_DIR if registry_dir is None else Path(registry_dir)
     valid: list[dict[str, Any]] = []
     unavailable: list[dict[str, Any]] = []
     for name in sorted(glob.glob(str(directory / "*.json"))):

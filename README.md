@@ -76,7 +76,7 @@ Useful worker options include `--new-database`, `--output-database`,
 bearer token, target paths, and backend kind under:
 
 ```text
-<IDAUSR>/lifecycle-instances/<pid>.json
+~/.ida-codemode/instances/<pid>.json
 ```
 
 Every request requires `Authorization: Bearer <registry token>`. The API exposes

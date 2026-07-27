@@ -9,7 +9,7 @@ from typing import Any
 from ida_domain import Database
 from ida_domain.database import IdaCommandOptions
 
-from .registry import InstanceIdentity, get_registry_dir
+from .registry import InstanceIdentity, REGISTRY_DIR
 from .runtime import IDARuntime, AnalysisState, create_autoanalysis_hook
 from .server import CodeModeHTTPServer
 
@@ -45,7 +45,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     import ida_auto
-    import ida_diskio
     import ida_kernwin
     import ida_loader
     import ida_nalt
@@ -124,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
             runtime,
             identity,
             analysis_state,
-            get_registry_dir(ida_diskio.get_user_idadir()),
+            REGISTRY_DIR,
             on_shutdown=kernwin.stop_serving,
         )
         server.start()

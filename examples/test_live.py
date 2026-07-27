@@ -11,7 +11,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-from ida_codemode.registry import discover_instances, get_registry_dir
+from ida_codemode.registry import discover_instances, REGISTRY_DIR
 
 
 class CheckFailed(RuntimeError):
@@ -142,9 +142,7 @@ def main():
     parsed = urlsplit(endpoint)
     if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or not parsed.port:
         raise SystemExit("endpoint must be http://127.0.0.1:<port>")
-    token = args.token or discover_token(
-        endpoint, args.registry_dir or get_registry_dir()
-    )
+    token = args.token or discover_token(endpoint, args.registry_dir or REGISTRY_DIR)
     try:
         run(endpoint, token, save=args.save, close=args.close)
     except CheckFailed as exc:
