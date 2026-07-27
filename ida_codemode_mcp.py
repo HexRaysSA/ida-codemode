@@ -2,54 +2,50 @@
 
 This server exposes a compact Code Mode surface for the ida-domain API:
 - reference(query): look up the active ida-domain API reference
-- open_database(...): spawn a long-lived idalib bridge instance for a local target
-- execute(code): run Python against an already-open database with ida-domain preloaded
-- list_databases(): inspect active bridge instances
-- close_database(...): close a bridge instance
+- open_database(...): attach to a GUI database or shared idalib worker
+- execute(code): run Python against an already-open database
+- list_databases(): inspect this MCP server's active database handles
+- save_database(...): explicitly save an active database
+- close_database(...): release this MCP server's handle and lease
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import atexit
-import builtins
-import inspect
+from dataclasses import asdict, dataclass, field, is_dataclass
+from datetime import UTC, datetime
+from enum import Enum
 import json
 import os
-import queue
+from pathlib import Path
 import signal
-import subprocess
 import sys
 import threading
 import time
 import traceback
-import uuid
-from collections import deque
-from dataclasses import asdict, is_dataclass
-from datetime import UTC, datetime
-from enum import Enum
-from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Callable
 from urllib.parse import urlparse
+import uuid
 
 from zeromcp import McpServer, McpToolError
-from ida_codemode.reference import (
-    render_reference,
-    get_ida_domain_version,
-    find_ida_domain_package_path,
-)
 
-MODULE_PATH = Path(__file__).resolve()
+from ida_codemode.client import ClientError, DatabaseHandle, RemoteError
+from ida_codemode.reference import (
+    find_ida_domain_package_path,
+    get_ida_domain_version,
+    render_reference,
+)
+from ida_codemode.registry import LOG_DIR
+from ida_codemode.resolver import ResolveError
+
+
 STATE_DIR = Path.home() / ".ida-codemode"
-JSONL_LOG_DIR = STATE_DIR / "logs"
-BRIDGE_MARKER = "CODEMODE_BRIDGE_JSON:"
+MCP_LOG_DIR = STATE_DIR / "logs" / "mcp"
 OPEN_TIMEOUT_SECONDS = 300
 EXECUTE_TIMEOUT_SECONDS = 300
-CLOSE_TIMEOUT_SECONDS = 60
-LOG_TAIL_LINES = 100
 
-mcp = McpServer("ida", version="0.2.0")
+mcp = McpServer("ida", version="0.3.0")
 
 
 def _utc_now_iso() -> str:
@@ -60,47 +56,85 @@ def _resolve_user_path(path: str) -> str:
     return str(Path(path).expanduser().resolve())
 
 
-def _safe_filename_component(value: str) -> str:
-    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in value)
-    return safe.strip("._") or "database"
-
-
-def _jsonl_log_path(instance_id: str, database_path: str) -> Path:
-    stem = _safe_filename_component(Path(database_path).name)
-    return JSONL_LOG_DIR / f"{stem}-{instance_id}.jsonl"
-
-
 def _session_fields() -> dict[str, Any]:
-    meta = mcp.context.meta or {}
-    fields: dict[str, Any] = {}
-
-    fields["codemode_id"] = os.environ.get("IDA_CODEMODE_ID") or None
-
-    claude_session_path = meta.get("claude_session_path")
-    if isinstance(claude_session_path, str) and claude_session_path:
-        fields["claude_session_path"] = claude_session_path
-
-    codex_session_path = meta.get("codex_session_path")
-    if isinstance(codex_session_path, str) and codex_session_path:
-        fields["codex_session_path"] = codex_session_path
-
-    pi_session_path = meta.get("pi_session_path")
-    if isinstance(pi_session_path, str) and pi_session_path:
-        fields["pi_session_path"] = pi_session_path
-
+    try:
+        meta = mcp.context.meta or {}
+    except Exception:  # The shutdown path may run outside an MCP request context.
+        meta = {}
+    fields: dict[str, Any] = {
+        "codemode_id": os.environ.get("IDA_CODEMODE_ID") or None,
+    }
+    for name in (
+        "claude_session_path",
+        "codex_session_path",
+        "pi_session_path",
+    ):
+        value = meta.get(name)
+        if isinstance(value, str) and value:
+            fields[name] = value
     return fields
 
 
-def _write_jsonl(log_path: Path, event: dict[str, Any]) -> None:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    record = {"ts": _utc_now_iso(), **event}
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        f.flush()
+def _trace_jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value) and not isinstance(value, type):
+        return _trace_jsonable(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _trace_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_trace_jsonable(item) for item in value]
+    return repr(value)
+
+
+class _TraceLogger:
+    """Thread-safe semantic MCP trace shared by all database handles."""
+
+    def __init__(self) -> None:
+        self.server_id = uuid.uuid4().hex[:12]
+        MCP_LOG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            MCP_LOG_DIR.chmod(0o700)
+        except OSError:
+            if os.name != "nt":
+                raise
+        self.path = MCP_LOG_DIR / f"{self.server_id}.jsonl"
+        self._lock = threading.Lock()
+
+    def emit(self, event: str, **fields: Any) -> None:
+        record = {
+            "schema": 1,
+            "ts": _utc_now_iso(),
+            "mcp_server_id": self.server_id,
+            "event": event,
+            **fields,
+        }
+        encoded = json.dumps(
+            _trace_jsonable(record),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ) + "\n"
+        with self._lock:
+            fd = os.open(
+                self.path,
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                0o600,
+            )
+            with os.fdopen(fd, "a", encoding="utf-8") as file:
+                file.write(encoded)
+                file.flush()
+
+
+TRACE = _TraceLogger()
 
 
 def _install_hook_input_meta_adapter() -> None:
     """Promote Claude/Codex hook metadata from arguments into MCP request metadata."""
+
     original_tools_call = mcp.registry.methods["tools/call"]
 
     def tools_call_with_meta(
@@ -125,418 +159,249 @@ def _install_hook_input_meta_adapter() -> None:
 _install_hook_input_meta_adapter()
 
 
-def _find_callable_from_code(
-    code: str,
-    global_ns: dict[str, Any],
-    preferred_names: list[str],
+def _target_fields(handle: DatabaseHandle) -> dict[str, Any]:
+    entry = handle.entry
+    return {
+        "record_id": entry.record_id,
+        "backend": entry.backend,
+        "pid": entry.pid,
+        "port": entry.port,
+        "idb_path": entry.idb_path,
+        "idb_key": entry.idb_key,
+        "exe_path": entry.exe_path,
+        "managed": entry.managed,
+        "started_at": entry.started_at,
+        "worker_log_path": (
+            str(LOG_DIR / f"{entry.record_id}.log")
+            if entry.backend == "idalib"
+            else None
+        ),
+    }
+
+
+def _error_fields(error: Exception) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "type": type(error).__name__,
+        "message": str(error),
+        "traceback": traceback.format_exc(),
+    }
+    if isinstance(error, RemoteError):
+        fields.update(
+            code=error.code,
+            status=error.status,
+            details=error.details,
+        )
+    return fields
+
+
+def _as_tool_error(error: Exception) -> McpToolError:
+    if isinstance(error, McpToolError):
+        return error
+    if isinstance(error, RemoteError):
+        message = str(error)
+        remote_traceback = error.details.get("traceback")
+        if isinstance(remote_traceback, str) and remote_traceback:
+            message = f"{message}\n\n{remote_traceback}"
+        return McpToolError(message)
+    if isinstance(error, (ClientError, ResolveError, FileNotFoundError, ValueError)):
+        return McpToolError(str(error))
+    return McpToolError(str(error) or type(error).__name__)
+
+
+def _run_traced_tool(
+    tool: str,
+    arguments: dict[str, Any],
+    action: Callable[[], Any],
 ) -> Any:
-    stripped = code.strip()
-    if not stripped:
-        raise ValueError("code must not be empty")
-
-    try:
-        candidate = eval(stripped, global_ns, {})
-    except SyntaxError:
-        candidate = None
-    except Exception as exc:
-        raise ValueError(f"failed to evaluate code expression: {exc}") from exc
-
-    if callable(candidate):
-        return candidate
-
-    local_ns: dict[str, Any] = {}
-    exec(stripped, global_ns, local_ns)  # noqa: S102 -- this is the Code Mode execution surface
-
-    for name in preferred_names:
-        value = local_ns.get(name)
-        if callable(value):
-            return value
-
-    discovered = [
-        value
-        for key, value in local_ns.items()
-        if callable(value) and key not in preferred_names and not key.startswith("__")
-    ]
-    if len(discovered) == 1:
-        return discovered[0]
-
-    raise ValueError(
-        "code must evaluate to a callable or define one callable named "
-        + ", ".join(preferred_names)
+    call_id = uuid.uuid4().hex
+    session = _session_fields()
+    TRACE.emit(
+        "tool_call",
+        call_id=call_id,
+        tool=tool,
+        session=session,
+        input=arguments,
     )
-
-
-async def _invoke_user_callable(func: Any, runtime: dict[str, Any]) -> Any:
-    signature = inspect.signature(func)
-    args: list[Any] = []
-    kwargs: dict[str, Any] = {}
-
-    for parameter in signature.parameters.values():
-        if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
-            continue
-        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
-            for name, value in runtime.items():
-                kwargs.setdefault(name, value)
-            continue
-
-        if parameter.name not in runtime:
-            if parameter.default is inspect.Parameter.empty:
-                raise ValueError(
-                    f"missing runtime value for parameter '{parameter.name}'. "
-                    f"Available names: {', '.join(sorted(runtime))}"
-                )
-            continue
-
-        value = runtime[parameter.name]
-        if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
-            args.append(value)
-        else:
-            kwargs[parameter.name] = value
-
-    result = func(*args, **kwargs)
-    if inspect.isawaitable(result):
-        result = await result
+    started = time.monotonic()
+    try:
+        result = action()
+    except Exception as error:
+        TRACE.emit(
+            "tool_error",
+            call_id=call_id,
+            tool=tool,
+            session=session,
+            duration_ms=round((time.monotonic() - started) * 1000, 3),
+            error=_error_fields(error),
+        )
+        tool_error = _as_tool_error(error)
+        if tool_error is error:
+            raise
+        raise tool_error from error
+    TRACE.emit(
+        "tool_result",
+        call_id=call_id,
+        tool=tool,
+        session=session,
+        duration_ms=round((time.monotonic() - started) * 1000, 3),
+        output=result,
+    )
     return result
 
 
-def _jsonify(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Enum):
-        return value.value
-    if is_dataclass(value):
-        return _jsonify(asdict(value))
-    if isinstance(value, dict):
-        return {str(key): _jsonify(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_jsonify(item) for item in value]
-    if hasattr(value, "__dict__"):
-        public = {
-            key: val for key, val in vars(value).items() if not key.startswith("_")
-        }
-        if public:
-            return _jsonify(public)
-    return repr(value)
+@dataclass
+class _DatabaseSession:
+    instance_id: str
+    requested_path: str
+    handle: DatabaseHandle
+    record_id: str
+    operation_lock: threading.RLock = field(
+        default_factory=threading.RLock,
+        repr=False,
+    )
 
 
-def _database_info(db: Any, state: dict[str, Any]) -> dict[str, Any]:
-    info: dict[str, Any] = {
-        "path": state["path"],
-        "auto_analysis": state.get("auto_analysis", True),
-        "new_database": state.get("new_database", False),
-        "save_on_close": True,
-        "options": state.get("options", {}),
-    }
-
-    for attr in [
-        "minimum_ea",
-        "maximum_ea",
-        "path",
-        "architecture",
-        "bitness",
-        "format",
-    ]:
-        try:
-            value = getattr(db, attr)
-        except Exception:  # noqa: BLE001, S112 -- ida_domain properties may raise arbitrary errors
-            continue
-        info[attr] = _jsonify(value)
-
-    metadata = getattr(db, "metadata", None)
-    if metadata is not None:
-        try:
-            info["metadata"] = _jsonify(metadata)
-        except Exception:  # noqa: BLE001, S110 -- metadata is best-effort, never fatal
-            pass
-
-    return info
-
-
-async def _run_bridge_execute(code: str, runtime: dict[str, Any]) -> Any:
-    global_ns = {
-        "__builtins__": builtins.__dict__,
-        "__name__": "__codemode_bridge_execute__",
-        **runtime,
-    }
-    func = _find_callable_from_code(code, global_ns, ["run", "execute", "main"])
-    result = await _invoke_user_callable(func, runtime)
-    return _jsonify(result)
-
-
-class _BridgeInstance:
-    def __init__(self, instance_id: str, log_path: Path):
-        self.instance_id = instance_id
-        self.log_path = log_path
-        _write_jsonl(
-            self.log_path,
-            {
-                "event": "instance_started",
-                "instance_id": self.instance_id,
-                "pid": None,
-                **_session_fields(),
-            },
-        )
-        self.process = subprocess.Popen(
-            [
-                sys.executable,
-                "-u",
-                str(MODULE_PATH),
-                "--internal-mode",
-                "bridge-worker",
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        _write_jsonl(
-            self.log_path,
-            {
-                "event": "process_started",
-                "instance_id": self.instance_id,
-                "pid": self.process.pid,
-            },
-        )
-        self._responses: queue.Queue[dict[str, Any]] = queue.Queue()
-        self._logs: deque[str] = deque(maxlen=LOG_TAIL_LINES)
-        self._lock = threading.Lock()
-        self.summary: dict[str, Any] | None = None
-        self._reader = threading.Thread(target=self._read_output, daemon=True)
-        self._reader.start()
-
-    def _read_output(self) -> None:
-        assert self.process.stdout is not None
-        for raw_line in self.process.stdout:
-            line = raw_line.rstrip("\n")
-            if line.startswith(BRIDGE_MARKER):
-                try:
-                    payload = json.loads(line[len(BRIDGE_MARKER) :])
-                except json.JSONDecodeError:
-                    self._logs.append(line)
-                    continue
-                self._responses.put(payload)
-            elif line:
-                self._logs.append(line)
-                _write_jsonl(
-                    self.log_path,
-                    {
-                        "event": "bridge_output",
-                        "instance_id": self.instance_id,
-                        "line": line,
-                    },
-                )
-
-    def is_alive(self) -> bool:
-        return self.process.poll() is None
-
-    def logs_tail(self) -> list[str]:
-        return list(self._logs)
-
-    def request(self, command: dict[str, Any], timeout: int) -> dict[str, Any]:
-        with self._lock:
-            if not self.is_alive():
-                _write_jsonl(
-                    self.log_path,
-                    {
-                        "event": "request_failed",
-                        "instance_id": self.instance_id,
-                        "reason": "process_not_running",
-                        "command": command,
-                    },
-                )
-                raise McpToolError(
-                    f"instance {self.instance_id} is not running anymore\n\n"
-                    + "\n".join(self.logs_tail())
-                )
-
-            request_id = uuid.uuid4().hex
-            payload = {**command, "request_id": request_id}
-            _write_jsonl(
-                self.log_path,
-                {
-                    "event": "request",
-                    "instance_id": self.instance_id,
-                    "request_id": request_id,
-                    "payload": payload,
-                    **_session_fields(),
-                },
-            )
-            assert self.process.stdin is not None
-            self.process.stdin.write(json.dumps(payload) + "\n")
-            self.process.stdin.flush()
-
-            deadline = time.monotonic() + timeout
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    _write_jsonl(
-                        self.log_path,
-                        {
-                            "event": "timeout",
-                            "instance_id": self.instance_id,
-                            "request_id": request_id,
-                            "timeout_seconds": timeout,
-                        },
-                    )
-                    raise McpToolError(
-                        f"timed out waiting for response from instance {self.instance_id}\n\n"
-                        + "\n".join(self.logs_tail())
-                    )
-                try:
-                    response = self._responses.get(timeout=remaining)
-                except queue.Empty as exc:
-                    _write_jsonl(
-                        self.log_path,
-                        {
-                            "event": "timeout",
-                            "instance_id": self.instance_id,
-                            "request_id": request_id,
-                            "timeout_seconds": timeout,
-                        },
-                    )
-                    raise McpToolError(
-                        f"timed out waiting for response from instance {self.instance_id}\n\n"
-                        + "\n".join(self.logs_tail())
-                    ) from exc
-                if response.get("request_id") != request_id:
-                    continue
-                _write_jsonl(
-                    self.log_path,
-                    {
-                        "event": "response",
-                        "instance_id": self.instance_id,
-                        "request_id": request_id,
-                        "payload": response,
-                    },
-                )
-                if not response.get("ok"):
-                    message = response.get("error", "unknown error")
-                    tb = response.get("traceback", "")
-                    logs = "\n".join(self.logs_tail())
-                    extra = f"\n\nBridge logs:\n{logs}" if logs else ""
-                    raise McpToolError(f"{message}\n\n{tb}{extra}".strip())
-                result = response.get("result", {})
-                if isinstance(result, dict) and result.get("database") is not None:
-                    self.summary = result["database"]
-                return result
-
-    def terminate(self) -> None:
-        if self.process.poll() is not None:
-            _write_jsonl(
-                self.log_path,
-                {
-                    "event": "process_already_exited",
-                    "instance_id": self.instance_id,
-                    "returncode": self.process.returncode,
-                },
-            )
-            return
-        _write_jsonl(
-            self.log_path,
-            {"event": "process_terminate", "instance_id": self.instance_id},
-        )
-        self.process.terminate()
-        try:
-            self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _write_jsonl(
-                self.log_path,
-                {"event": "process_kill", "instance_id": self.instance_id},
-            )
-            self.process.kill()
-            self.process.wait(timeout=5)
-        _write_jsonl(
-            self.log_path,
-            {
-                "event": "process_exited",
-                "instance_id": self.instance_id,
-                "returncode": self.process.returncode,
-            },
-        )
-
-
-class _BridgeManager:
+class _DatabaseManager:
     def __init__(self) -> None:
-        self._instances: dict[str, _BridgeInstance] = {}
+        self._instances: dict[str, _DatabaseSession] = {}
         self._current_instance_id: str | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._open_lock = threading.Lock()
         self._shutdown_started = False
 
-    def open_database(
-        self,
-        path: str,
-        *,
-        auto_analysis: bool,
-        new_database: bool,
-        options: dict[str, Any] | None,
-        set_current: bool,
-    ) -> dict[str, Any]:
+    def _database_info(self, session: _DatabaseSession) -> dict[str, Any]:
+        return {
+            "instance_id": session.instance_id,
+            "requested_path": session.requested_path,
+            **_target_fields(session.handle),
+        }
+
+    def _note_binding(self, session: _DatabaseSession) -> None:
+        entry = session.handle.entry
+        if entry.record_id == session.record_id:
+            return
+        previous = session.record_id
+        session.record_id = entry.record_id
+        TRACE.emit(
+            "database_rebound",
+            session=_session_fields(),
+            instance_id=session.instance_id,
+            previous_record_id=previous,
+            target=_target_fields(session.handle),
+        )
+
+    def open_database(self, path: str, *, set_current: bool) -> dict[str, Any]:
         resolved_path = _resolve_user_path(path)
         if not Path(resolved_path).exists():
             raise McpToolError(f"database path does not exist: {resolved_path}")
 
-        instance_id = uuid.uuid4().hex[:12]
-        log_path = _jsonl_log_path(instance_id, resolved_path)
-        instance = _BridgeInstance(instance_id, log_path)
-        try:
-            result = instance.request(
-                {
-                    "command": "open",
-                    "path": resolved_path,
-                    "auto_analysis": auto_analysis,
-                    "new_database": new_database,
-                    "options": options or {},
-                },
-                OPEN_TIMEOUT_SECONDS,
+        # Serialize local opens so duplicate calls create at most one retained
+        # lease in this MCP server. Other MCP servers retain their own leases.
+        with self._open_lock:
+            handle = DatabaseHandle.open(
+                resolved_path,
+                timeout=OPEN_TIMEOUT_SECONDS,
             )
-        except Exception:
-            instance.terminate()
-            raise
+            entry = handle.entry
+            with self._lock:
+                existing = next(
+                    (
+                        session
+                        for session in self._instances.values()
+                        if session.handle.entry.record_id == entry.record_id
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if set_current or self._current_instance_id is None:
+                        self._current_instance_id = existing.instance_id
+                    current = self._current_instance_id
+                else:
+                    instance_id = uuid.uuid4().hex[:12]
+                    existing = _DatabaseSession(
+                        instance_id=instance_id,
+                        requested_path=resolved_path,
+                        handle=handle,
+                        record_id=entry.record_id,
+                    )
+                    self._instances[instance_id] = existing
+                    if set_current or self._current_instance_id is None:
+                        self._current_instance_id = instance_id
+                    current = self._current_instance_id
 
-        with self._lock:
-            self._instances[instance_id] = instance
-            if set_current or self._current_instance_id is None:
-                self._current_instance_id = instance_id
+            reused = existing.handle is not handle
+            if reused:
+                handle.close()
+                event = "database_reused"
+            else:
+                event = "database_opened"
+            database = self._database_info(existing)
+            TRACE.emit(
+                event,
+                session=_session_fields(),
+                instance_id=existing.instance_id,
+                target=database,
+            )
+            return {
+                "opened": True,
+                "reused": reused,
+                "instance_id": existing.instance_id,
+                "current_instance_id": current,
+                "database": database,
+                "log_path": str(TRACE.path),
+                **_session_fields(),
+            }
 
-        return {
-            **result,
-            "instance_id": instance_id,
-            "current_instance_id": self._current_instance_id,
-            "log_path": str(instance.log_path),
-            **_session_fields(),
-        }
-
-    def _get_instance(self, instance_id: str | None) -> tuple[str, _BridgeInstance]:
+    def _get_session(self, instance_id: str | None) -> tuple[str, _DatabaseSession]:
         with self._lock:
             target_id = instance_id or self._current_instance_id
             if target_id is None:
                 raise McpToolError(
                     "no open database instance; call open_database() first"
                 )
-            instance = self._instances.get(target_id)
-        if instance is None:
+            session = self._instances.get(target_id)
+        if session is None:
             raise McpToolError(f"unknown database instance: {target_id}")
-        if not instance.is_alive():
-            raise McpToolError(
-                f"database instance is no longer running: {target_id}\n\n"
-                + "\n".join(instance.logs_tail())
-            )
-        return target_id, instance
+        return target_id, session
 
     def execute(self, code: str, instance_id: str | None) -> dict[str, Any]:
-        target_id, instance = self._get_instance(instance_id)
-        result = instance.request(
-            {"command": "execute", "code": code}, EXECUTE_TIMEOUT_SECONDS
-        )
-        return {
-            "instance_id": target_id,
-            "current_instance_id": self.current_instance_id,
-            "log_path": str(instance.log_path),
-            "result": result,
-        }
+        target_id, session = self._get_session(instance_id)
+        with session.operation_lock:
+            self._note_binding(session)
+            result = session.handle.execute_python(
+                code,
+                timeout=EXECUTE_TIMEOUT_SECONDS,
+            )
+            self._note_binding(session)
+            return {
+                "instance_id": target_id,
+                "current_instance_id": self.current_instance_id,
+                "record_id": session.record_id,
+                "database": self._database_info(session),
+                "log_path": str(TRACE.path),
+                "result": result,
+            }
+
+    def save_database(self, instance_id: str | None) -> dict[str, Any]:
+        target_id, session = self._get_session(instance_id)
+        with session.operation_lock:
+            self._note_binding(session)
+            result = session.handle.save_database()
+            self._note_binding(session)
+            TRACE.emit(
+                "database_saved",
+                session=_session_fields(),
+                instance_id=target_id,
+                target=self._database_info(session),
+                result=result,
+            )
+            return {
+                "instance_id": target_id,
+                "current_instance_id": self.current_instance_id,
+                "record_id": session.record_id,
+                "log_path": str(TRACE.path),
+                **result,
+            }
 
     @property
     def current_instance_id(self) -> str | None:
@@ -545,56 +410,51 @@ class _BridgeManager:
 
     def list_databases(self) -> dict[str, Any]:
         with self._lock:
-            items = list(self._instances.items())
+            sessions = list(self._instances.values())
             current = self._current_instance_id
-
         instances = []
-        dead_ids = []
-        for instance_id, instance in items:
-            alive = instance.is_alive()
-            if not alive:
-                dead_ids.append(instance_id)
-            instances.append(
-                {
-                    "instance_id": instance_id,
-                    "current": instance_id == current,
-                    "alive": alive,
-                    "database": instance.summary,
-                    "log_path": str(instance.log_path),
-                    "logs_tail": instance.logs_tail()[-10:],
-                }
-            )
-
-        if dead_ids:
-            with self._lock:
-                for dead_id in dead_ids:
-                    self._instances.pop(dead_id, None)
-                    if self._current_instance_id == dead_id:
-                        self._current_instance_id = next(iter(self._instances), None)
-                current = self._current_instance_id
+        for session in sessions:
+            with session.operation_lock:
+                self._note_binding(session)
+                instances.append(
+                    {
+                        **self._database_info(session),
+                        "current": session.instance_id == current,
+                    }
+                )
         return {
             "current_instance_id": current,
             "instances": instances,
             "count": len(instances),
+            "log_path": str(TRACE.path),
         }
 
     def close_database(self, instance_id: str | None) -> dict[str, Any]:
-        target_id, instance = self._get_instance(instance_id)
-        log_path = instance.log_path
-        result: dict[str, Any]
-        try:
-            result = instance.request({"command": "close"}, CLOSE_TIMEOUT_SECONDS)
-        finally:
-            instance.terminate()
+        target_id, session = self._get_session(instance_id)
+        with session.operation_lock:
+            self._note_binding(session)
+            database = self._database_info(session)
             with self._lock:
-                self._instances.pop(target_id, None)
+                current_session = self._instances.get(target_id)
+                if current_session is not session:
+                    raise McpToolError(f"unknown database instance: {target_id}")
+                self._instances.pop(target_id)
                 if self._current_instance_id == target_id:
                     self._current_instance_id = next(iter(self._instances), None)
+                current = self._current_instance_id
+            session.handle.close()
+        TRACE.emit(
+            "database_released",
+            session=_session_fields(),
+            instance_id=target_id,
+            target=database,
+        )
         return {
-            **result,
+            "released": True,
             "instance_id": target_id,
-            "current_instance_id": self.current_instance_id,
-            "log_path": str(log_path),
+            "current_instance_id": current,
+            "database": database,
+            "log_path": str(TRACE.path),
         }
 
     def shutdown(self) -> None:
@@ -602,27 +462,30 @@ class _BridgeManager:
             if self._shutdown_started:
                 return
             self._shutdown_started = True
-            items = list(self._instances.items())
+            sessions = list(self._instances.values())
             self._instances.clear()
             self._current_instance_id = None
-        for _, instance in items:
+        for session in sessions:
             try:
-                if instance.is_alive():
-                    try:
-                        instance.request({"command": "close"}, CLOSE_TIMEOUT_SECONDS)
-                    except Exception:  # noqa: BLE001, S110 -- best-effort close during shutdown
-                        pass
-            finally:
-                instance.terminate()
+                with session.operation_lock:
+                    session.handle.close()
+            except Exception as error:  # Best-effort lease release during shutdown.
+                TRACE.emit(
+                    "database_release_error",
+                    session=_session_fields(),
+                    instance_id=session.instance_id,
+                    error=_error_fields(error),
+                )
+        TRACE.emit("mcp_stopped", session=_session_fields())
 
 
-BRIDGE_MANAGER = _BridgeManager()
-atexit.register(BRIDGE_MANAGER.shutdown)
+DATABASE_MANAGER = _DatabaseManager()
+atexit.register(DATABASE_MANAGER.shutdown)
 
 
 def _install_server_shutdown_handlers() -> None:
     def cleanup_and_exit(signum: int, _frame: Any) -> None:
-        BRIDGE_MANAGER.shutdown()
+        DATABASE_MANAGER.shutdown()
         try:
             mcp.stop()
         finally:
@@ -630,138 +493,6 @@ def _install_server_shutdown_handlers() -> None:
 
     signal.signal(signal.SIGINT, cleanup_and_exit)
     signal.signal(signal.SIGTERM, cleanup_and_exit)
-
-
-def _bridge_emit(payload: dict[str, Any]) -> None:
-    print(f"{BRIDGE_MARKER}{json.dumps(payload)}", flush=True)
-
-
-def _bridge_instance_main() -> int:
-    import ida_domain
-    from ida_domain import Database
-    from ida_domain.database import IdaCommandOptions
-
-    db: Any | None = None
-    state: dict[str, Any] | None = None
-
-    def open_db(
-        path: str,
-        *,
-        auto_analysis: bool,
-        new_database: bool,
-        options: dict[str, Any],
-    ) -> dict[str, Any]:
-        nonlocal db, state
-        if db is not None:
-            raise RuntimeError("database is already open in this instance")
-        ida_options = IdaCommandOptions(
-            auto_analysis=auto_analysis,
-            new_database=new_database,
-            **options,
-        )
-        # Databases are always persisted to disk; opting out is not allowed.
-        db = Database.open(path, ida_options, True)
-        state = {
-            "path": path,
-            "auto_analysis": auto_analysis,
-            "new_database": new_database,
-            "save_on_close": True,
-            "options": options,
-        }
-        return _database_info(db, state)
-
-    def close_db() -> dict[str, Any]:
-        nonlocal db, state
-        if db is None:
-            return {"closed": False, "reason": "no database was open"}
-        if state is None:
-            raise RuntimeError("database state is missing")
-        info = _database_info(db, state)
-        db.close(save=True)
-        db = None
-        state = None
-        return {
-            "closed": True,
-            "saved": True,
-            "database": info,
-        }
-
-    def bridge_cleanup_and_exit(signum: int, _frame: Any) -> None:
-        try:
-            close_db()
-        except Exception:  # noqa: BLE001, S110 -- signal handler must not raise
-            pass
-        raise SystemExit(128 + signum)
-
-    signal.signal(signal.SIGINT, bridge_cleanup_and_exit)
-    signal.signal(signal.SIGTERM, bridge_cleanup_and_exit)
-
-    try:
-        for raw_line in sys.stdin:
-            line = raw_line.strip()
-            if not line:
-                continue
-            request = json.loads(line)
-            request_id = request.get("request_id")
-            try:
-                command = request.get("command")
-                if command == "open":
-                    result = {
-                        "opened": True,
-                        "database": open_db(
-                            request["path"],
-                            auto_analysis=request.get("auto_analysis", True),
-                            new_database=request.get("new_database", False),
-                            options=request.get("options", {}),
-                        ),
-                    }
-                elif command == "execute":
-                    if db is None or state is None:
-                        raise RuntimeError("no database is currently open")
-                    runtime = {
-                        "ida_domain": ida_domain,
-                        "Database": Database,
-                        "IdaCommandOptions": IdaCommandOptions,
-                        "db": db,
-                        "database_path": state["path"],
-                        "database_options": state,
-                        "json": json,
-                        "to_jsonable": _jsonify,
-                    }
-                    result = asyncio.run(_run_bridge_execute(request["code"], runtime))
-                elif command == "status":
-                    result = {
-                        "opened": db is not None,
-                        "database": _database_info(db, state)
-                        if db is not None and state is not None
-                        else None,
-                    }
-                elif command == "close":
-                    result = close_db()
-                    _bridge_emit(
-                        {"request_id": request_id, "ok": True, "result": result}
-                    )
-                    break
-                else:
-                    raise RuntimeError(f"unsupported bridge command: {command}")
-
-                _bridge_emit({"request_id": request_id, "ok": True, "result": result})
-            except Exception:  # noqa: BLE001 -- must report arbitrary user execute() errors, not crash
-                _bridge_emit(
-                    {
-                        "request_id": request_id,
-                        "ok": False,
-                        "error": traceback.format_exc().splitlines()[-1],
-                        "traceback": traceback.format_exc(),
-                    }
-                )
-    finally:
-        if db is not None:
-            try:
-                db.close(save=True)
-            except Exception:  # noqa: BLE001, S110 -- best-effort final save on exit
-                pass
-    return 0
 
 
 @mcp.tool
@@ -772,45 +503,27 @@ def reference(
     ],
 ) -> str:
     """Look up the active ida-domain API and return a plain-text IDA reference."""
-    try:
-        return render_reference(query)
-    except ValueError as e:
-        raise McpToolError(str(e))
+
+    return _run_traced_tool("reference", {"query": query}, lambda: render_reference(query))
 
 
 @mcp.tool
 def open_database(
     path: Annotated[
         str,
-        "Path to the local binary or database file to open in a new bridge instance.",
+        "Path to a local executable or IDB. A GUI instance is used when available.",
     ],
-    auto_analysis: Annotated[
-        bool, "Whether IDA auto-analysis should run when opening the target."
-    ] = True,
-    new_database: Annotated[
-        bool, "Whether IDA should request creation of a new database."
-    ] = False,
     set_current: Annotated[
-        bool, "Whether the new instance should become the default target for execute()."
+        bool,
+        "Whether this database should become the default target for execute().",
     ] = True,
-    options: Annotated[
-        dict[str, Any] | None,
-        (
-            "Additional IdaCommandOptions keyword arguments, for example processor, "
-            "output_database, log_file, script_file, or debug_flags."
-        ),
-    ] = None,
 ) -> dict[str, Any]:
-    """Open a local target in a long-lived idalib bridge instance.
+    """Attach to a GUI database or shared managed idalib worker."""
 
-    The database is always persisted to disk when the instance is closed.
-    """
-    return BRIDGE_MANAGER.open_database(
-        path,
-        auto_analysis=auto_analysis,
-        new_database=new_database,
-        options=options,
-        set_current=set_current,
+    return _run_traced_tool(
+        "open_database",
+        {"path": path, "set_current": set_current},
+        lambda: DATABASE_MANAGER.open_database(path, set_current=set_current),
     )
 
 
@@ -819,7 +532,7 @@ def execute(
     code: Annotated[
         str,
         (
-            "Python code that runs against an already-open database bridge instance. "
+            "Python code that runs against an already-open database. "
             "Use the IDA reference tool before calling execute; do not guess the API shape. "
             "The runtime exposes db, ida_domain, Database, IdaCommandOptions, database_path, "
             "database_options, json, and to_jsonable(). Return JSON-serializable data. "
@@ -828,38 +541,79 @@ def execute(
     ],
     instance_id: Annotated[
         str | None,
-        "Optional database instance id. If omitted, execute() uses the current open_database() target.",
+        "Optional database instance id. If omitted, use the current target.",
     ] = None,
 ) -> dict[str, Any]:
     """Execute Python against an open database. Use the IDA reference tool first."""
-    return BRIDGE_MANAGER.execute(code, instance_id)
+
+    return _run_traced_tool(
+        "execute",
+        {"code": code, "instance_id": instance_id},
+        lambda: DATABASE_MANAGER.execute(code, instance_id),
+    )
 
 
 @mcp.tool
 def list_databases() -> dict[str, Any]:
-    """List active database bridge instances and show the current default target."""
-    return BRIDGE_MANAGER.list_databases()
+    """List this MCP server's active database handles and current default target."""
+
+    return _run_traced_tool(
+        "list_databases",
+        {},
+        DATABASE_MANAGER.list_databases,
+    )
+
+
+@mcp.tool
+def save_database(
+    instance_id: Annotated[
+        str | None,
+        "Optional database instance id. If omitted, save the current target.",
+    ] = None,
+) -> dict[str, Any]:
+    """Explicitly save an active GUI or idalib database."""
+
+    return _run_traced_tool(
+        "save_database",
+        {"instance_id": instance_id},
+        lambda: DATABASE_MANAGER.save_database(instance_id),
+    )
 
 
 @mcp.tool
 def close_database(
     instance_id: Annotated[
         str | None,
-        "Optional database instance id. If omitted, the current instance is closed.",
+        "Optional database instance id. If omitted, release the current target.",
     ] = None,
 ) -> dict[str, Any]:
-    """Close an active database bridge instance, always saving changes to disk."""
-    return BRIDGE_MANAGER.close_database(instance_id)
+    """Release this MCP server's handle without disrupting other clients.
+
+    If this is the final lease on a managed idalib worker, the worker saves and
+    exits after its lease grace period. GUI databases are never closed here.
+    """
+
+    return _run_traced_tool(
+        "close_database",
+        {"instance_id": instance_id},
+        lambda: DATABASE_MANAGER.close_database(instance_id),
+    )
 
 
 def _serve(transport: str) -> None:
     _install_server_shutdown_handlers()
+    TRACE.emit(
+        "mcp_started",
+        session=_session_fields(),
+        transport=transport,
+        trace_path=str(TRACE.path),
+    )
 
     if transport == "stdio":
         try:
             mcp.stdio()
         finally:
-            BRIDGE_MANAGER.shutdown()
+            DATABASE_MANAGER.shutdown()
         return
 
     url = urlparse(transport)
@@ -870,6 +624,7 @@ def _serve(transport: str) -> None:
     print(
         f"Using ida-domain {get_ida_domain_version()} from {find_ida_domain_package_path()}"
     )
+    print(f"Writing semantic trace to {TRACE.path}")
     print("Available tools:")
     for name, func in mcp.tools.methods.items():
         print(f"  - {name}: {(func.__doc__ or '').strip()}")
@@ -882,7 +637,7 @@ def _serve(transport: str) -> None:
     except (KeyboardInterrupt, EOFError):
         print("\nStopping server...")
     finally:
-        BRIDGE_MANAGER.shutdown()
+        DATABASE_MANAGER.shutdown()
         mcp.stop()
 
 
@@ -947,6 +702,7 @@ def _report_codex_session(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _report_session_main(platform: str) -> int:
     """Inject agent transcript/session metadata into a PreToolUse tool input."""
+
     try:
         payload = json.load(sys.stdin)
     except json.JSONDecodeError as exc:
@@ -971,12 +727,6 @@ def cli() -> int:
         prog="ida-codemode-mcp",
         description="IDA Domain Code Mode MCP server",
     )
-    parser.add_argument(
-        "--internal-mode",
-        choices=["bridge-worker"],
-        default=None,
-        help=argparse.SUPPRESS,
-    )
     subparsers = parser.add_subparsers(dest="command", required=False)
 
     mcp_parser = subparsers.add_parser("mcp", help="Run the MCP server")
@@ -998,8 +748,6 @@ def cli() -> int:
 
     args = parser.parse_args()
 
-    if args.internal_mode == "bridge-worker":
-        return _bridge_instance_main()
     if args.command == "report-session":
         return _report_session_main(args.platform)
     if args.command == "mcp":
