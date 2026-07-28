@@ -66,13 +66,13 @@ def run(endpoint, token, *, save=False):
         token,
         "POST",
         "/execute_python",
-        {"code": "lambda database_path: {'database_path': database_path}"},
+        {"code": "{'database_available': db is not None}"},
         compressed=True,
     )
     require(status == 200 and result.get("ok"), "execute_python failed")
     require(
-        result["result"]["result"]["database_path"] == health["idb_path"],
-        "wrong runtime",
+        result["result"]["result"]["database_available"] is True,
+        "database runtime missing",
     )
     print("PASS compressed execute_python")
 

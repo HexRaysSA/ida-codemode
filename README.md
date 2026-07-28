@@ -14,6 +14,13 @@ managed idalib workers only when no suitable instance exists.
 - `save_database(instance_id=None)` - explicitly save a database.
 - `close_database(instance_id=None)` - release this MCP server's handle and lease.
 
+The intended flow is `open_database` → `reference` → `execute_python`.
+Inside `execute_python`, `db` is the current `ida-domain` `Database`; both
+`db` and `ida_domain` are available globally. Ordinary Python statements are
+accepted, a single or trailing expression becomes the result, and
+`def run(db): ...` remains
+available for function-style code.
+
 `close_database` is not a global shutdown operation. Other agents continue to
 use the same instance. A managed idalib worker saves and exits after its final
 lease disappears; GUI databases are never closed by MCP lifecycle management.

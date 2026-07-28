@@ -127,20 +127,13 @@ There is no remote database-close route. Closing a client handle releases only
 that client's lease.
 
 `IDARuntime` serializes operations and dispatches them through
-`ida_kernwin.execute_sync`. The execution runtime exposes:
-
-- `db`
-- `ida_domain`
-- `Database`
-- `IdaCommandOptions`
-- `database_path`
-- `database_options`
-- `json`
-- `to_jsonable`
-
-User code may be a callable expression or define `run`, `execute`, or `main`.
-Timeout tracing and IDA cancellation prevent one timed-out request from
-poisoning the next operation.
+`ida_kernwin.execute_sync`. The current ida-domain `Database` is available
+globally as `db`, alongside the imported `ida_domain` package. Ordinary
+statements execute once, and a single or trailing expression becomes the
+result. As an alternative, code without a trailing
+expression may define `run(db)`, `execute(db)`, or `main(db)` for automatic
+invocation. Timeout tracing and IDA cancellation prevent one timed-out request
+from poisoning the next operation.
 
 ## Shared leases and managed shutdown
 

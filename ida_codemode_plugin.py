@@ -95,8 +95,6 @@ class CodeModePlugin(idaapi.plugin_t):
             backend="gui",
             database=database,
             analysis_state=self.analysis_state,
-            database_path=idb_path,
-            database_options={"backend": "gui"},
         )
         server = CodeModeHTTPServer(
             runtime,

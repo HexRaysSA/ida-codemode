@@ -290,6 +290,7 @@ class OpenDatabaseResult(TypedDict):
     status: Annotated[str, "Attachment state: attached or current."]
     log_path: str
     codemode_id: str | None
+    hint: str
 
 
 class SaveDatabaseResult(TypedDict):
@@ -474,6 +475,10 @@ class _DatabaseManager:
                 status="current" if current == existing.instance_id else "attached",
                 log_path=str(TRACE.path),
                 codemode_id=codemode_id if isinstance(codemode_id, str) else None,
+                hint=(
+                    "Call reference(query) to inspect the IDA Domain API before "
+                    "using execute_python; `db` and `ida_domain` are available globally."
+                ),
             )
 
     @staticmethod
@@ -717,11 +722,12 @@ def execute_python(
     code: Annotated[
         str,
         (
-            "Python code that runs against an already-open database. "
-            "Use the IDA reference tool before calling execute_python; do not guess the API shape. "
-            "The runtime exposes db, ida_domain, Database, IdaCommandOptions, database_path, "
-            "database_options, json, and to_jsonable(). Return JSON-serializable data. "
-            "Define run(db), execute(db), main(db), or pass a `lambda db: ...` expression."
+            "Python code that runs against an already-open database. Call reference(query) "
+            "first; do not guess the API shape. `db` is the current ida-domain Database, "
+            "and `ida_domain` is also imported globally. A single or trailing expression "
+            "is returned. "
+            "For function-style code, define run(db), execute(db), or main(db); "
+            "it is invoked automatically when there is no trailing expression."
         ),
     ],
     instance_id: Annotated[

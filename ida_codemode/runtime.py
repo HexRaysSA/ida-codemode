@@ -6,7 +6,6 @@ import builtins
 import importlib
 import inspect
 import io
-import json
 import queue
 import sys
 import threading
@@ -24,10 +23,6 @@ from .registry import BackendName
 DEFAULT_TIMEOUT_SECONDS = 60.0
 SAVE_TIMEOUT_SECONDS = 300.0
 USER_CODE_FILENAME = "<ida-codemode>"
-CALLABLE_CODE_HELP = (
-    "For one expression, use `lambda db: <expression>`. For multiple statements, "
-    "define `def run(db): ...` and put all executable statements inside its body."
-)
 
 
 class APIError(RuntimeError):
@@ -46,7 +41,7 @@ class APIError(RuntimeError):
 
 
 class CodeValidationError(ValueError):
-    """The supplied code does not satisfy the Code Mode callable contract."""
+    """The supplied code cannot be invoked with the available runtime values."""
 
 
 class PythonExecutionResult(TypedDict):
@@ -94,64 +89,51 @@ def to_jsonable(value: Any) -> Any:
     return repr(value)
 
 
-def _find_callable(code: str, global_ns: dict[str, Any]) -> Callable[..., Any]:
+async def _execute_user_code(
+    code: str,
+    global_ns: dict[str, Any],
+    runtime: dict[str, Any],
+) -> Any:
     stripped = code.strip()
     if not stripped:
-        raise CodeValidationError(f"code must not be empty. {CALLABLE_CODE_HELP}")
+        raise CodeValidationError("code must not be empty")
 
     module = ast.parse(stripped, filename=USER_CODE_FILENAME, mode="exec")
+    namespace = dict(global_ns)
+
     if len(module.body) == 1 and isinstance(module.body[0], ast.Expr):
-        expression = module.body[0].value
-        if not isinstance(expression, (ast.Lambda, ast.Name, ast.Attribute)):
-            raise CodeValidationError(
-                "top-level expressions and function calls are not executed. "
-                + CALLABLE_CODE_HELP
-            )
-        candidate = eval(
-            compile(ast.Expression(expression), USER_CODE_FILENAME, "eval"),
-            global_ns,
-            {},
-        )
-        if callable(candidate):
-            return candidate
-        raise CodeValidationError(
-            "the supplied name or attribute is not callable. " + CALLABLE_CODE_HELP
+        expression = ast.Expression(module.body[0].value)
+        return eval(
+            compile(expression, USER_CODE_FILENAME, "eval"),
+            namespace,
+            namespace,
         )
 
-    preferred_names = ("run", "execute", "main")
-    defined_names: list[str] = []
-    for statement in module.body:
-        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            defined_names.append(statement.name)
-        elif isinstance(statement, (ast.Assign, ast.AnnAssign)) and isinstance(
-            statement.value, ast.Lambda
-        ):
-            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
-            defined_names.extend(target.id for target in targets if isinstance(target, ast.Name))
-
-    selected_name = next((name for name in preferred_names if name in defined_names), None)
-    if selected_name is None:
-        public_names = [name for name in defined_names if not name.startswith("_")]
-        if len(public_names) == 1:
-            selected_name = public_names[0]
-        else:
-            raise CodeValidationError(
-                "code does not define a callable entry point. " + CALLABLE_CODE_HELP
+    if module.body and isinstance(module.body[-1], ast.Expr):
+        prefix = ast.Module(body=module.body[:-1], type_ignores=module.type_ignores)
+        if prefix.body:
+            exec(  # noqa: S102 -- intentional Code Mode surface
+                compile(prefix, USER_CODE_FILENAME, "exec"),
+                namespace,
+                namespace,
             )
+        expression = ast.Expression(module.body[-1].value)
+        return eval(
+            compile(expression, USER_CODE_FILENAME, "eval"),
+            namespace,
+            namespace,
+        )
 
-    local_ns: dict[str, Any] = {}
     exec(  # noqa: S102 -- intentional Code Mode surface
         compile(module, USER_CODE_FILENAME, "exec"),
-        global_ns,
-        local_ns,
+        namespace,
+        namespace,
     )
-    candidate = local_ns.get(selected_name)
-    if not callable(candidate):
-        raise CodeValidationError(
-            f"the selected entry point `{selected_name}` is not callable. "
-            + CALLABLE_CODE_HELP
-        )
-    return candidate
+    for name in ("run", "execute", "main"):
+        candidate = namespace.get(name)
+        if callable(candidate):
+            return await _invoke_callable(candidate, runtime)
+    return namespace.get("result")
 
 
 def _format_user_traceback(error: BaseException) -> str | None:
@@ -232,8 +214,6 @@ class IDARuntime:
         backend: BackendName,
         database: Any,
         analysis_state: AnalysisState,
-        database_path: str,
-        database_options: dict[str, Any] | None = None,
         default_timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         # ida-domain loads idapro when running outside IDA, making the
@@ -245,9 +225,6 @@ class IDARuntime:
         import ida_loader
         import idaapi
         import idc
-        from ida_domain import Database
-        from ida_domain.database import IdaCommandOptions
-
         version = tuple(
             int(part) for part in idaapi.get_kernel_version().split(".")[:2]
         )
@@ -257,8 +234,6 @@ class IDARuntime:
         self.backend = backend
         self.database = database
         self.analysis_state = analysis_state
-        self.database_path = database_path
-        self.database_options = database_options or {}
         self.default_timeout = default_timeout
 
         self.ida_auto = ida_auto
@@ -266,8 +241,6 @@ class IDARuntime:
         self.ida_loader = ida_loader
         self.idc = idc
         self.ida_domain = ida_domain
-        self.Database = Database
-        self.IdaCommandOptions = IdaCommandOptions
 
         self._operation_lock = threading.Lock()
         self._active_lock = threading.Lock()
@@ -448,22 +421,16 @@ class IDARuntime:
     ) -> PythonExecutionResult:
         def execute() -> Any:
             runtime = {
-                "ida_domain": self.ida_domain,
-                "Database": self.Database,
-                "IdaCommandOptions": self.IdaCommandOptions,
                 "db": self.database,
-                "database_path": self.database_path,
-                "database_options": self.database_options,
-                "json": json,
-                "to_jsonable": to_jsonable,
+                "ida_domain": self.ida_domain,
             }
             global_ns = {
                 "__builtins__": builtins.__dict__,
                 "__name__": "__ida_codemode_execute__",
                 **runtime,
             }
-            function = _find_callable(code, global_ns)
-            return to_jsonable(asyncio.run(_invoke_callable(function, runtime)))
+            result = asyncio.run(_execute_user_code(code, global_ns, runtime))
+            return to_jsonable(result)
 
         return self._run_sync(
             execute,

@@ -145,23 +145,10 @@ def main(argv: list[str] | None = None) -> int:
             backend="idalib",
             managed=args.managed,
         )
-        database_options = {
-            "backend": "idalib",
-            "input_path": str(input_path),
-            "new_database": args.new_database,
-            "output_database": str(args.output_database)
-            if args.output_database
-            else None,
-            "processor": args.processor,
-            "auto_analysis": False,
-            "save_on_close": True,
-        }
         runtime = IDARuntime(
             backend="idalib",
             database=database,
             analysis_state=analysis_state,
-            database_path=idb_path,
-            database_options=database_options,
         )
         server = CodeModeHTTPServer(
             runtime,

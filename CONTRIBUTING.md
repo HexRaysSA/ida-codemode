@@ -55,24 +55,20 @@ explicit save is required.
 
 ## Executing Code Mode Python
 
-`execute_python` accepts a callable expression or code defining `run`, `execute`, or
-`main`. Parameters are filled by name from the runtime:
-
-- `db`
-- `ida_domain`
-- `Database`
-- `IdaCommandOptions`
-- `database_path`
-- `database_options`
-- `json`
-- `to_jsonable`
-
-Example:
+`execute_python` accepts ordinary Python with the current ida-domain `Database`
+available globally as `db` and the imported package as `ida_domain`. A single
+or trailing expression becomes the result:
 
 ```python
-def run(db, database_path):
+functions = list(db.functions)
+{"count": len(functions), "first": functions[0].name}
+```
+
+Function-style code remains available and receives `db` by name:
+
+```python
+def run(db):
     return {
-        "database_path": database_path,
         "minimum_ea": db.minimum_ea,
         "maximum_ea": db.maximum_ea,
     }
