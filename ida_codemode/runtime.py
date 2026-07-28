@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import builtins
 import importlib
@@ -20,6 +21,7 @@ from .registry import BackendName
 
 DEFAULT_TIMEOUT_SECONDS = 60.0
 SAVE_TIMEOUT_SECONDS = 300.0
+USER_CODE_FILENAME = "<ida-codemode>"
 
 
 class APIError(RuntimeError):
@@ -35,6 +37,10 @@ class APIError(RuntimeError):
         self.code = code
         self.status = status
         self.details = details or {}
+
+
+class CodeValidationError(ValueError):
+    """The supplied code does not satisfy the Code Mode callable contract."""
 
 
 class AnalysisState:
@@ -79,33 +85,77 @@ def to_jsonable(value: Any) -> Any:
 def _find_callable(code: str, global_ns: dict[str, Any]) -> Callable[..., Any]:
     stripped = code.strip()
     if not stripped:
-        raise ValueError("code must not be empty")
-    try:
-        candidate = eval(stripped, global_ns, {})
-    except SyntaxError:
-        candidate = None
-    except Exception as exc:
-        raise ValueError(f"failed to evaluate code expression: {exc}") from exc
-    if callable(candidate):
-        return candidate
+        raise CodeValidationError("code must not be empty")
+
+    module = ast.parse(stripped, filename=USER_CODE_FILENAME, mode="exec")
+    if len(module.body) == 1 and isinstance(module.body[0], ast.Expr):
+        expression = module.body[0].value
+        if not isinstance(expression, (ast.Lambda, ast.Name, ast.Attribute)):
+            raise CodeValidationError(
+                "a callable expression must be a lambda, name, or attribute reference"
+            )
+        candidate = eval(
+            compile(ast.Expression(expression), USER_CODE_FILENAME, "eval"),
+            global_ns,
+            {},
+        )
+        if callable(candidate):
+            return candidate
+        raise CodeValidationError("code expression did not resolve to a callable")
+
+    preferred_names = ("run", "execute", "main")
+    defined_names: list[str] = []
+    for statement in module.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defined_names.append(statement.name)
+        elif isinstance(statement, (ast.Assign, ast.AnnAssign)) and isinstance(
+            statement.value, ast.Lambda
+        ):
+            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            defined_names.extend(target.id for target in targets if isinstance(target, ast.Name))
+
+    selected_name = next((name for name in preferred_names if name in defined_names), None)
+    if selected_name is None:
+        public_names = [name for name in defined_names if not name.startswith("_")]
+        if len(public_names) == 1:
+            selected_name = public_names[0]
+        else:
+            raise CodeValidationError(
+                "code must define run, execute, main, or exactly one public function"
+            )
 
     local_ns: dict[str, Any] = {}
-    exec(stripped, global_ns, local_ns)  # noqa: S102 -- intentional Code Mode surface
-    preferred_names = ("run", "execute", "main")
-    for name in preferred_names:
-        value = local_ns.get(name)
-        if callable(value):
-            return value
-    discovered = [
-        value
-        for name, value in local_ns.items()
-        if callable(value) and not name.startswith("__")
-    ]
-    if len(discovered) == 1:
-        return discovered[0]
-    raise ValueError(
-        "code must evaluate to a callable or define one callable named "
-        + ", ".join(preferred_names)
+    exec(  # noqa: S102 -- intentional Code Mode surface
+        compile(module, USER_CODE_FILENAME, "exec"),
+        global_ns,
+        local_ns,
+    )
+    candidate = local_ns.get(selected_name)
+    if not callable(candidate):
+        raise CodeValidationError(f"{selected_name} did not resolve to a callable")
+    return candidate
+
+
+def _format_user_traceback(error: BaseException) -> str | None:
+    """Format only the supplied-code portion of an execution failure."""
+
+    if isinstance(error, SyntaxError):
+        return "".join(traceback.format_exception_only(error))
+    frames = traceback.extract_tb(error.__traceback__)
+    first_user_frame = next(
+        (
+            index
+            for index, frame in enumerate(frames)
+            if frame.filename == USER_CODE_FILENAME
+        ),
+        None,
+    )
+    if first_user_frame is None:
+        return None
+    return (
+        "Traceback (most recent call last):\n"
+        + "".join(traceback.format_list(frames[first_user_frame:]))
+        + "".join(traceback.format_exception_only(error))
     )
 
 
@@ -125,7 +175,7 @@ async def _invoke_callable(
             continue
         if parameter.name not in runtime:
             if parameter.default is inspect.Parameter.empty:
-                raise ValueError(
+                raise CodeValidationError(
                     f"missing runtime value for parameter '{parameter.name}'. "
                     f"Available names: {', '.join(sorted(runtime))}"
                 )
@@ -286,7 +336,7 @@ class IDARuntime:
                     result = function()
                     results.put((True, result, None))
                 except BaseException as exc:  # noqa: BLE001 -- marshal any IDA callback failure
-                    results.put((False, exc, traceback.format_exc()))
+                    results.put((False, exc, _format_user_traceback(exc)))
                 finally:
                     sys.settrace(old_trace)
                     if timer is not None:
@@ -318,11 +368,18 @@ class IDARuntime:
             return value
         if isinstance(value, APIError):
             raise value
+        if isinstance(value, CodeValidationError):
+            raise APIError("invalid_code", str(value), status=400) from value
+        details = (
+            {"traceback": formatted_traceback}
+            if formatted_traceback is not None
+            else None
+        )
         raise APIError(
             "execution_failed",
             str(value) or type(value).__name__,
             status=400,
-            details={"traceback": formatted_traceback},
+            details=details,
         ) from value
 
     def execute_python(self, code: str, timeout: float | None) -> Any:
