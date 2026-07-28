@@ -19,7 +19,7 @@ class FakeBackend:
         self.calls: list[tuple[object, ...]] = []
 
     def execute_python(self, code: str, timeout: float | None):
-        self.calls.append(("execute", code, timeout))
+        self.calls.append(("execute_python", code, timeout))
         return {"code": code}
 
     def wait_autoanalysis(self, timeout: float | None):
@@ -144,7 +144,7 @@ def test_execute_wait_and_save_routes(tmp_path: Path):
         assert status == 200
         assert payload["result"]["saved"] is True
         assert backend.calls == [
-            ("execute", "lambda: 1", 2.5),
+            ("execute_python", "lambda: 1", 2.5),
             ("wait", 4.0),
             ("save",),
         ]
@@ -172,7 +172,7 @@ def test_compressed_request_body(tmp_path: Path):
         assert response.status == 200
         response.read()
         connection.close()
-        assert backend.calls == [("execute", "lambda: 7", None)]
+        assert backend.calls == [("execute_python", "lambda: 7", None)]
     finally:
         server.stop()
         server.release_registration()
@@ -200,7 +200,7 @@ def test_chunked_framing_browser_gate_and_size_limit(tmp_path: Path):
         )
         assert status == 200
         assert json.loads(response_body)["result"] == {"code": "lambda: 9"}
-        assert backend.calls == [("execute", "lambda: 9", None)]
+        assert backend.calls == [("execute_python", "lambda: 9", None)]
 
         status, _ = raw_request(
             server,

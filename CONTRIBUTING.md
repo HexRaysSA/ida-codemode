@@ -57,7 +57,7 @@ explicit save is required.
 
 ## Executing Code Mode Python
 
-`execute` accepts a callable expression or code defining `run`, `execute`, or
+`execute_python` accepts a callable expression or code defining `run`, `execute`, or
 `main`. Parameters are filled by name from the runtime:
 
 - `db`
@@ -128,7 +128,7 @@ The trace contains:
 
 - every MCP tool call, result, error, and duration;
 - complete `reference` queries and results;
-- execute code and returned values;
+- executed Python and returned values;
 - database open, reuse, rebound, save, and release events;
 - GUI or idalib record identity and worker log path;
 - Claude, Codex, Pi, and `IDA_CODEMODE_ID` session metadata.
@@ -156,7 +156,7 @@ The dashboard provides:
 - a newest-first session index;
 - running, closed, or killed status;
 - all GUI and idalib targets used in one session;
-- paired tool-call timelines with highlighted execute code;
+- paired tool-call timelines with highlighted Python code;
 - logged reference output and structured errors;
 - interleaved Claude, Codex, or Pi transcript activity;
 - token and estimated cost summaries where available;

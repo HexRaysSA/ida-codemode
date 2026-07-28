@@ -36,6 +36,6 @@
     "typescript": "^5.9.3"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck extensions/ida-codemode.ts"
+    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck ida-codemode.ts"
   }
 }

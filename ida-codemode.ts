@@ -33,8 +33,8 @@ function renderToolCall(
   let text = theme.fg("toolTitle", theme.bold(toolName));
   const mcpToolName = toolName.startsWith("ida_") ? toolName.slice(4) : toolName;
 
-  if (mcpToolName === "execute" && typeof args?.code === "string") {
-    if (mcpToolName === "execute" && typeof args.instance_id === "string") {
+  if (mcpToolName === "execute_python" && typeof args?.code === "string") {
+    if (typeof args.instance_id === "string") {
       text += ` ${theme.fg("muted", args.instance_id)}`;
     }
 

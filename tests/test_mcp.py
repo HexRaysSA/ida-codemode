@@ -60,7 +60,7 @@ def test_manager_reuses_one_local_handle_and_releases_it(tmp_path: Path) -> None
         assert first["instance_id"] == second["instance_id"]
         assert second["reused"] is True
         assert handles[1].closed is True
-        assert manager.execute("lambda: 1", None)["result"]["code"] == "lambda: 1"
+        assert manager.execute_python("lambda: 1", None)["result"]["code"] == "lambda: 1"
         assert manager.save_database(None)["saved"] is True
         assert manager.close_database(None)["released"] is True
         assert handles[0].closed is True

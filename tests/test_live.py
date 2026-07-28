@@ -99,7 +99,7 @@ def run(endpoint, token, *, save=False):
     )
     require(time.monotonic() - started < 1.0, "health blocked on Python execution")
     thread.join(timeout=5)
-    require(not thread.is_alive() and pending.get()[0] == 200, "slow execute failed")
+    require(not thread.is_alive() and pending.get()[0] == 200, "slow Python execution failed")
     print("PASS health remains responsive during execute_python")
 
     status, analysis = request(endpoint, token, "GET", "/poll_autoanalysis")

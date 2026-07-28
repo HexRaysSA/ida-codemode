@@ -171,7 +171,10 @@ socket and kernel-lock cleanup.
 The MCP server keeps MCP-local opaque `instance_id` values mapped to
 `DatabaseHandle` objects. Reopening the same registry record within one MCP
 server reuses the existing local session and retains only one lease. Separate
-MCP servers retain independent leases.
+MCP servers retain independent leases. Registry discovery lets
+`list_databases()` also report GUI and idalib instances that this MCP server
+has not yet attached to; local handles are annotated with their `instance_id`
+and current-target state.
 
 Tools are:
 
@@ -179,8 +182,8 @@ Tools are:
 |---|---|
 | `reference(query)` | Search the installed ida-domain API reference. |
 | `open_database(path, set_current=True)` | Attach to a GUI or shared managed worker. |
-| `execute(code, instance_id=None)` | Execute against the selected handle. |
-| `list_databases()` | List this MCP server's handles. |
+| `execute_python(code, instance_id=None)` | Execute Python against the selected handle. |
+| `list_databases()` | Discover registered instances and identify this MCP server's handles. |
 | `save_database(instance_id=None)` | Explicitly save the selected database. |
 | `close_database(instance_id=None)` | Release this MCP server's handle; it is not a global close. |
 
@@ -212,7 +215,7 @@ Semantic tracing remains at the MCP layer because only that layer can observe
 logs are operational and correlate through `record_id` and timestamps.
 
 The dashboard reads the semantic session schema. It pairs calls and results,
-renders execute code and reference output, lists all database targets in a
+renders executed Python and reference output, lists all database targets in a
 session, and interleaves non-IDA activity from referenced agent transcripts.
 
 ## Failure behavior

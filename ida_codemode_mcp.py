@@ -3,8 +3,8 @@
 This server exposes a compact Code Mode surface for the ida-domain API:
 - reference(query): look up the active ida-domain API reference
 - open_database(...): attach to a GUI database or shared idalib worker
-- execute(code): run Python against an already-open database
-- list_databases(): inspect this MCP server's active database handles
+- execute_python(code): run Python against an already-open database
+- list_databases(): discover registered GUI and idalib database instances
 - save_database(...): explicitly save an active database
 - close_database(...): release this MCP server's handle and lease
 """
@@ -37,7 +37,7 @@ from ida_codemode.reference import (
     get_ida_domain_version,
     render_reference,
 )
-from ida_codemode.registry import LOG_DIR
+from ida_codemode.registry import LOG_DIR, REGISTRY_DIR, RegistryEntry, scan_instances
 from ida_codemode.resolver import ResolveError
 
 STATE_DIR = Path.home() / ".ida-codemode"
@@ -164,8 +164,7 @@ def _install_hook_input_meta_adapter() -> None:
 _install_hook_input_meta_adapter()
 
 
-def _target_fields(handle: DatabaseHandle) -> dict[str, Any]:
-    entry = handle.entry
+def _entry_target_fields(entry: RegistryEntry) -> dict[str, Any]:
     return {
         "record_id": entry.record_id,
         "backend": entry.backend,
@@ -182,6 +181,10 @@ def _target_fields(handle: DatabaseHandle) -> dict[str, Any]:
             else None
         ),
     }
+
+
+def _target_fields(handle: DatabaseHandle) -> dict[str, Any]:
+    return _entry_target_fields(handle.entry)
 
 
 def _error_fields(error: Exception) -> dict[str, Any]:
@@ -267,7 +270,8 @@ class _DatabaseSession:
 
 
 class _DatabaseManager:
-    def __init__(self) -> None:
+    def __init__(self, registry_dir: Path = REGISTRY_DIR) -> None:
+        self.registry_dir = registry_dir
         self._instances: dict[str, _DatabaseSession] = {}
         self._current_instance_id: str | None = None
         self._lock = threading.RLock()
@@ -382,7 +386,7 @@ class _DatabaseManager:
             raise McpToolError(f"unknown database instance: {target_id}")
         return target_id, session
 
-    def execute(self, code: str, instance_id: str | None) -> dict[str, Any]:
+    def execute_python(self, code: str, instance_id: str | None) -> dict[str, Any]:
         target_id, session = self._get_session(instance_id)
         with session.operation_lock:
             self._note_binding(session)
@@ -430,20 +434,61 @@ class _DatabaseManager:
         with self._lock:
             sessions = list(self._instances.values())
             current = self._current_instance_id
-        instances = []
+
+        attached: dict[str, dict[str, Any]] = {}
         for session in sessions:
             with session.operation_lock:
                 self._note_binding(session)
-                instances.append(
-                    {
-                        **self._database_info(session),
-                        "current": session.instance_id == current,
-                    }
-                )
+                attached[session.record_id] = {
+                    **self._database_info(session),
+                    "attached": True,
+                    "current": session.instance_id == current,
+                }
+
+        instances: list[dict[str, Any]] = []
+        discovered_record_ids: set[str] = set()
+        for discovered in scan_instances(self.registry_dir):
+            entry = discovered.entry
+            discovered_record_ids.add(entry.record_id)
+            local = attached.get(entry.record_id)
+            instances.append(
+                {
+                    **_entry_target_fields(entry),
+                    "availability": discovered.state.value,
+                    "availability_detail": discovered.detail,
+                    "instance_id": local["instance_id"] if local else None,
+                    "requested_path": local["requested_path"] if local else None,
+                    "attached": local is not None,
+                    "current": local["current"] if local else False,
+                }
+            )
+
+        # Preserve locally attached handles across a transient registry scan or
+        # lease rebind. Their handle remains authoritative for local operations.
+        for record_id, local in attached.items():
+            if record_id in discovered_record_ids:
+                continue
+            instances.append(
+                {
+                    **local,
+                    "availability": "unknown",
+                    "availability_detail": "not present in registry scan",
+                }
+            )
+
+        instances.sort(
+            key=lambda item: (
+                not item["current"],
+                not item["attached"],
+                item["backend"] != "gui",
+                item["idb_path"],
+            )
+        )
         return {
             "current_instance_id": current,
             "instances": instances,
             "count": len(instances),
+            "attached_count": sum(bool(item["attached"]) for item in instances),
             "log_path": str(TRACE.path),
         }
 
@@ -536,7 +581,7 @@ def open_database(
     ],
     set_current: Annotated[
         bool,
-        "Whether this database should become the default target for execute().",
+        "Whether this database should become the default target for execute_python().",
     ] = True,
 ) -> dict[str, Any]:
     """Attach to a GUI database or shared managed idalib worker."""
@@ -549,12 +594,12 @@ def open_database(
 
 
 @mcp.tool
-def execute(
+def execute_python(
     code: Annotated[
         str,
         (
             "Python code that runs against an already-open database. "
-            "Use the IDA reference tool before calling execute; do not guess the API shape. "
+            "Use the IDA reference tool before calling execute_python; do not guess the API shape. "
             "The runtime exposes db, ida_domain, Database, IdaCommandOptions, database_path, "
             "database_options, json, and to_jsonable(). Return JSON-serializable data. "
             "Define run(...), execute(...), main(...), or pass a lambda expression."
@@ -568,15 +613,15 @@ def execute(
     """Execute Python against an open database. Use the IDA reference tool first."""
 
     return _run_traced_tool(
-        "execute",
+        "execute_python",
         {"code": code, "instance_id": instance_id},
-        lambda: DATABASE_MANAGER.execute(code, instance_id),
+        lambda: DATABASE_MANAGER.execute_python(code, instance_id),
     )
 
 
 @mcp.tool
 def list_databases() -> dict[str, Any]:
-    """List this MCP server's active database handles and current default target."""
+    """Discover registered GUI and idalib databases, including local attachments."""
 
     return _run_traced_tool(
         "list_databases",

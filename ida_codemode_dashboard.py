@@ -299,7 +299,7 @@ def _summarize_session(path: Path) -> SessionSummary:
         event = record.get("event")
         if event == "tool_call":
             summary.tool_calls += 1
-            if record.get("tool") == "execute":
+            if record.get("tool") == "execute_python":
                 summary.executes += 1
         elif event == "tool_error":
             summary.errors += 1
@@ -736,7 +736,7 @@ def _render_tool_card(
     extra_head = f'<span class="muted">{_e(duration)}</span>' if duration else ""
 
     parts: list[str] = []
-    if tool == "execute" and isinstance(arguments.get("code"), str):
+    if tool == "execute_python" and isinstance(arguments.get("code"), str):
         parts.append(_python_block(arguments["code"]))
         rest = {key: value for key, value in arguments.items() if key != "code"}
         if rest:
@@ -1033,7 +1033,7 @@ _CODEMODE_TOOL_NAMES = {
     "search",
     "reference",
     "open_database",
-    "execute",
+    "execute_python",
     "list_databases",
     "save_database",
     "close_database",
@@ -1074,7 +1074,7 @@ def _tool_input_html(tool_name: str, tool_input: object) -> str:
     if isinstance(tool_input, dict):
         tool_input = {k: v for k, v in tool_input.items() if k != "_meta"}
         code = tool_input.get("code")
-        if _codemode_tool_name(tool_name) in ("execute", "search") and isinstance(
+        if _codemode_tool_name(tool_name) in ("execute_python", "search") and isinstance(
             code, str
         ):
             rest = {k: v for k, v in tool_input.items() if k != "code"}

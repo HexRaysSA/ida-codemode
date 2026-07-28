@@ -95,8 +95,8 @@ class SessionDashboardTests(unittest.TestCase):
                         "mcp_server_id": "session-id",
                         "pid": 999999,
                         "event": "tool_call",
-                        "call_id": "execute-1",
-                        "tool": "execute",
+                        "call_id": "execute-python-1",
+                        "tool": "execute_python",
                         "session": session_meta,
                         "input": {"code": "lambda: 42"},
                     },
@@ -106,8 +106,8 @@ class SessionDashboardTests(unittest.TestCase):
                         "mcp_server_id": "session-id",
                         "pid": 999999,
                         "event": "tool_result",
-                        "call_id": "execute-1",
-                        "tool": "execute",
+                        "call_id": "execute-python-1",
+                        "tool": "execute_python",
                         "session": session_meta,
                         "duration_ms": 1000,
                         "output": {"result": 42},
@@ -155,7 +155,7 @@ class SessionDashboardTests(unittest.TestCase):
 class ToolNameTests(unittest.TestCase):
     def test_ida_tools_are_recognized_and_rendered(self) -> None:
         for name in (
-            "ida_execute",
+            "ida_execute_python",
             "ida_reference",
             "ida_open_database",
             "ida_save_database",
@@ -167,7 +167,7 @@ class ToolNameTests(unittest.TestCase):
             "ida · open_database",
         )
         rendered = dashboard._tool_input_html(
-            "ida_execute", {"code": "def run():\n    return 1"}
+            "ida_execute_python", {"code": "def run():\n    return 1"}
         )
         self.assertIn("<pre><code>", rendered)
         self.assertIn("def", rendered)
@@ -177,7 +177,7 @@ class TranscriptTests(unittest.TestCase):
     def test_inline_transcript_keeps_non_ida_tools_only(self) -> None:
         ts = datetime(2026, 1, 1, tzinfo=UTC)
         items = [
-            dashboard.TranscriptItem(ts, "tool", "ida", tool_name="ida_execute"),
+            dashboard.TranscriptItem(ts, "tool", "ida", tool_name="ida_execute_python"),
             dashboard.TranscriptItem(ts, "tool", "bash", tool_name="bash"),
         ]
         summary = dashboard.SessionSummary(
@@ -229,7 +229,7 @@ class TranscriptTests(unittest.TestCase):
                         {
                             "type": "toolCall",
                             "id": "ida-call",
-                            "name": "ida_execute",
+                            "name": "ida_execute_python",
                             "arguments": {"code": "lambda: 1"},
                         }
                     ],
@@ -243,7 +243,7 @@ class TranscriptTests(unittest.TestCase):
                 "message": {
                     "role": "toolResult",
                     "toolCallId": "ida-call",
-                    "toolName": "ida_execute",
+                    "toolName": "ida_execute_python",
                     "content": [{"type": "text", "text": "1"}],
                     "isError": False,
                 },
@@ -253,9 +253,9 @@ class TranscriptTests(unittest.TestCase):
         self.assertEqual(meta["version"], "3")
         self.assertEqual(
             [item.tool_name for item in items if item.category == "tool"],
-            ["ida_execute"],
+            ["ida_execute_python"],
         )
-        self.assertIn("ida · execute", "".join(item.html for item in items))
+        self.assertIn("ida · execute_python", "".join(item.html for item in items))
 
 
 if __name__ == "__main__":

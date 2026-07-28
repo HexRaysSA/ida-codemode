@@ -149,7 +149,7 @@ def _legacy_target(
 def _legacy_tool(command: Any) -> str | None:
     return {
         "open": "open_database",
-        "execute": "execute",
+        "execute": "execute_python",
         "close": "close_database",
     }.get(command)
 

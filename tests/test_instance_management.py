@@ -4,6 +4,7 @@ import threading
 import time
 from pathlib import Path
 
+import ida_codemode_mcp as mcp_app
 from ida_codemode.client import DatabaseHandle
 from ida_codemode.registry import (
     FileLock,
@@ -77,6 +78,49 @@ def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
     finally:
         server.stop()
         server.release_registration()
+
+
+def test_list_databases_discovers_unattached_gui_instance(tmp_path: Path) -> None:
+    registry_dir = tmp_path / "instances"
+    server = CodeModeHTTPServer(
+        FakeBackend(),
+        InstanceIdentity("/tmp/open.i64", "/tmp/open.exe", "gui"),
+        AnalysisState(),
+        registry_dir,
+    )
+    server.start()
+    assert server.entry is not None
+    entry = server.entry
+    try:
+        result = mcp_app._DatabaseManager(registry_dir).list_databases()
+    finally:
+        server.stop()
+        server.release_registration()
+
+    assert result["count"] == 1
+    assert result["attached_count"] == 0
+    assert result["current_instance_id"] is None
+    assert result["instances"] == [
+        {
+            "record_id": entry.record_id,
+            "backend": "gui",
+            "pid": entry.pid,
+            "port": entry.port,
+            "idb_path": entry.idb_path,
+            "idb_key": entry.idb_key,
+            "exe_path": entry.exe_path,
+            "managed": False,
+            "started_at": entry.started_at,
+            "worker_log_path": None,
+            "availability": "ready",
+            "availability_detail": None,
+            "instance_id": None,
+            "requested_path": None,
+            "attached": False,
+            "current": False,
+        }
+    ]
+    assert "token" not in result["instances"][0]
 
 
 def test_multiple_leases_share_one_managed_server(tmp_path: Path) -> None:
