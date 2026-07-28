@@ -182,9 +182,23 @@ Unknown, malformed, and unattributable records are always printed with their
 source file and line number rather than entering the permanent dashboard
 schema.
 
+## Running a worker directly
+
+The resolver normally starts idalib workers on demand, but the worker is also
+exposed as a console script for reuse and diagnostics. It opens one executable
+or IDB in idalib and serves the same authenticated loopback HTTP API:
+
+```bash
+uv run ida-codemode-worker /path/to/target.elf
+```
+
+It registers in the private registry just like a resolver-spawned worker, so
+`open_database()` and the live endpoint check below discover it automatically.
+Omit `--managed` (as above) to keep the worker running until interrupted; the
+resolver passes `--managed` so workers exit after their final lease is released.
+
 ## Live endpoint check
 
-The idalib worker is an internal implementation detail started by the resolver.
 For diagnostics, the live HTTP smoke test accepts an endpoint and discovers its
 token from the private registry:
 

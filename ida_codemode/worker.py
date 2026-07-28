@@ -15,7 +15,8 @@ from .server import DEFAULT_LEASE_GRACE_SECONDS, CodeModeHTTPServer
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Open one executable in idalib and expose the IDA Code Mode API"
+        prog="ida-codemode-worker",
+        description="Open one executable in idalib and expose the IDA Code Mode API",
     )
     parser.add_argument("input", type=Path, help="Executable or existing IDB to open")
     parser.add_argument(

@@ -12,6 +12,7 @@ dependencies = [
 [project.scripts]
 ida-codemode-mcp = "ida_codemode_mcp:cli"
 ida-codemode-dashboard = "ida_codemode_dashboard:cli"
+ida-codemode-worker = "ida_codemode.worker:main"
 
 [dependency-groups]
 dev = [
