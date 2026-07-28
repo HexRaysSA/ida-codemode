@@ -4,7 +4,9 @@
       "command": "uv",
       "args": [
         "run",
-        "ida-codemode-mcp"
+        "ida-codemode-mcp",
+        "--agent",
+        "codex"
       ],
       "cwd": ".",
       "env": {

@@ -145,6 +145,29 @@ class _TraceLogger:
 TRACE = _TraceLogger()
 
 
+def _install_initialize_trace_adapter() -> None:
+    """Record MCP client identity and metadata from the initialize request."""
+
+    original_initialize = mcp.registry.methods["initialize"]
+
+    def initialize_with_trace(
+        protocolVersion: str,
+        capabilities: dict[str, Any],
+        clientInfo: dict[str, Any],
+        _meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        result = original_initialize(protocolVersion, capabilities, clientInfo, _meta)
+        TRACE.emit(
+            "mcp_initialized",
+            session=_session_fields(),
+            clientInfo=clientInfo,
+            _meta=_meta,
+        )
+        return result
+
+    mcp.registry.methods["initialize"] = initialize_with_trace
+
+
 def _install_hook_input_meta_adapter() -> None:
     """Promote Claude/Codex hook metadata from arguments into MCP request metadata."""
 
@@ -169,6 +192,7 @@ def _install_hook_input_meta_adapter() -> None:
     mcp.registry.methods["tools/call"] = tools_call_with_meta
 
 
+_install_initialize_trace_adapter()
 _install_hook_input_meta_adapter()
 
 
@@ -343,7 +367,7 @@ class _DatabaseManager:
                 return
         TRACE.emit(event, **fields)
 
-    def start(self, transport: str) -> None:
+    def start(self, transport: str, *, agent: str | None = None) -> None:
         with self._lock:
             if self._trace_lifecycle_started:
                 return
@@ -352,6 +376,7 @@ class _DatabaseManager:
             "mcp_started",
             session=_session_fields(),
             transport=transport,
+            agent=agent,
             trace_path=str(TRACE.path),
         )
 
@@ -817,9 +842,13 @@ def _schedule_startup_open(path: str) -> None:
     threading.Thread(target=_open, name="startup-open", daemon=True).start()
 
 
-def _serve(transport: str, database: str | None = None) -> None:
+def _serve(
+    transport: str,
+    database: str | None = None,
+    agent: str | None = None,
+) -> None:
     _install_server_shutdown_handlers()
-    DATABASE_MANAGER.start(transport)
+    DATABASE_MANAGER.start(transport, agent=agent)
 
     if database:
         _schedule_startup_open(database)
@@ -954,6 +983,11 @@ def cli() -> int:
         "so agents don't need to call open_database() first.",
     )
     parser.add_argument(
+        "--agent",
+        default=None,
+        help="Agent name to record in the MCP session trace.",
+    )
+    parser.add_argument(
         "--report-session",
         choices=["claude", "codex"],
         help=argparse.SUPPRESS,
@@ -964,7 +998,7 @@ def cli() -> int:
     if args.report_session is not None:
         return _report_session_main(args.report_session)
 
-    _serve(args.transport, database=args.database)
+    _serve(args.transport, database=args.database, agent=args.agent)
     return 0
 
 

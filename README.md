@@ -73,7 +73,9 @@ Configure a regular stdio MCP server in your `mcp.json`:
       "args": [
         "--from",
         "git+https://github.com/HexRaysSA/ida-codemode-mcp",
-        "ida-codemode-mcp"
+        "ida-codemode-mcp",
+        "--agent",
+        "my-agent"
       ]
     }
   }

@@ -196,9 +196,11 @@ The MCP server writes one session-oriented JSONL trace to:
 ```
 
 Every record includes schema version, timestamp, MCP server ID, MCP PID, and an
-event. Tool activity is represented by `tool_call`, `tool_result`, and
-`tool_error`, paired by `call_id`. Database binding events contain MCP-local and
-registry identity, including the worker operational log path.
+event. `mcp_started` records the optional `--agent` label, while
+`mcp_initialized` records the MCP client's `clientInfo` and `_meta`. Tool
+activity is represented by `tool_call`, `tool_result`, and `tool_error`, paired
+by `call_id`. Database binding events contain MCP-local and registry identity,
+including the worker operational log path.
 
 Claude, Codex, and Pi hooks promote hidden `_meta` fields into MCP request
 metadata. Each tool event records the applicable `codemode_id` and agent
@@ -210,8 +212,9 @@ Semantic tracing remains at the MCP layer because only that layer can observe
 logs are operational and correlate through `record_id` and timestamps.
 
 The dashboard reads the semantic session schema. It pairs calls and results,
-renders executed Python and reference output, lists all database targets in a
-session, and interleaves non-IDA activity from referenced agent transcripts.
+renders executed Python and reference output, lists all database targets and
+best-effort transcript model names, and interleaves non-IDA activity from
+referenced agent transcripts.
 
 ## Failure behavior
 

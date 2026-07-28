@@ -62,6 +62,40 @@ class TranscriptTests(unittest.TestCase):
         )
         self.assertIn("ida · execute_python", "".join(item.html for item in items))
 
+    def test_extracts_models_from_supported_agent_transcripts(self) -> None:
+        self.assertEqual(
+            dashboard._agent_models(
+                [{"type": "assistant", "message": {"model": "claude-opus-5"}}],
+                "claude",
+            ),
+            ["claude-opus-5"],
+        )
+        self.assertEqual(
+            dashboard._agent_models(
+                [
+                    {"type": "model_change", "modelId": "gpt-5.6"},
+                    {
+                        "type": "message",
+                        "message": {"role": "assistant", "model": "gpt-5.6"},
+                    },
+                ],
+                "pi",
+            ),
+            ["gpt-5.6"],
+        )
+        self.assertEqual(
+            dashboard._agent_models(
+                [
+                    {
+                        "type": "turn_context",
+                        "payload": {"model": "gpt-5.5"},
+                    }
+                ],
+                "codex",
+            ),
+            ["gpt-5.5"],
+        )
+
 
 class SemanticSessionTests(unittest.TestCase):
     def test_scan_hides_traces_without_tool_or_agent_activity(self) -> None:
@@ -78,6 +112,17 @@ class SemanticSessionTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             sessions_dir = Path(directory)
+            agent_path = sessions_dir / "agent.trace"
+            write(
+                agent_path,
+                [
+                    {"type": "session", "version": 3, "id": "pi-session"},
+                    {
+                        "type": "message",
+                        "message": {"role": "assistant", "model": "gpt-5.6"},
+                    },
+                ],
+            )
             write(
                 sessions_dir / "empty.jsonl",
                 [{**base, "event": "mcp_stopped", "mcp_server_id": "empty"}],
@@ -111,7 +156,8 @@ class SemanticSessionTests(unittest.TestCase):
                         **base,
                         "event": "mcp_started",
                         "mcp_server_id": "agent",
-                        "session": {"pi_session_path": "/tmp/agent.jsonl"},
+                        "agent": "pi",
+                        "session": {"pi_session_path": str(agent_path)},
                     }
                 ],
             )
@@ -120,9 +166,12 @@ class SemanticSessionTests(unittest.TestCase):
             dashboard.SESSIONS_DIR = sessions_dir
             try:
                 summaries = dashboard._scan_sessions()
+                index = dashboard.render_index()
             finally:
                 dashboard.SESSIONS_DIR = original
 
+        self.assertIn("gpt-5.6", index)
+        self.assertEqual(next(s.agent for s in summaries if s.session_id == "agent"), "pi")
         self.assertEqual(
             {summary.session_id for summary in summaries},
             {"tool", "agent"},

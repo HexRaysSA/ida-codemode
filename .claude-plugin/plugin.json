@@ -9,7 +9,9 @@
         "run",
         "--project",
         "${CLAUDE_PLUGIN_ROOT}",
-        "ida-codemode-mcp"
+        "ida-codemode-mcp",
+        "--agent",
+        "claude"
       ],
       "env": {
         "IDA_CODEMODE_ID": "${IDA_CODEMODE_ID}"

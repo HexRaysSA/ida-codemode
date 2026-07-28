@@ -196,6 +196,7 @@ class SessionSummary:
     stopped: bool = False
     pid: int | None = None
     codemode_id: str | None = None
+    agent: str | None = None
     targets: list[dict[str, Any]] = field(default_factory=list)
     agent_sessions: dict[str, str] = field(default_factory=dict)
     agent_session_refs: set[tuple[str, str]] = field(default_factory=set)
@@ -304,6 +305,10 @@ def _summarize_session(path: Path) -> SessionSummary:
                 summary.agent_session_refs.add((kind, session_path))
 
         event = record.get("event")
+        if event == "mcp_started":
+            agent = record.get("agent")
+            if isinstance(agent, str) and agent:
+                summary.agent = agent
         if event == "tool_call":
             summary.tool_calls += 1
             if record.get("tool") == "execute_python":
@@ -648,6 +653,16 @@ def _status_badge(summary: SessionSummary) -> str:
     return _status_badge_value(summary.status)
 
 
+def _session_model_names(summary: SessionSummary) -> list[str]:
+    models: list[str] = []
+    for _kind, session_path in sorted(_summary_agent_sessions(summary)):
+        _items, meta, _detected_kind, _totals = _load_agent_items(session_path)
+        model = meta.get("model")
+        if model and model not in models:
+            models.append(model)
+    return models
+
+
 def _cost_cell(totals: dict[str, Any]) -> tuple[str, str]:
     if totals["cost_available"]:
         return _format_cost(totals["cost"]), f"{totals['cost']:.6f}"
@@ -668,6 +683,7 @@ def _summary_index_row(summary: SessionSummary) -> str:
         f"{summary.last_activity.timestamp():.6f}" if summary.last_activity else ""
     )
     href = f"/session/{quote(summary.path.name)}"
+    models = ", ".join(_session_model_names(summary))
     agents = " ".join(
         _agent_link(kind, path)
         for kind, path in sorted(_summary_agent_sessions(summary))
@@ -677,6 +693,8 @@ def _summary_index_row(summary: SessionSummary) -> str:
         f'<td data-sort="{_e(summary.display_target.lower())}">'
         f'<a href="{_e(href)}"><strong>{_e(summary.display_target)}</strong></a>'
         f'<div class="mono muted">{_e(summary.session_id)}</div>{agents}</td>'
+        f'<td class="mono" data-sort="{_e(models.lower())}">'
+        f'{_e(models) if models else "—"}</td>'
         f'<td data-sort="{_e(started_sort)}">{_e(_format_ts(summary.started))}</td>'
         f'<td data-sort="{_e(activity_sort)}">{_e(_format_ts(summary.last_activity))}</td>'
         f'<td data-sort="{_e(summary.status)}">{_status_badge(summary)} {errors}</td>'
@@ -699,7 +717,8 @@ def render_index() -> str:
 <h2>Analysis sessions <span class="muted">({len(summaries)})</span></h2>
 <table class="sessions">
 <thead><tr>
-  <th>Targets / session</th><th class="sort-desc" data-dir="desc">Started</th>
+  <th>Targets / session</th><th>Model</th>
+  <th class="sort-desc" data-dir="desc">Started</th>
   <th>Last activity</th><th>Status</th><th>Cost</th>
 </tr></thead>
 <tbody>{rows}</tbody>
@@ -793,6 +812,7 @@ def _add_session_timeline(
             continue
         elif event in {
             "mcp_started",
+            "mcp_initialized",
             "mcp_stopped",
             "database_opened",
             "database_reused",
@@ -943,6 +963,7 @@ def render_session(name: str, *, export: bool = False) -> str | None:
         or '<span class="muted">none recorded</span>'
     )
     totals = _session_usage(summary)
+    models = ", ".join(_session_model_names(summary))
     meta_rows = [
         ("Session", f'<span class="mono">{_e(summary.session_id)}</span>'),
         ("Targets", targets),
@@ -958,6 +979,10 @@ def render_session(name: str, *, export: bool = False) -> str | None:
         ),
         ("Agent session", agents or '<span class="muted">none recorded</span>'),
     ]
+    if summary.agent:
+        meta_rows.append(("Agent", _e(summary.agent)))
+    if models:
+        meta_rows.append(("Model", _e(models)))
     if summary.codemode_id:
         meta_rows.append(
             ("CodeMode ID", f'<span class="mono">{_e(summary.codemode_id)}</span>')
@@ -1025,6 +1050,40 @@ def _detect_agent_kind(records: list[dict]) -> str:
         if record_type in ("user", "assistant"):
             return "claude"
     return "unknown"
+
+
+def _agent_models(records: list[dict], kind: str) -> list[str]:
+    """Best-effort model names from Claude, Codex, and Pi transcripts."""
+    if kind == "pi":
+        records = _pi_active_branch_records(records)
+
+    models: list[str] = []
+    for record in records:
+        record_type = record.get("type")
+        model: object = None
+        if kind == "claude" and record_type == "assistant":
+            message = record.get("message")
+            if isinstance(message, dict):
+                model = message.get("model")
+        elif kind == "pi":
+            if record_type == "model_change":
+                model = record.get("modelId")
+            elif record_type == "message":
+                message = record.get("message")
+                if isinstance(message, dict) and message.get("role") == "assistant":
+                    model = message.get("model")
+        elif kind == "codex" and record_type in {"session_meta", "turn_context"}:
+            payload = record.get("payload")
+            if isinstance(payload, dict):
+                model = payload.get("model")
+                collaboration = payload.get("collaboration_mode")
+                if model is None and isinstance(collaboration, dict):
+                    settings = collaboration.get("settings")
+                    if isinstance(settings, dict):
+                        model = settings.get("model")
+        if isinstance(model, str) and model and model not in models:
+            models.append(model)
+    return models
 
 
 def _message_bubble(
@@ -1638,6 +1697,10 @@ def _load_agent_items(
         for item in items:
             if item.usage:
                 _add_usage(totals, item.usage)
+
+    models = _agent_models(records, kind)
+    if models:
+        meta["model"] = ", ".join(models)
 
     result = (items, meta, kind, totals)
     if cache_key is not None:

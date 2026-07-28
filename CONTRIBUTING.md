@@ -10,7 +10,7 @@ uv run ida-codemode-mcp
 The MCP server uses stdio by default. A local HTTP transport is also available:
 
 ```bash
-uv run ida-codemode-mcp --transport http://127.0.0.1:5001
+uv run ida-codemode-mcp --transport http://127.0.0.1:5001 --agent inspector
 ```
 
 To manually play with the MCP, use the inspector:
@@ -104,7 +104,8 @@ There are no client process refcounts and no remote database-close endpoint.
 - `instances/` is the live discovery registry.
 - `spawn/` serializes idalib worker creation.
 - `logs/` contains IDA/worker operational output.
-- `sessions/` contains semantic MCP and agent traces.
+- `sessions/` contains semantic MCP and agent traces, including the configured
+  agent name and MCP initialize client information/metadata.
 
 Registry tokens and records are private to the local user. HTTP endpoints bind
 to `127.0.0.1`, require bearer authentication, validate `Host`, reject browser

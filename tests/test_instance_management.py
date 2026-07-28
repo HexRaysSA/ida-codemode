@@ -99,29 +99,43 @@ def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
         server.release_registration()
 
 
-def test_database_manager_only_traces_during_mcp_lifecycle(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_mcp_session_trace_metadata(tmp_path: Path, monkeypatch) -> None:
     class FakeTrace:
         path = tmp_path / "session.jsonl"
 
         def __init__(self) -> None:
-            self.events: list[str] = []
+            self.records: list[tuple[str, dict[str, object]]] = []
 
-        def emit(self, event: str, **_fields: object) -> None:
-            self.events.append(event)
+        def emit(self, event: str, **fields: object) -> None:
+            self.records.append((event, fields))
 
     trace = FakeTrace()
     monkeypatch.setattr(mcp_app, "TRACE", trace)
     manager = mcp_app._DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
 
     manager._emit("database_opened")
-    assert trace.events == []
+    assert trace.records == []
 
-    manager.start("stdio")
-    manager._emit("database_opened")
+    manager.start("stdio", agent="test-agent")
+    mcp_app.mcp.registry.methods["initialize"](
+        "2025-06-18",
+        {},
+        {"name": "test-client", "version": "1.0"},
+        {"model": "test-model"},
+    )
     manager.shutdown()
-    assert trace.events == ["mcp_started", "database_opened", "mcp_stopped"]
+
+    assert [event for event, _fields in trace.records] == [
+        "mcp_started",
+        "mcp_initialized",
+        "mcp_stopped",
+    ]
+    assert trace.records[0][1]["agent"] == "test-agent"
+    assert trace.records[1][1]["clientInfo"] == {
+        "name": "test-client",
+        "version": "1.0",
+    }
+    assert trace.records[1][1]["_meta"] == {"model": "test-model"}
 
 
 def test_list_databases_uses_idb_when_gui_executable_is_missing(tmp_path: Path) -> None:
