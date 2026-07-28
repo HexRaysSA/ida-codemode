@@ -97,7 +97,7 @@ disk permanently to avoid split-inode locking races.
 3. Otherwise find the unique owner of the expected IDB.
 4. Return a `READY` owner or report a lock-held `BLOCKED` owner.
 5. Acquire `spawn/<idb-key>.lock` and repeat the scan.
-6. If still absent, start `python -m ida_codemode.worker` as a detached managed worker.
+6. If still absent, start the `ida-codemode-worker` console script as a detached managed worker.
 7. Wait for a record with both the child PID and expected IDB key.
 
 The spawn lock is held until the child becomes ready or fails. Startup waiting

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import sysconfig
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -100,6 +101,34 @@ def _resolve_existing(
     )
 
 
+def _find_console_script(name: str) -> str | None:
+    """Locate a pip-installed console script for the current interpreter.
+
+    Inside IDA, ``sys.executable`` is the IDA binary, not a Python interpreter,
+    so we cannot launch the worker with ``sys.executable -m ...``. The console
+    script installed by pip carries the correct interpreter in its shebang (or is
+    an ``.exe`` wrapper on Windows), so running it directly always works.
+
+    Only script directories belonging to the current interpreter are searched.
+    We never fall back to ``PATH``, which could resolve a same-named script from
+    an unrelated environment running a different interpreter.
+    """
+    dirs: list[str] = []
+    scripts_dir = sysconfig.get_path("scripts")
+    if scripts_dir:
+        dirs.append(scripts_dir)
+    for prefix in dict.fromkeys([sys.prefix, sys.base_prefix]):
+        dirs.append(os.path.join(prefix, "Scripts" if os.name == "nt" else "bin"))
+
+    exe_names = [f"{name}.exe", name] if os.name == "nt" else [name]
+    for directory in dirs:
+        for exe in exe_names:
+            candidate = os.path.join(directory, exe)
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
 def spawn_worker(
     source: str,
     expected_idb: str,
@@ -107,10 +136,14 @@ def spawn_worker(
 ) -> tuple[subprocess.Popen[bytes], Path]:
     suffix = os.urandom(3).hex()
     input_path = expected_idb if os.path.exists(expected_idb) else source
+    worker = _find_console_script("ida-codemode-worker")
+    if worker is None:
+        raise ResolveError(
+            "Could not find the 'ida-codemode-worker' console script for this "
+            "Python. Ensure the ida-codemode-mcp package is installed."
+        )
     command = [
-        sys.executable,
-        "-m",
-        "ida_codemode.worker",
+        worker,
         input_path,
         "--managed",
         "--record-suffix",
