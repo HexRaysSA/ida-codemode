@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import traceback
+import warnings
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict, is_dataclass
@@ -191,6 +192,14 @@ async def _invoke_callable(
     return result
 
 
+def _suppress_ida_domain_warnings() -> None:
+    warnings.filterwarnings(
+        "ignore",
+        category=Warning,
+        module=r"^ida_domain(?:\.|$)",
+    )
+
+
 def create_autoanalysis_hook(analysis_state: AnalysisState) -> Any:
     """Create an IDB hook without importing IDA when this module is imported."""
 
@@ -216,6 +225,10 @@ class IDARuntime:
         analysis_state: AnalysisState,
         default_timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
+        # Library warnings would otherwise be captured as stderr and returned
+        # to the agent alongside execution output.
+        _suppress_ida_domain_warnings()
+
         # ida-domain loads idapro when running outside IDA, making the
         # IDAPython modules importable before the runtime binds them.
         ida_domain = importlib.import_module("ida_domain")
