@@ -798,9 +798,31 @@ def close_database(
     )
 
 
-def _serve(transport: str) -> None:
+def _schedule_startup_open(path: str) -> None:
+    """Open and activate a database at startup so agents can skip open_database().
+
+    Runs in a background daemon thread so opening (which may spawn a managed
+    idalib worker) never delays the MCP initialize handshake. The database
+    becomes the current target once the open completes; agents may still call
+    open_database() themselves if the startup open fails.
+    """
+
+    def _open() -> None:
+        try:
+            DATABASE_MANAGER.open_database(path, set_current=True)
+            print(f"Startup database ready: {path}", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001 - report and let agents retry
+            print(f"Startup open failed for {path!r}: {exc}", file=sys.stderr)
+
+    threading.Thread(target=_open, name="startup-open", daemon=True).start()
+
+
+def _serve(transport: str, database: str | None = None) -> None:
     _install_server_shutdown_handlers()
     DATABASE_MANAGER.start(transport)
+
+    if database:
+        _schedule_startup_open(database)
 
     if transport == "stdio":
         try:
@@ -926,6 +948,12 @@ def cli() -> int:
         help="Transport (stdio or http://host:port). Defaults to stdio.",
     )
     parser.add_argument(
+        "--database",
+        default=None,
+        help="Path to an executable or IDB to open and activate on startup, "
+        "so agents don't need to call open_database() first.",
+    )
+    parser.add_argument(
         "--report-session",
         choices=["claude", "codex"],
         help=argparse.SUPPRESS,
@@ -936,7 +964,7 @@ def cli() -> int:
     if args.report_session is not None:
         return _report_session_main(args.report_session)
 
-    _serve(args.transport)
+    _serve(args.transport, database=args.database)
     return 0
 
 
