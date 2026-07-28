@@ -483,3 +483,62 @@ def discover_instances(
             payload["error"] = instance.detail or "instance is unavailable"
             blocked.append(payload)
     return ready, blocked
+
+
+def read_records(
+    registry_dir: str | os.PathLike[str] | None = None,
+) -> list[RegistryEntry]:
+    """Return published registry records without probing health or acquiring locks.
+
+    Much cheaper than :func:`scan_instances` (no HTTP health probe, no lock
+    reaping), but the records are therefore only "potentially live" - a returned
+    entry may belong to a process that has since exited. Suitable for a coarse
+    "is anything registered for this IDB?" check where an occasional stale match
+    is acceptable.
+    """
+    directory = ensure_private_directory(
+        REGISTRY_DIR if registry_dir is None else registry_dir
+    )
+    records: list[RegistryEntry] = []
+    for name in sorted(glob.glob(str(directory / "*.json"))):
+        try:
+            records.append(load_registry_entry(name))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return records
+
+
+def find_gui_owner(
+    idb_path: str | os.PathLike[str],
+    registry_dir: str | os.PathLike[str] | None = None,
+) -> RegistryEntry | None:
+    """Return a live registered GUI record that owns ``idb_path``, or None.
+
+    Cheaply lists records with :func:`read_records`, then confirms liveness for
+    the matching candidate(s) *only* - via each record's lock, the same
+    authority :func:`scan_instances` and the resolver use - instead of
+    health-probing every instance. A held lock means the owner is running
+    (READY or BLOCKED), so a second GUI server would make
+    :func:`resolve_instance` raise ``AmbiguousInstance`` and the caller should
+    back off and attach instead. An acquirable lock means the record is stale
+    and is ignored (unlike a health probe, this never gives a false negative on
+    a transient blip, which would otherwise create a persistent duplicate owner).
+    """
+    directory = ensure_private_directory(
+        REGISTRY_DIR if registry_dir is None else registry_dir
+    )
+    key = idb_key(idb_path)
+    for entry in read_records(directory):
+        if entry.backend != "gui" or entry.idb_key != key:
+            continue
+        lock = FileLock(directory / f"{entry.record_id}.lock")
+        try:
+            acquirable = lock.try_acquire()
+        except OSError:
+            acquirable = False  # can't probe the lock; assume the owner is live
+        finally:
+            lock.close()
+        if acquirable:
+            continue  # stale record: the owning process is gone
+        return entry
+    return None

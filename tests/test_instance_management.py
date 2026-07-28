@@ -11,6 +11,7 @@ from ida_codemode.registry import (
     InstanceIdentity,
     InstanceRegistration,
     canonical_path,
+    find_gui_owner,
     scan_instances,
 )
 from ida_codemode.resolver import resolve_instance
@@ -38,6 +39,23 @@ def test_file_lock_excludes_other_open_descriptions(tmp_path: Path) -> None:
     finally:
         second.close()
         first.close()
+
+
+def test_find_gui_owner_checks_the_lifetime_lock(tmp_path: Path) -> None:
+    registration = InstanceRegistration(
+        tmp_path,
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
+        token="token",
+    )
+    entry = registration.publish(12345)
+    try:
+        assert find_gui_owner("/tmp/test.i64", tmp_path) == entry
+        assert find_gui_owner("/tmp/other.i64", tmp_path) is None
+
+        registration.lock.close()  # Simulate the owning process exiting.
+        assert find_gui_owner("/tmp/test.i64", tmp_path) is None
+    finally:
+        registration.release()
 
 
 def test_scan_reaps_a_record_after_its_lifetime_lock_dies(tmp_path: Path) -> None:

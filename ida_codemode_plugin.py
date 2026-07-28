@@ -11,7 +11,7 @@ import ida_loader
 import ida_nalt
 import idaapi
 
-from ida_codemode.registry import REGISTRY_DIR, InstanceIdentity
+from ida_codemode.registry import REGISTRY_DIR, InstanceIdentity, find_gui_owner
 from ida_codemode.runtime import AnalysisState, IDARuntime, create_autoanalysis_hook
 from ida_codemode.server import CodeModeHTTPServer
 
@@ -86,10 +86,22 @@ class CodeModePlugin(idaapi.plugin_t):
         if ida_auto.auto_is_ok():
             self.analysis_state.mark_complete()
 
+        idb_path, exe_path = self._current_paths()
+
+        # Back off if another plugin already registered this GUI database. IDA
+        # runs ready_to_run callbacks sequentially on its UI thread, and
+        # server.start() publishes synchronously, so the next plugin sees it.
+        # A second owner would make the resolver raise AmbiguousInstance.
+        if idb_path and find_gui_owner(idb_path) is not None:
+            ida_kernwin.msg(
+                "[ida-codemode] GUI database already registered; "
+                "not starting a second server\n"
+            )
+            return
+
         from ida_domain import Database
 
         database = Database.open()
-        idb_path, exe_path = self._current_paths()
         identity = InstanceIdentity(idb_path=idb_path, exe_path=exe_path, backend="gui")
         runtime = IDARuntime(
             backend="gui",
