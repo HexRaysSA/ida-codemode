@@ -17,7 +17,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const PACKAGE_ROOT = dirname(fileURLToPath(import.meta.url));
 const CALL_TIMEOUT_MS = 360_000;
 
 type PiContent =
