@@ -13,7 +13,7 @@ from ida_codemode.runtime import AnalysisState
 from ida_codemode.server import CodeModeHTTPServer
 
 
-class FakeBackend:
+class RecordingBackend:
     def __init__(self, analysis: AnalysisState) -> None:
         self.analysis = analysis
         self.calls: list[tuple[object, ...]] = []
@@ -76,7 +76,7 @@ def raw_request(server: CodeModeHTTPServer, data: bytes):
 
 def make_server(tmp_path: Path, *, gui: bool = False):
     analysis = AnalysisState()
-    backend = FakeBackend(analysis)
+    backend = RecordingBackend(analysis)
     identity = InstanceIdentity(
         idb_path="/tmp/test.i64",
         exe_path="/tmp/test.exe",

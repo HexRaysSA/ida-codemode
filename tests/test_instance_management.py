@@ -10,6 +10,7 @@ from ida_codemode.registry import (
     FileLock,
     InstanceIdentity,
     InstanceRegistration,
+    canonical_path,
     scan_instances,
 )
 from ida_codemode.resolver import resolve_instance
@@ -17,7 +18,7 @@ from ida_codemode.runtime import AnalysisState
 from ida_codemode.server import CodeModeHTTPServer
 
 
-class FakeBackend:
+class StaticBackend:
     def execute_python(self, code: str, timeout: float | None):
         return {"code": code, "timeout": timeout}
 
@@ -60,7 +61,7 @@ def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
     executable.write_bytes(b"binary")
     funny_idb.write_bytes(b"idb")
     server = CodeModeHTTPServer(
-        FakeBackend(),
+        StaticBackend(),
         InstanceIdentity(str(funny_idb), str(executable), "gui"),
         AnalysisState(),
         tmp_path / "instances",
@@ -80,11 +81,13 @@ def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
         server.release_registration()
 
 
-def test_list_databases_discovers_unattached_gui_instance(tmp_path: Path) -> None:
+def test_list_databases_uses_idb_when_gui_executable_is_missing(tmp_path: Path) -> None:
     registry_dir = tmp_path / "instances"
+    idb_path = tmp_path / "open.i64"
+    idb_path.write_bytes(b"idb")
     server = CodeModeHTTPServer(
-        FakeBackend(),
-        InstanceIdentity("/tmp/open.i64", "/tmp/open.exe", "gui"),
+        StaticBackend(),
+        InstanceIdentity(str(idb_path), str(tmp_path / "missing.exe"), "gui"),
         AnalysisState(),
         registry_dir,
     )
@@ -97,36 +100,45 @@ def test_list_databases_discovers_unattached_gui_instance(tmp_path: Path) -> Non
         server.stop()
         server.release_registration()
 
-    assert result["count"] == 1
-    assert result["attached_count"] == 0
-    assert result["current_instance_id"] is None
-    assert result["instances"] == [
-        {
-            "record_id": entry.record_id,
-            "backend": "gui",
-            "pid": entry.pid,
-            "port": entry.port,
-            "idb_path": entry.idb_path,
-            "idb_key": entry.idb_key,
-            "exe_path": entry.exe_path,
-            "managed": False,
-            "started_at": entry.started_at,
-            "worker_log_path": None,
-            "availability": "ready",
-            "availability_detail": None,
-            "instance_id": None,
-            "requested_path": None,
-            "attached": False,
-            "current": False,
-        }
-    ]
-    assert "token" not in result["instances"][0]
+    assert result == {
+        "instances": [
+            {
+                "path": entry.idb_path,
+                "backend": "gui",
+                "status": "available",
+                "instance_id": None,
+                "error": None,
+            }
+        ]
+    }
+
+
+def test_list_databases_prefers_existing_gui_executable(tmp_path: Path) -> None:
+    registry_dir = tmp_path / "instances"
+    idb_path = tmp_path / "open.i64"
+    executable = tmp_path / "open.exe"
+    idb_path.write_bytes(b"idb")
+    executable.write_bytes(b"binary")
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity(str(idb_path), str(executable), "gui"),
+        AnalysisState(),
+        registry_dir,
+    )
+    server.start()
+    try:
+        result = mcp_app._DatabaseManager(registry_dir).list_databases()
+    finally:
+        server.stop()
+        server.release_registration()
+
+    assert result["instances"][0]["path"] == canonical_path(executable)
 
 
 def test_multiple_leases_share_one_managed_server(tmp_path: Path) -> None:
     stopped = threading.Event()
     server = CodeModeHTTPServer(
-        FakeBackend(),
+        StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
         AnalysisState(),
         tmp_path / "instances",

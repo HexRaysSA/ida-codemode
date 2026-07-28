@@ -5,12 +5,13 @@ import json
 import socket
 import threading
 import time
+from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .registry import HOST, RegistryEntry
+from .registry import HOST, REGISTRY_DIR, SPAWN_DIR, RegistryEntry
 from .resolver import ResolveError, resolve_instance
 
 
@@ -41,9 +42,13 @@ class DatabaseHandle:
         entry: RegistryEntry,
         *,
         resolve_timeout: float = 120.0,
+        registry_dir: str | Path = REGISTRY_DIR,
+        spawn_dir: str | Path = SPAWN_DIR,
     ) -> None:
         self.path = path
         self.resolve_timeout = resolve_timeout
+        self.registry_dir = registry_dir
+        self.spawn_dir = spawn_dir
         self._lock = threading.Lock()
         self._closed = threading.Event()
         self._entry = entry
@@ -66,17 +71,43 @@ class DatabaseHandle:
         *,
         spawn: bool = True,
         timeout: float = 120.0,
+        registry_dir: str | Path = REGISTRY_DIR,
+        spawn_dir: str | Path = SPAWN_DIR,
     ) -> DatabaseHandle:
-        entry = resolve_instance(path, spawn=spawn, timeout=timeout)
+        entry = resolve_instance(
+            path,
+            spawn=spawn,
+            timeout=timeout,
+            registry_dir=registry_dir,
+            spawn_dir=spawn_dir,
+        )
         try:
-            return cls(path, entry, resolve_timeout=timeout)
+            return cls(
+                path,
+                entry,
+                resolve_timeout=timeout,
+                registry_dir=registry_dir,
+                spawn_dir=spawn_dir,
+            )
         except ClientError:
             # The worker may cross its zero-lease shutdown boundary between
             # resolve and the SSE handshake. Resolve once more as promised by
             # the instance lifecycle contract.
             time.sleep(0.05)
-            replacement = resolve_instance(path, spawn=spawn, timeout=timeout)
-            return cls(path, replacement, resolve_timeout=timeout)
+            replacement = resolve_instance(
+                path,
+                spawn=spawn,
+                timeout=timeout,
+                registry_dir=registry_dir,
+                spawn_dir=spawn_dir,
+            )
+            return cls(
+                path,
+                replacement,
+                resolve_timeout=timeout,
+                registry_dir=registry_dir,
+                spawn_dir=spawn_dir,
+            )
 
     @property
     def entry(self) -> RegistryEntry:
@@ -143,7 +174,12 @@ class DatabaseHandle:
             # finds or spawns its replacement.
             while not self._closed.wait(0.5):
                 try:
-                    entry = resolve_instance(self.path, timeout=self.resolve_timeout)
+                    entry = resolve_instance(
+                        self.path,
+                        timeout=self.resolve_timeout,
+                        registry_dir=self.registry_dir,
+                        spawn_dir=self.spawn_dir,
+                    )
                     self._install_lease(entry)
                     break
                 except (ClientError, ResolveError, OSError, ValueError):

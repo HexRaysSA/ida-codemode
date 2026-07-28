@@ -26,7 +26,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, TypedDict
 from urllib.parse import urlparse
 
 from zeromcp import McpServer, McpToolError
@@ -37,8 +37,15 @@ from ida_codemode.reference import (
     get_ida_domain_version,
     render_reference,
 )
-from ida_codemode.registry import LOG_DIR, REGISTRY_DIR, RegistryEntry, scan_instances
-from ida_codemode.resolver import ResolveError
+from ida_codemode.registry import (
+    LOG_DIR,
+    REGISTRY_DIR,
+    SPAWN_DIR,
+    RegistryEntry,
+    canonical_path,
+    scan_instances,
+)
+from ida_codemode.resolver import ResolveError, expected_idb_path
 
 STATE_DIR = Path.home() / ".ida-codemode"
 SESSIONS_DIR = STATE_DIR / "sessions"
@@ -53,7 +60,7 @@ def _utc_now_iso() -> str:
 
 
 def _resolve_user_path(path: str) -> str:
-    return str(Path(path).expanduser().resolve())
+    return canonical_path(path)
 
 
 def _session_fields() -> dict[str, Any]:
@@ -257,6 +264,47 @@ def _run_traced_tool(
     return result
 
 
+DatabaseStatus = Literal["available", "attached", "current", "unavailable"]
+
+
+class DatabaseListing(TypedDict):
+    path: str
+    backend: Annotated[str, "Instance backend: gui or idalib."]
+    status: Annotated[
+        str,
+        "Action state: available, attached, current, or unavailable.",
+    ]
+    instance_id: str | None
+    error: str | None
+
+
+class ListDatabasesResult(TypedDict):
+    instances: list[DatabaseListing]
+
+
+class OpenDatabaseResult(TypedDict):
+    instance_id: str
+    backend: Annotated[str, "Instance backend: gui or idalib."]
+    status: Annotated[str, "Attachment state: attached or current."]
+    log_path: str
+    codemode_id: str | None
+
+
+class SaveDatabaseResult(TypedDict):
+    path: str
+
+
+class CloseDatabaseResult(TypedDict):
+    closed: bool
+
+
+@dataclass(frozen=True)
+class _AttachedDatabase:
+    entry: RegistryEntry
+    instance_id: str
+    current: bool
+
+
 @dataclass
 class _DatabaseSession:
     instance_id: str
@@ -270,8 +318,13 @@ class _DatabaseSession:
 
 
 class _DatabaseManager:
-    def __init__(self, registry_dir: Path = REGISTRY_DIR) -> None:
+    def __init__(
+        self,
+        registry_dir: Path = REGISTRY_DIR,
+        spawn_dir: Path = SPAWN_DIR,
+    ) -> None:
         self.registry_dir = registry_dir
+        self.spawn_dir = spawn_dir
         self._instances: dict[str, _DatabaseSession] = {}
         self._current_instance_id: str | None = None
         self._lock = threading.RLock()
@@ -312,7 +365,7 @@ class _DatabaseManager:
             target=_target_fields(session.handle),
         )
 
-    def open_database(self, path: str, *, set_current: bool) -> dict[str, Any]:
+    def open_database(self, path: str, *, set_current: bool) -> OpenDatabaseResult:
         resolved_path = _resolve_user_path(path)
         if not Path(resolved_path).exists():
             raise McpToolError(f"database path does not exist: {resolved_path}")
@@ -320,59 +373,84 @@ class _DatabaseManager:
         # Serialize local opens so duplicate calls create at most one retained
         # lease in this MCP server. Other MCP servers retain their own leases.
         with self._open_lock:
-            handle = DatabaseHandle.open(
-                resolved_path,
-                timeout=OPEN_TIMEOUT_SECONDS,
-            )
-            entry = handle.entry
             with self._lock:
-                existing = next(
+                candidate = next(
                     (
                         session
                         for session in self._instances.values()
-                        if session.handle.entry.record_id == entry.record_id
+                        if session.requested_path == resolved_path
                     ),
                     None,
                 )
-                if existing is not None:
-                    if set_current or self._current_instance_id is None:
-                        self._current_instance_id = existing.instance_id
-                    current = self._current_instance_id
-                else:
-                    instance_id = uuid.uuid4().hex[:12]
-                    existing = _DatabaseSession(
-                        instance_id=instance_id,
-                        requested_path=resolved_path,
-                        handle=handle,
-                        record_id=entry.record_id,
-                    )
-                    self._instances[instance_id] = existing
-                    if set_current or self._current_instance_id is None:
-                        self._current_instance_id = instance_id
-                    current = self._current_instance_id
 
-            reused = existing.handle is not handle
-            if reused:
-                handle.close()
-                event = "database_reused"
+            existing: _DatabaseSession | None = None
+            if candidate is not None:
+                with candidate.operation_lock:
+                    self._note_binding(candidate)
+                    with self._lock:
+                        if self._instances.get(candidate.instance_id) is candidate:
+                            existing = candidate
+                            if set_current or self._current_instance_id is None:
+                                self._current_instance_id = candidate.instance_id
+                            current = self._current_instance_id
+
+            if existing is None:
+                handle = DatabaseHandle.open(
+                    resolved_path,
+                    timeout=OPEN_TIMEOUT_SECONDS,
+                    registry_dir=self.registry_dir,
+                    spawn_dir=self.spawn_dir,
+                )
+                entry = handle.entry
+                with self._lock:
+                    existing = next(
+                        (
+                            session
+                            for session in self._instances.values()
+                            if session.handle.entry.record_id == entry.record_id
+                        ),
+                        None,
+                    )
+                    if existing is not None:
+                        if set_current or self._current_instance_id is None:
+                            self._current_instance_id = existing.instance_id
+                        current = self._current_instance_id
+                    else:
+                        instance_id = uuid.uuid4().hex[:12]
+                        existing = _DatabaseSession(
+                            instance_id=instance_id,
+                            requested_path=resolved_path,
+                            handle=handle,
+                            record_id=entry.record_id,
+                        )
+                        self._instances[instance_id] = existing
+                        if set_current or self._current_instance_id is None:
+                            self._current_instance_id = instance_id
+                        current = self._current_instance_id
+
+                if existing.handle is not handle:
+                    handle.close()
+                    event = "database_reused"
+                else:
+                    event = "database_opened"
             else:
-                event = "database_opened"
-            database = self._database_info(existing)
+                event = "database_reused"
+
+            session_fields = _session_fields()
             TRACE.emit(
                 event,
-                session=_session_fields(),
+                session=session_fields,
                 instance_id=existing.instance_id,
-                target=database,
+                target=self._database_info(existing),
             )
-            return {
-                "opened": True,
-                "reused": reused,
-                "instance_id": existing.instance_id,
-                "current_instance_id": current,
-                "database": database,
-                "log_path": str(TRACE.path),
-                **_session_fields(),
-            }
+            codemode_id = session_fields.get("codemode_id")
+            return OpenDatabaseResult(
+                instance_id=existing.instance_id,
+                backend=existing.handle.entry.backend,
+                status="current" if current == existing.instance_id else "attached",
+                log_path=str(TRACE.path),
+                codemode_id=codemode_id if isinstance(codemode_id, str) else None,
+            )
 
     def _get_session(self, instance_id: str | None) -> tuple[str, _DatabaseSession]:
         with self._lock:
@@ -386,8 +464,8 @@ class _DatabaseManager:
             raise McpToolError(f"unknown database instance: {target_id}")
         return target_id, session
 
-    def execute_python(self, code: str, instance_id: str | None) -> dict[str, Any]:
-        target_id, session = self._get_session(instance_id)
+    def execute_python(self, code: str, instance_id: str | None) -> Any:
+        _, session = self._get_session(instance_id)
         with session.operation_lock:
             self._note_binding(session)
             result = session.handle.execute_python(
@@ -395,16 +473,9 @@ class _DatabaseManager:
                 timeout=EXECUTE_TIMEOUT_SECONDS,
             )
             self._note_binding(session)
-            return {
-                "instance_id": target_id,
-                "current_instance_id": self.current_instance_id,
-                "record_id": session.record_id,
-                "database": self._database_info(session),
-                "log_path": str(TRACE.path),
-                "result": result,
-            }
+            return result
 
-    def save_database(self, instance_id: str | None) -> dict[str, Any]:
+    def save_database(self, instance_id: str | None) -> SaveDatabaseResult:
         target_id, session = self._get_session(instance_id)
         with session.operation_lock:
             self._note_binding(session)
@@ -417,82 +488,88 @@ class _DatabaseManager:
                 target=self._database_info(session),
                 result=result,
             )
-            return {
-                "instance_id": target_id,
-                "current_instance_id": self.current_instance_id,
-                "record_id": session.record_id,
-                "log_path": str(TRACE.path),
-                **result,
-            }
+            path = result.get("idb_path")
+            if not isinstance(path, str):
+                raise McpToolError("save_database returned an invalid path")
+            return SaveDatabaseResult(path=path)
 
-    @property
-    def current_instance_id(self) -> str | None:
-        with self._lock:
-            return self._current_instance_id
+    @staticmethod
+    def _listing_path(entry: RegistryEntry) -> str:
+        """Return a path that open_database() can use to reach this instance."""
 
-    def list_databases(self) -> dict[str, Any]:
+        if (
+            entry.exe_path
+            and Path(entry.exe_path).exists()
+            and (
+                entry.backend == "gui"
+                or expected_idb_path(entry.exe_path) == entry.idb_path
+            )
+        ):
+            return entry.exe_path
+        return entry.idb_path
+
+    def list_databases(self) -> ListDatabasesResult:
         with self._lock:
             sessions = list(self._instances.values())
             current = self._current_instance_id
 
-        attached: dict[str, dict[str, Any]] = {}
+        attached: dict[str, _AttachedDatabase] = {}
         for session in sessions:
             with session.operation_lock:
                 self._note_binding(session)
-                attached[session.record_id] = {
-                    **self._database_info(session),
-                    "attached": True,
-                    "current": session.instance_id == current,
-                }
+                entry = session.handle.entry
+                attached[entry.record_id] = _AttachedDatabase(
+                    entry=entry,
+                    instance_id=session.instance_id,
+                    current=session.instance_id == current,
+                )
 
-        instances: list[dict[str, Any]] = []
-        discovered_record_ids: set[str] = set()
+        instances: list[DatabaseListing] = []
         for discovered in scan_instances(self.registry_dir):
             entry = discovered.entry
-            discovered_record_ids.add(entry.record_id)
-            local = attached.get(entry.record_id)
+            local = attached.pop(entry.record_id, None)
+            if discovered.state.value != "ready":
+                status: DatabaseStatus = "unavailable"
+            elif local is None:
+                status = "available"
+            elif local.current:
+                status = "current"
+            else:
+                status = "attached"
             instances.append(
-                {
-                    **_entry_target_fields(entry),
-                    "availability": discovered.state.value,
-                    "availability_detail": discovered.detail,
-                    "instance_id": local["instance_id"] if local else None,
-                    "requested_path": local["requested_path"] if local else None,
-                    "attached": local is not None,
-                    "current": local["current"] if local else False,
-                }
+                DatabaseListing(
+                    path=self._listing_path(entry),
+                    backend=entry.backend,
+                    status=status,
+                    instance_id=local.instance_id if local else None,
+                    error=discovered.detail if status == "unavailable" else None,
+                )
             )
 
-        # Preserve locally attached handles across a transient registry scan or
-        # lease rebind. Their handle remains authoritative for local operations.
-        for record_id, local in attached.items():
-            if record_id in discovered_record_ids:
-                continue
+        # A local lease remains actionable during a transient registry scan or
+        # rebind, so do not hide it merely because discovery missed its record.
+        for local in attached.values():
             instances.append(
-                {
-                    **local,
-                    "availability": "unknown",
-                    "availability_detail": "not present in registry scan",
-                }
+                DatabaseListing(
+                    path=self._listing_path(local.entry),
+                    backend=local.entry.backend,
+                    status="current" if local.current else "attached",
+                    instance_id=local.instance_id,
+                    error=None,
+                )
             )
 
+        status_order = {"current": 0, "attached": 1, "available": 2, "unavailable": 3}
         instances.sort(
             key=lambda item: (
-                not item["current"],
-                not item["attached"],
+                status_order[item["status"]],
                 item["backend"] != "gui",
-                item["idb_path"],
+                item["path"],
             )
         )
-        return {
-            "current_instance_id": current,
-            "instances": instances,
-            "count": len(instances),
-            "attached_count": sum(bool(item["attached"]) for item in instances),
-            "log_path": str(TRACE.path),
-        }
+        return {"instances": instances}
 
-    def close_database(self, instance_id: str | None) -> dict[str, Any]:
+    def close_database(self, instance_id: str | None) -> CloseDatabaseResult:
         target_id, session = self._get_session(instance_id)
         with session.operation_lock:
             self._note_binding(session)
@@ -504,7 +581,6 @@ class _DatabaseManager:
                 self._instances.pop(target_id)
                 if self._current_instance_id == target_id:
                     self._current_instance_id = next(iter(self._instances), None)
-                current = self._current_instance_id
             session.handle.close()
         TRACE.emit(
             "database_released",
@@ -512,13 +588,7 @@ class _DatabaseManager:
             instance_id=target_id,
             target=database,
         )
-        return {
-            "released": True,
-            "instance_id": target_id,
-            "current_instance_id": current,
-            "database": database,
-            "log_path": str(TRACE.path),
-        }
+        return CloseDatabaseResult(closed=True)
 
     def shutdown(self) -> None:
         with self._lock:
@@ -583,7 +653,7 @@ def open_database(
         bool,
         "Whether this database should become the default target for execute_python().",
     ] = True,
-) -> dict[str, Any]:
+) -> OpenDatabaseResult:
     """Attach to a GUI database or shared managed idalib worker."""
 
     return _run_traced_tool(
@@ -609,7 +679,7 @@ def execute_python(
         str | None,
         "Optional database instance id. If omitted, use the current target.",
     ] = None,
-) -> dict[str, Any]:
+) -> Any:
     """Execute Python against an open database. Use the IDA reference tool first."""
 
     return _run_traced_tool(
@@ -620,7 +690,7 @@ def execute_python(
 
 
 @mcp.tool
-def list_databases() -> dict[str, Any]:
+def list_databases() -> ListDatabasesResult:
     """Discover registered GUI and idalib databases, including local attachments."""
 
     return _run_traced_tool(
@@ -636,7 +706,7 @@ def save_database(
         str | None,
         "Optional database instance id. If omitted, save the current target.",
     ] = None,
-) -> dict[str, Any]:
+) -> SaveDatabaseResult:
     """Explicitly save an active GUI or idalib database."""
 
     return _run_traced_tool(
@@ -652,7 +722,7 @@ def close_database(
         str | None,
         "Optional database instance id. If omitted, release the current target.",
     ] = None,
-) -> dict[str, Any]:
+) -> CloseDatabaseResult:
     """Release this MCP server's handle without disrupting other clients.
 
     If this is the final lease on a managed idalib worker, the worker saves and

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import signal
 import sys
@@ -79,8 +80,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[ida-codemode] input does not exist: {args.input}", file=sys.stderr)
         return 2
 
-    # Import IDA only after the process-specific log is installed, so import
-    # and initialization failures are available to the spawning client.
+    # Import ida-domain only after the process-specific log is installed. In
+    # library mode it loads idapro first, which makes the IDAPython modules
+    # available and records initialization failures in the worker log.
+    importlib.import_module("ida_domain")
+
     import ida_auto
     import ida_kernwin
     import ida_loader

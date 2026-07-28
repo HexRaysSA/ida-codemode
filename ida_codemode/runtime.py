@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import importlib
 import inspect
 import json
 import queue
@@ -167,8 +168,11 @@ class IDARuntime:
         database_options: dict[str, Any] | None = None,
         default_timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
+        # ida-domain loads idapro when running outside IDA, making the
+        # IDAPython modules importable before the runtime binds them.
+        ida_domain = importlib.import_module("ida_domain")
+
         import ida_auto
-        import ida_domain
         import ida_kernwin
         import ida_loader
         import idaapi
