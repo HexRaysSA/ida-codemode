@@ -89,6 +89,27 @@ def find_ida_domain_package_path() -> Path:
     return Path(spec.origin).resolve().parent
 
 
+def find_ida_domain_examples_path() -> Path | None:
+    """Locate the ida-domain examples directory.
+
+    Mirrors ``ida_domain.examples_path()`` without importing the package (an
+    import triggers ``_load_dependencies()`` -> ``idapro``/``ida_kernwin``, which
+    are unavailable in the MCP server process). Packaged installs ship the
+    examples under ``ida_domain/_examples``; editable/source checkouts fall back
+    to the repository's top-level ``examples`` directory.
+    """
+    package_root = find_ida_domain_package_path()
+    packaged_examples = package_root / "_examples"
+    if packaged_examples.is_dir():
+        return packaged_examples
+
+    checkout_examples = package_root.parent / "examples"
+    if checkout_examples.is_dir():
+        return checkout_examples
+
+    return None
+
+
 def get_ida_domain_version() -> str:
     return importlib.metadata.version("ida-domain")
 
@@ -104,7 +125,7 @@ def _build_reference_spec() -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
 
     for path in sorted(package_root.rglob("*.py")):
-        if "__pycache__" in path.parts:
+        if "__pycache__" in path.parts or "_examples" in path.parts:
             continue
 
         source = path.read_text(encoding="utf-8")
@@ -178,16 +199,19 @@ def _build_reference_spec() -> dict[str, Any]:
                     entries.append(method_info)
 
     examples: list[dict[str, Any]] = []
-    examples_root = package_root / "_examples"
-    if examples_root.exists():
-        for path in sorted(examples_root.glob("*.py")):
+    examples_root = find_ida_domain_examples_path()
+    if examples_root is not None:
+        for path in sorted(examples_root.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
             source = path.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(path))
             doc = ast.get_docstring(tree) or ""
+            relative = path.relative_to(examples_root)
             examples.append(
                 {
-                    "path": _relative_path(path, source_root),
-                    "name": path.stem,
+                    "path": relative.as_posix(),
+                    "name": relative.with_suffix("").as_posix(),
                     "doc": doc,
                     "content": source,
                 }

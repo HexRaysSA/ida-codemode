@@ -36,4 +36,4 @@ only-include = [
 testpaths = ["tests"]
 
 [tool.uv.sources]
-ida-domain = { git = "https://github.com/HexRaysSA/ida-domain", branch = "include-docs-examples" }
+ida-domain = { git = "https://github.com/HexRaysSA/ida-domain", branch = "main" }

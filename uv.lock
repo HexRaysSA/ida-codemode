@@ -28,7 +28,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ida-domain", git = "https://github.com/HexRaysSA/ida-domain?branch=include-docs-examples" },
+    { name = "ida-domain", git = "https://github.com/HexRaysSA/ida-domain?branch=main" },
     { name = "zeromcp", specifier = ">=1.5.0" },
 ]
 
@@ -41,7 +41,7 @@ dev = [
 [[package]]
 name = "ida-domain"
 version = "0.5.1.dev1"
-source = { git = "https://github.com/HexRaysSA/ida-domain?branch=include-docs-examples#122e2435a71c3e767ea7e28991dae40ab73f2909" }
+source = { git = "https://github.com/HexRaysSA/ida-domain?branch=main#883ae25101b5912128bc98f823871574fd2c2878" }
 dependencies = [
     { name = "idapro" },
     { name = "packaging" },
