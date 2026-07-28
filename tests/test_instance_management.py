@@ -81,6 +81,31 @@ def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
         server.release_registration()
 
 
+def test_database_manager_only_traces_during_mcp_lifecycle(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class FakeTrace:
+        path = tmp_path / "session.jsonl"
+
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def emit(self, event: str, **_fields: object) -> None:
+            self.events.append(event)
+
+    trace = FakeTrace()
+    monkeypatch.setattr(mcp_app, "TRACE", trace)
+    manager = mcp_app._DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+
+    manager._emit("database_opened")
+    assert trace.events == []
+
+    manager.start("stdio")
+    manager._emit("database_opened")
+    manager.shutdown()
+    assert trace.events == ["mcp_started", "database_opened", "mcp_stopped"]
+
+
 def test_list_databases_uses_idb_when_gui_executable_is_missing(tmp_path: Path) -> None:
     registry_dir = tmp_path / "instances"
     idb_path = tmp_path / "open.i64"

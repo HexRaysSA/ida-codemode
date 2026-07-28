@@ -336,12 +336,19 @@ class _DatabaseManager:
         self._shutdown_started = False
         self._trace_lifecycle_started = False
 
+    def _emit(self, event: str, **fields: Any) -> None:
+        """Emit manager events only while this manager is serving an MCP session."""
+        with self._lock:
+            if not self._trace_lifecycle_started:
+                return
+        TRACE.emit(event, **fields)
+
     def start(self, transport: str) -> None:
         with self._lock:
             if self._trace_lifecycle_started:
                 return
             self._trace_lifecycle_started = True
-        TRACE.emit(
+        self._emit(
             "mcp_started",
             session=_session_fields(),
             transport=transport,
@@ -372,7 +379,7 @@ class _DatabaseManager:
             if self._current_instance_id == session.instance_id:
                 self._current_instance_id = None
                 self._disconnected_default = session.instance_id
-        TRACE.emit(
+        self._emit(
             "database_disconnected",
             session=_session_fields(),
             instance_id=session.instance_id,
@@ -462,7 +469,7 @@ class _DatabaseManager:
                 event = "database_reused"
 
             session_fields = _session_fields()
-            TRACE.emit(
+            self._emit(
                 event,
                 session=session_fields,
                 instance_id=existing.instance_id,
@@ -535,7 +542,7 @@ class _DatabaseManager:
                 if not session.handle.connected:
                     raise self._disconnected_tool_error(target_id) from None
                 raise
-            TRACE.emit(
+            self._emit(
                 "database_saved",
                 session=_session_fields(),
                 instance_id=target_id,
@@ -634,7 +641,7 @@ class _DatabaseManager:
                 if self._current_instance_id == target_id:
                     self._current_instance_id = next(iter(self._instances), None)
             session.handle.close()
-        TRACE.emit(
+        self._emit(
             "database_released",
             session=_session_fields(),
             instance_id=target_id,
@@ -657,14 +664,14 @@ class _DatabaseManager:
                 with session.operation_lock:
                     session.handle.close()
             except Exception as error:  # noqa: BLE001 -- best-effort shutdown tracing
-                TRACE.emit(
+                self._emit(
                     "database_release_error",
                     session=_session_fields(),
                     instance_id=session.instance_id,
                     error=_error_fields(error),
                 )
         if self._trace_lifecycle_started:
-            TRACE.emit("mcp_stopped", session=_session_fields())
+            self._emit("mcp_stopped", session=_session_fields())
 
 
 DATABASE_MANAGER = _DatabaseManager()

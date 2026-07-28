@@ -209,6 +209,13 @@ class SessionSummary:
         return "killed"
 
     @property
+    def has_analysis_activity(self) -> bool:
+        """Whether this trace represents a user-visible analysis session."""
+        return self.tool_calls > 0 or bool(
+            self.agent_session_refs or self.agent_sessions
+        )
+
+    @property
     def display_target(self) -> str:
         names = []
         for target in self.targets:
@@ -316,7 +323,9 @@ def _scan_sessions() -> list[SessionSummary]:
     if not SESSIONS_DIR.is_dir():
         return []
     summaries = [
-        _summarize_session(path) for path in sorted(SESSIONS_DIR.glob("*.jsonl"))
+        summary
+        for path in sorted(SESSIONS_DIR.glob("*.jsonl"))
+        if (summary := _summarize_session(path)).has_analysis_activity
     ]
     summaries.sort(key=lambda item: item.started or _MIN_DT, reverse=True)
     return summaries

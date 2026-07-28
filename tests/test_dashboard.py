@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 import ida_codemode_dashboard as dashboard
 
@@ -58,6 +61,72 @@ class TranscriptTests(unittest.TestCase):
             ["ida_execute_python"],
         )
         self.assertIn("ida · execute_python", "".join(item.html for item in items))
+
+
+class SemanticSessionTests(unittest.TestCase):
+    def test_scan_hides_traces_without_tool_or_agent_activity(self) -> None:
+        def write(path: Path, records: list[dict[str, object]]) -> None:
+            path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+        base = {
+            "schema": 1,
+            "ts": "2026-01-01T00:00:00Z",
+            "pid": 999999,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            sessions_dir = Path(directory)
+            write(
+                sessions_dir / "empty.jsonl",
+                [{**base, "event": "mcp_stopped", "mcp_server_id": "empty"}],
+            )
+            write(
+                sessions_dir / "lifecycle.jsonl",
+                [
+                    {
+                        **base,
+                        "event": "database_opened",
+                        "mcp_server_id": "lifecycle",
+                        "target": {"idb_path": "/tmp/pytest/open.i64"},
+                    }
+                ],
+            )
+            write(
+                sessions_dir / "tool.jsonl",
+                [
+                    {
+                        **base,
+                        "event": "tool_call",
+                        "mcp_server_id": "tool",
+                        "tool": "reference",
+                    }
+                ],
+            )
+            write(
+                sessions_dir / "agent.jsonl",
+                [
+                    {
+                        **base,
+                        "event": "mcp_started",
+                        "mcp_server_id": "agent",
+                        "session": {"pi_session_path": "/tmp/agent.jsonl"},
+                    }
+                ],
+            )
+
+            original = dashboard.SESSIONS_DIR
+            dashboard.SESSIONS_DIR = sessions_dir
+            try:
+                summaries = dashboard._scan_sessions()
+            finally:
+                dashboard.SESSIONS_DIR = original
+
+        self.assertEqual(
+            {summary.session_id for summary in summaries},
+            {"tool", "agent"},
+        )
 
 
 if __name__ == "__main__":

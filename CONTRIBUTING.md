@@ -147,7 +147,8 @@ uv run ida-codemode-dashboard --port 9000 \
 
 The dashboard provides:
 
-- a newest-first session index;
+- a newest-first session index (startup/shutdown and internal lifecycle-only
+  traces without MCP tool or linked-agent activity are hidden);
 - running, closed, or killed status;
 - all GUI and idalib targets used in one session;
 - paired tool-call timelines with highlighted Python code;
