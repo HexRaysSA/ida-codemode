@@ -310,7 +310,6 @@ class _DatabaseSession:
     instance_id: str
     requested_path: str
     handle: DatabaseHandle
-    record_id: str
     operation_lock: threading.RLock = field(
         default_factory=threading.RLock,
         repr=False,
@@ -326,6 +325,8 @@ class _DatabaseManager:
         self.registry_dir = registry_dir
         self.spawn_dir = spawn_dir
         self._instances: dict[str, _DatabaseSession] = {}
+        self._disconnected_instances: dict[str, str] = {}
+        self._disconnected_default: str | None = None
         self._current_instance_id: str | None = None
         self._lock = threading.RLock()
         self._open_lock = threading.Lock()
@@ -351,18 +352,29 @@ class _DatabaseManager:
             **_target_fields(session.handle),
         }
 
-    def _note_binding(self, session: _DatabaseSession) -> None:
-        entry = session.handle.entry
-        if entry.record_id == session.record_id:
-            return
-        previous = session.record_id
-        session.record_id = entry.record_id
+    def _handle_disconnected(self, handle: DatabaseHandle, reason: str) -> None:
+        with self._lock:
+            session = next(
+                (
+                    candidate
+                    for candidate in self._instances.values()
+                    if candidate.handle is handle
+                ),
+                None,
+            )
+            if session is None:
+                return
+            self._instances.pop(session.instance_id, None)
+            self._disconnected_instances[session.instance_id] = reason
+            if self._current_instance_id == session.instance_id:
+                self._current_instance_id = None
+                self._disconnected_default = session.instance_id
         TRACE.emit(
-            "database_rebound",
+            "database_disconnected",
             session=_session_fields(),
             instance_id=session.instance_id,
-            previous_record_id=previous,
-            target=_target_fields(session.handle),
+            target=self._database_info(session),
+            reason=reason,
         )
 
     def open_database(self, path: str, *, set_current: bool) -> OpenDatabaseResult:
@@ -379,20 +391,20 @@ class _DatabaseManager:
                         session
                         for session in self._instances.values()
                         if session.requested_path == resolved_path
+                        and session.handle.connected
                     ),
                     None,
                 )
 
             existing: _DatabaseSession | None = None
             if candidate is not None:
-                with candidate.operation_lock:
-                    self._note_binding(candidate)
-                    with self._lock:
-                        if self._instances.get(candidate.instance_id) is candidate:
-                            existing = candidate
-                            if set_current or self._current_instance_id is None:
-                                self._current_instance_id = candidate.instance_id
-                            current = self._current_instance_id
+                with candidate.operation_lock, self._lock:
+                    if self._instances.get(candidate.instance_id) is candidate:
+                        existing = candidate
+                        if set_current or self._current_instance_id is None:
+                            self._current_instance_id = candidate.instance_id
+                            self._disconnected_default = None
+                        current = self._current_instance_id
 
             if existing is None:
                 handle = DatabaseHandle.open(
@@ -401,19 +413,25 @@ class _DatabaseManager:
                     registry_dir=self.registry_dir,
                     spawn_dir=self.spawn_dir,
                 )
+                if not handle.connected:
+                    reason = handle.disconnect_reason or "database connection closed"
+                    handle.close()
+                    raise McpToolError(f"database disconnected while opening: {reason}")
                 entry = handle.entry
                 with self._lock:
                     existing = next(
                         (
                             session
                             for session in self._instances.values()
-                            if session.handle.entry.record_id == entry.record_id
+                            if session.handle.connected
+                            and session.handle.entry.record_id == entry.record_id
                         ),
                         None,
                     )
                     if existing is not None:
                         if set_current or self._current_instance_id is None:
                             self._current_instance_id = existing.instance_id
+                            self._disconnected_default = None
                         current = self._current_instance_id
                     else:
                         instance_id = uuid.uuid4().hex[:12]
@@ -421,17 +439,21 @@ class _DatabaseManager:
                             instance_id=instance_id,
                             requested_path=resolved_path,
                             handle=handle,
-                            record_id=entry.record_id,
                         )
                         self._instances[instance_id] = existing
                         if set_current or self._current_instance_id is None:
                             self._current_instance_id = instance_id
+                            self._disconnected_default = None
                         current = self._current_instance_id
 
                 if existing.handle is not handle:
                     handle.close()
                     event = "database_reused"
                 else:
+                    handle.set_disconnect_callback(self._handle_disconnected)
+                    if not handle.connected:
+                        reason = handle.disconnect_reason or "database connection closed"
+                        raise McpToolError(f"database disconnected while opening: {reason}")
                     event = "database_opened"
             else:
                 event = "database_reused"
@@ -452,35 +474,56 @@ class _DatabaseManager:
                 codemode_id=codemode_id if isinstance(codemode_id, str) else None,
             )
 
+    @staticmethod
+    def _disconnected_tool_error(instance_id: str) -> McpToolError:
+        return McpToolError(
+            f"database instance {instance_id} disconnected since it was last used "
+            "and is no longer valid; call list_databases() and open_database() again"
+        )
+
     def _get_session(self, instance_id: str | None) -> tuple[str, _DatabaseSession]:
         with self._lock:
             target_id = instance_id or self._current_instance_id
             if target_id is None:
-                raise McpToolError(
-                    "no open database instance; call open_database() first"
-                )
+                target_id = self._disconnected_default
+                if target_id is None:
+                    raise McpToolError(
+                        "no open database instance; call open_database() first"
+                    )
             session = self._instances.get(target_id)
+            disconnected = self._disconnected_instances.get(target_id)
+        if session is None and disconnected is not None:
+            raise self._disconnected_tool_error(target_id)
         if session is None:
             raise McpToolError(f"unknown database instance: {target_id}")
         return target_id, session
 
     def execute_python(self, code: str, instance_id: str | None) -> Any:
-        _, session = self._get_session(instance_id)
+        target_id, session = self._get_session(instance_id)
         with session.operation_lock:
-            self._note_binding(session)
-            result = session.handle.execute_python(
-                code,
-                timeout=EXECUTE_TIMEOUT_SECONDS,
-            )
-            self._note_binding(session)
-            return result
+            if not session.handle.connected:
+                raise self._disconnected_tool_error(target_id)
+            try:
+                return session.handle.execute_python(
+                    code,
+                    timeout=EXECUTE_TIMEOUT_SECONDS,
+                )
+            except ClientError:
+                if not session.handle.connected:
+                    raise self._disconnected_tool_error(target_id) from None
+                raise
 
     def save_database(self, instance_id: str | None) -> SaveDatabaseResult:
         target_id, session = self._get_session(instance_id)
         with session.operation_lock:
-            self._note_binding(session)
-            result = session.handle.save_database()
-            self._note_binding(session)
+            if not session.handle.connected:
+                raise self._disconnected_tool_error(target_id)
+            try:
+                result = session.handle.save_database()
+            except ClientError:
+                if not session.handle.connected:
+                    raise self._disconnected_tool_error(target_id) from None
+                raise
             TRACE.emit(
                 "database_saved",
                 session=_session_fields(),
@@ -516,7 +559,6 @@ class _DatabaseManager:
         attached: dict[str, _AttachedDatabase] = {}
         for session in sessions:
             with session.operation_lock:
-                self._note_binding(session)
                 entry = session.handle.entry
                 attached[entry.record_id] = _AttachedDatabase(
                     entry=entry,
@@ -546,8 +588,8 @@ class _DatabaseManager:
                 )
             )
 
-        # A local lease remains actionable during a transient registry scan or
-        # rebind, so do not hide it merely because discovery missed its record.
+        # A local lease remains actionable during a transient registry scan,
+        # so do not hide it merely because discovery missed its record.
         for local in attached.values():
             instances.append(
                 DatabaseListing(
@@ -572,7 +614,6 @@ class _DatabaseManager:
     def close_database(self, instance_id: str | None) -> CloseDatabaseResult:
         target_id, session = self._get_session(instance_id)
         with session.operation_lock:
-            self._note_binding(session)
             database = self._database_info(session)
             with self._lock:
                 current_session = self._instances.get(target_id)
@@ -597,6 +638,8 @@ class _DatabaseManager:
             self._shutdown_started = True
             sessions = list(self._instances.values())
             self._instances.clear()
+            self._disconnected_instances.clear()
+            self._disconnected_default = None
             self._current_instance_id = None
         for session in sessions:
             try:

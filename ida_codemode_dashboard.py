@@ -305,7 +305,7 @@ def _summarize_session(path: Path) -> SessionSummary:
             summary.errors += 1
         elif event == "mcp_stopped":
             summary.stopped = True
-        if event in {"database_opened", "database_reused", "database_rebound"}:
+        if event in {"database_opened", "database_reused", "database_disconnected"}:
             _add_target(summary, record.get("target"))
         if event == "tool_result":
             _add_target(summary, record.get("output"))
@@ -787,7 +787,7 @@ def _add_session_timeline(
             "mcp_stopped",
             "database_opened",
             "database_reused",
-            "database_rebound",
+            "database_disconnected",
             "database_saved",
             "database_released",
             "database_release_error",

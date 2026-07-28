@@ -5,6 +5,7 @@ import json
 import socket
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
@@ -12,10 +13,14 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .registry import HOST, REGISTRY_DIR, SPAWN_DIR, RegistryEntry
-from .resolver import ResolveError, resolve_instance
+from .resolver import resolve_instance
 
 
 class ClientError(RuntimeError):
+    pass
+
+
+class InstanceDisconnectedError(ClientError):
     pass
 
 
@@ -41,16 +46,14 @@ class DatabaseHandle:
         path: str,
         entry: RegistryEntry,
         *,
-        resolve_timeout: float = 120.0,
-        registry_dir: str | Path = REGISTRY_DIR,
-        spawn_dir: str | Path = SPAWN_DIR,
+        on_disconnect: Callable[[DatabaseHandle, str], None] | None = None,
     ) -> None:
         self.path = path
-        self.resolve_timeout = resolve_timeout
-        self.registry_dir = registry_dir
-        self.spawn_dir = spawn_dir
+        self._on_disconnect = on_disconnect
         self._lock = threading.Lock()
         self._closed = threading.Event()
+        self._disconnected = threading.Event()
+        self._disconnect_reason: str | None = None
         self._entry = entry
         self._lease_connection: http.client.HTTPConnection | None = None
         self._lease_response: http.client.HTTPResponse | None = None
@@ -73,6 +76,7 @@ class DatabaseHandle:
         timeout: float = 120.0,
         registry_dir: str | Path = REGISTRY_DIR,
         spawn_dir: str | Path = SPAWN_DIR,
+        on_disconnect: Callable[[DatabaseHandle, str], None] | None = None,
     ) -> DatabaseHandle:
         entry = resolve_instance(
             path,
@@ -82,13 +86,7 @@ class DatabaseHandle:
             spawn_dir=spawn_dir,
         )
         try:
-            return cls(
-                path,
-                entry,
-                resolve_timeout=timeout,
-                registry_dir=registry_dir,
-                spawn_dir=spawn_dir,
-            )
+            return cls(path, entry, on_disconnect=on_disconnect)
         except ClientError:
             # The worker may cross its zero-lease shutdown boundary between
             # resolve and the SSE handshake. Resolve once more as promised by
@@ -101,18 +99,28 @@ class DatabaseHandle:
                 registry_dir=registry_dir,
                 spawn_dir=spawn_dir,
             )
-            return cls(
-                path,
-                replacement,
-                resolve_timeout=timeout,
-                registry_dir=registry_dir,
-                spawn_dir=spawn_dir,
-            )
+            return cls(path, replacement, on_disconnect=on_disconnect)
 
     @property
     def entry(self) -> RegistryEntry:
         with self._lock:
             return self._entry
+
+    @property
+    def connected(self) -> bool:
+        return not self._closed.is_set() and not self._disconnected.is_set()
+
+    @property
+    def disconnect_reason(self) -> str | None:
+        return self._disconnect_reason
+
+    def set_disconnect_callback(
+        self,
+        callback: Callable[[DatabaseHandle, str], None],
+    ) -> None:
+        self._on_disconnect = callback
+        if self._disconnected.is_set():
+            callback(self, self._disconnect_reason or "database connection closed")
 
     def _open_lease(
         self, entry: RegistryEntry
@@ -157,33 +165,35 @@ class DatabaseHandle:
             old_connection.close()
 
     def _monitor_lease(self) -> None:
-        while not self._closed.is_set():
-            with self._lock:
-                response = self._lease_response
-            try:
-                if response is not None:
-                    while not self._closed.is_set() and response.readline():
-                        pass
-            except (OSError, ValueError, http.client.HTTPException):
-                pass
-            if self._closed.is_set():
-                return
+        with self._lock:
+            response = self._lease_response
+        reason = "database connection closed"
+        try:
+            if response is not None:
+                while not self._closed.is_set() and response.readline():
+                    pass
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            reason = f"database connection failed: {exc}"
+        if self._closed.is_set():
+            return
+        self._mark_disconnected(reason)
 
-            # The grace period on managed workers leaves time to reconnect a
-            # transiently interrupted lease. If the instance exited, resolve()
-            # finds or spawns its replacement.
-            while not self._closed.wait(0.5):
-                try:
-                    entry = resolve_instance(
-                        self.path,
-                        timeout=self.resolve_timeout,
-                        registry_dir=self.registry_dir,
-                        spawn_dir=self.spawn_dir,
-                    )
-                    self._install_lease(entry)
-                    break
-                except (ClientError, ResolveError, OSError, ValueError):
-                    continue
+    def _mark_disconnected(self, reason: str) -> None:
+        if self._closed.is_set() or self._disconnected.is_set():
+            return
+        self._disconnect_reason = reason
+        self._disconnected.set()
+        with self._lock:
+            response = self._lease_response
+            connection = self._lease_connection
+            self._lease_response = None
+            self._lease_connection = None
+        if response is not None:
+            response.close()
+        if connection is not None:
+            connection.close()
+        if self._on_disconnect is not None:
+            self._on_disconnect(self, reason)
 
     def _request(
         self,
@@ -194,6 +204,10 @@ class DatabaseHandle:
     ) -> Any:
         if self._closed.is_set():
             raise ClientError("database handle is closed")
+        if self._disconnected.is_set():
+            raise InstanceDisconnectedError(
+                self._disconnect_reason or "database instance disconnected"
+            )
         entry = self.entry
         body = json.dumps(payload).encode("utf-8")
         request = Request(

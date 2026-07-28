@@ -19,8 +19,6 @@ To manually play with the MCP, use the inspector:
 npx -y @modelcontextprotocol/inspector
 ```
 
-This will open a web interface at http://localhost:5173 and allow you to interact with the MCP tools for testing.
-
 ## Develop the Claude plugin locally
 
 The plugin registers the MCP server as `ida`, so Claude Code tool names are shorter, e.g. `mcp__plugin_ida-codemode-mcp_ida__open_database`. The first invocation of any matching `mcp__(.*[_:])?ida__.*` tool will trigger `uv` to install the server (cached after that) and fire the `PreToolUse` hook that injects the Claude session id for log correlation.
@@ -129,7 +127,7 @@ The trace contains:
 - every MCP tool call, result, error, and duration;
 - complete `reference` queries and results;
 - executed Python and returned values;
-- database open, reuse, rebound, save, and release events;
+- database open, reuse, disconnection, save, and release events;
 - GUI or idalib record identity and worker log path;
 - Claude, Codex, Pi, and `IDA_CODEMODE_ID` session metadata.
 

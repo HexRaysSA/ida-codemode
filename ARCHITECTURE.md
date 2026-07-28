@@ -14,7 +14,7 @@ directly.
 | `ida_codemode/server.py` | Authenticated HTTP API, instance publication, SSE leases, request draining, and managed shutdown. |
 | `ida_codemode/registry.py` | Canonical identity, cross-platform file locks, atomic records, health classification, and stale-record cleanup. |
 | `ida_codemode/resolver.py` | GUI discovery, expected-IDB resolution, serialized worker spawning, and startup diagnostics. |
-| `ida_codemode/client.py` | `DatabaseHandle`, SSE lease maintenance, execution, saving, and transparent rebinding after worker replacement. |
+| `ida_codemode/client.py` | `DatabaseHandle`, SSE lease monitoring, disconnection detection, execution, and saving. |
 | `ida_codemode/runtime.py` | Serializes IDA operations onto IDA's main thread and provides the Code Mode Python runtime. |
 | `ida_codemode_mcp.py` | MCP tools, MCP-local database selection, agent metadata, and semantic session tracing. |
 | `ida_codemode_dashboard.py` | Renders semantic session traces and linked Claude, Codex, or Pi transcripts. |
@@ -149,8 +149,8 @@ MCP servers, and agents may share the same instance. Closing one handle closes
 only that connection.
 
 The server emits heartbeat comments so crashed clients are detected when the
-next write fails. A short grace period protects reconnects and the race between
-worker publication and the first lease.
+next write fails. A short grace period protects the race between worker
+publication and the first lease and allows an orderly final client release.
 
 A managed idalib worker exits only when:
 
@@ -174,7 +174,9 @@ server reuses the existing local session and retains only one lease. Separate
 MCP servers retain independent leases. Registry discovery lets
 `list_databases()` also report GUI and idalib instances that this MCP server
 has not yet attached to; local handles are annotated with their `instance_id`
-and current-target state.
+and current-target state. If a lease connection dies, its MCP-local
+`instance_id` is invalidated immediately. Code Mode never silently reconnects
+or replaces the database; the agent must discover and open it again.
 
 Tools are:
 
@@ -227,7 +229,7 @@ session, and interleaves non-IDA activity from referenced agent transcripts.
 | Managed worker is killed | Lifetime lock releases; stale metadata is reaped on scan. |
 | Health times out | Instance is `BLOCKED`; no replacement is spawned. |
 | Worker exits during startup | Resolver raises with process status and log tail. |
-| Worker disappears after opening | The handle's lease monitor resolves and attaches to a replacement. |
+| GUI or worker disappears after opening | Its `instance_id` is invalidated; the next operation tells the agent to list and open again. |
 | Response contains an IDA error | Structured code, status, details, and traceback reach MCP tracing. |
 
 The architecture deliberately favors harmless stale files and reloadable

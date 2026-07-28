@@ -135,6 +135,40 @@ def test_list_databases_prefers_existing_gui_executable(tmp_path: Path) -> None:
     assert result["instances"][0]["path"] == canonical_path(executable)
 
 
+def test_gui_disconnect_invalidates_mcp_instance_without_spawning(tmp_path: Path) -> None:
+    registry_dir = tmp_path / "instances"
+    spawn_dir = tmp_path / "spawn"
+    idb_path = tmp_path / "open.i64"
+    executable = tmp_path / "open.exe"
+    idb_path.write_bytes(b"idb")
+    executable.write_bytes(b"binary")
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity(str(idb_path), str(executable), "gui"),
+        AnalysisState(),
+        registry_dir,
+    )
+    server.start()
+    manager = mcp_app._DatabaseManager(registry_dir, spawn_dir)
+    opened = manager.open_database(str(executable), set_current=True)
+
+    server.stop()
+    server.release_registration()
+    deadline = time.monotonic() + 2
+    while manager.list_databases()["instances"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert manager.list_databases() == {"instances": []}
+    try:
+        manager.execute_python("lambda: 1", opened["instance_id"])
+    except mcp_app.McpToolError as exc:
+        assert "disconnected since it was last used" in str(exc)
+    else:
+        raise AssertionError("disconnected instance remained executable")
+    assert not list(registry_dir.glob("*.json"))
+    manager.shutdown()
+
+
 def test_multiple_leases_share_one_managed_server(tmp_path: Path) -> None:
     stopped = threading.Event()
     server = CodeModeHTTPServer(
