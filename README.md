@@ -9,7 +9,7 @@ managed idalib workers only when no suitable instance exists.
 
 - `reference(query)` - search the installed ida-domain API reference.
 - `open_database(path, set_current=True)` - attach to a GUI database or shared idalib worker.
-- `execute_python(code, instance_id=None)` - run Python with the IDA runtime preloaded.
+- `execute_python(code, instance_id=None)` - run Python with the IDA runtime preloaded and return its result, stdout, and stderr.
 - `list_databases()` - discover all registered GUI and idalib instances and identify this MCP server's active handles.
 - `save_database(instance_id=None)` - explicitly save a database.
 - `close_database(instance_id=None)` - release this MCP server's handle and lease.

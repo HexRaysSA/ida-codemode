@@ -70,7 +70,10 @@ def run(endpoint, token, *, save=False):
         compressed=True,
     )
     require(status == 200 and result.get("ok"), "execute_python failed")
-    require(result["result"]["database_path"] == health["idb_path"], "wrong runtime")
+    require(
+        result["result"]["result"]["database_path"] == health["idb_path"],
+        "wrong runtime",
+    )
     print("PASS compressed execute_python")
 
     pending = queue.Queue(maxsize=1)
@@ -84,7 +87,7 @@ def run(endpoint, token, *, save=False):
                 "/execute_python",
                 {
                     "code": (
-                        "def run():\n    import time\n    time.sleep(0.5)\n    return 'done'"
+                        "def run(db):\n    import time\n    time.sleep(0.5)\n    return 'done'"
                     )
                 },
             )

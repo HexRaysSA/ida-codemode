@@ -5,6 +5,7 @@ import asyncio
 import builtins
 import importlib
 import inspect
+import io
 import json
 import queue
 import sys
@@ -12,16 +13,21 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from .registry import BackendName
 
 DEFAULT_TIMEOUT_SECONDS = 60.0
 SAVE_TIMEOUT_SECONDS = 300.0
 USER_CODE_FILENAME = "<ida-codemode>"
+CALLABLE_CODE_HELP = (
+    "For one expression, use `lambda db: <expression>`. For multiple statements, "
+    "define `def run(db): ...` and put all executable statements inside its body."
+)
 
 
 class APIError(RuntimeError):
@@ -41,6 +47,12 @@ class APIError(RuntimeError):
 
 class CodeValidationError(ValueError):
     """The supplied code does not satisfy the Code Mode callable contract."""
+
+
+class PythonExecutionResult(TypedDict):
+    result: Any
+    stdout: str
+    stderr: str
 
 
 class AnalysisState:
@@ -85,14 +97,15 @@ def to_jsonable(value: Any) -> Any:
 def _find_callable(code: str, global_ns: dict[str, Any]) -> Callable[..., Any]:
     stripped = code.strip()
     if not stripped:
-        raise CodeValidationError("code must not be empty")
+        raise CodeValidationError(f"code must not be empty. {CALLABLE_CODE_HELP}")
 
     module = ast.parse(stripped, filename=USER_CODE_FILENAME, mode="exec")
     if len(module.body) == 1 and isinstance(module.body[0], ast.Expr):
         expression = module.body[0].value
         if not isinstance(expression, (ast.Lambda, ast.Name, ast.Attribute)):
             raise CodeValidationError(
-                "a callable expression must be a lambda, name, or attribute reference"
+                "top-level expressions and function calls are not executed. "
+                + CALLABLE_CODE_HELP
             )
         candidate = eval(
             compile(ast.Expression(expression), USER_CODE_FILENAME, "eval"),
@@ -101,7 +114,9 @@ def _find_callable(code: str, global_ns: dict[str, Any]) -> Callable[..., Any]:
         )
         if callable(candidate):
             return candidate
-        raise CodeValidationError("code expression did not resolve to a callable")
+        raise CodeValidationError(
+            "the supplied name or attribute is not callable. " + CALLABLE_CODE_HELP
+        )
 
     preferred_names = ("run", "execute", "main")
     defined_names: list[str] = []
@@ -121,7 +136,7 @@ def _find_callable(code: str, global_ns: dict[str, Any]) -> Callable[..., Any]:
             selected_name = public_names[0]
         else:
             raise CodeValidationError(
-                "code must define run, execute, main, or exactly one public function"
+                "code does not define a callable entry point. " + CALLABLE_CODE_HELP
             )
 
     local_ns: dict[str, Any] = {}
@@ -132,7 +147,10 @@ def _find_callable(code: str, global_ns: dict[str, Any]) -> Callable[..., Any]:
     )
     candidate = local_ns.get(selected_name)
     if not callable(candidate):
-        raise CodeValidationError(f"{selected_name} did not resolve to a callable")
+        raise CodeValidationError(
+            f"the selected entry point `{selected_name}` is not callable. "
+            + CALLABLE_CODE_HELP
+        )
     return candidate
 
 
@@ -264,9 +282,12 @@ class IDARuntime:
         kind: str,
         timeout: float | None,
         batch: bool = True,
+        capture_output: bool = False,
     ) -> Any:
         effective_timeout = self.default_timeout if timeout is None else timeout
-        results: queue.Queue[tuple[bool, Any, str | None]] = queue.Queue(maxsize=1)
+        results: queue.Queue[tuple[bool, Any, str | None, str, str]] = queue.Queue(
+            maxsize=1
+        )
 
         with self._operation_lock:
             cancel_event = threading.Event()
@@ -286,6 +307,8 @@ class IDARuntime:
                     else None
                 )
                 self.ida_kernwin.clr_cancelled()
+                stdout_capture = io.StringIO()
+                stderr_capture = io.StringIO()
 
                 def fire_native_cancel() -> None:
                     # Keep the generation check and flag update under one lock.
@@ -333,10 +356,32 @@ class IDARuntime:
                         timer.daemon = True
                         timer.start()
                         sys.settrace(timeout_trace)
-                    result = function()
-                    results.put((True, result, None))
+                    if capture_output:
+                        with redirect_stdout(stdout_capture), redirect_stderr(
+                            stderr_capture
+                        ):
+                            result = function()
+                    else:
+                        result = function()
+                    results.put(
+                        (
+                            True,
+                            result,
+                            None,
+                            stdout_capture.getvalue(),
+                            stderr_capture.getvalue(),
+                        )
+                    )
                 except BaseException as exc:  # noqa: BLE001 -- marshal any IDA callback failure
-                    results.put((False, exc, _format_user_traceback(exc)))
+                    results.put(
+                        (
+                            False,
+                            exc,
+                            _format_user_traceback(exc),
+                            stdout_capture.getvalue(),
+                            stderr_capture.getvalue(),
+                        )
+                    )
                 finally:
                     sys.settrace(old_trace)
                     if timer is not None:
@@ -349,7 +394,9 @@ class IDARuntime:
             try:
                 self.ida_kernwin.execute_sync(invoke, self.ida_kernwin.MFF_WRITE)
                 try:
-                    succeeded, value, formatted_traceback = results.get_nowait()
+                    succeeded, value, formatted_traceback, stdout, stderr = (
+                        results.get_nowait()
+                    )
                 except queue.Empty as exc:
                     raise APIError(
                         "execute_sync_failed",
@@ -365,16 +412,28 @@ class IDARuntime:
                 self.ida_kernwin.clr_cancelled()
 
         if succeeded:
+            if capture_output:
+                return PythonExecutionResult(
+                    result=value,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
             return value
         if isinstance(value, APIError):
+            if stdout:
+                value.details["stdout"] = stdout
+            if stderr:
+                value.details["stderr"] = stderr
             raise value
         if isinstance(value, CodeValidationError):
             raise APIError("invalid_code", str(value), status=400) from value
-        details = (
-            {"traceback": formatted_traceback}
-            if formatted_traceback is not None
-            else None
-        )
+        details: dict[str, Any] = {}
+        if formatted_traceback is not None:
+            details["traceback"] = formatted_traceback
+        if stdout:
+            details["stdout"] = stdout
+        if stderr:
+            details["stderr"] = stderr
         raise APIError(
             "execution_failed",
             str(value) or type(value).__name__,
@@ -382,7 +441,11 @@ class IDARuntime:
             details=details,
         ) from value
 
-    def execute_python(self, code: str, timeout: float | None) -> Any:
+    def execute_python(
+        self,
+        code: str,
+        timeout: float | None,
+    ) -> PythonExecutionResult:
         def execute() -> Any:
             runtime = {
                 "ida_domain": self.ida_domain,
@@ -402,7 +465,12 @@ class IDARuntime:
             function = _find_callable(code, global_ns)
             return to_jsonable(asyncio.run(_invoke_callable(function, runtime)))
 
-        return self._run_sync(execute, kind="execute", timeout=timeout)
+        return self._run_sync(
+            execute,
+            kind="execute",
+            timeout=timeout,
+            capture_output=True,
+        )
 
     def wait_autoanalysis(self, timeout: float | None) -> dict[str, Any]:
         if self.analysis_state.complete.is_set():

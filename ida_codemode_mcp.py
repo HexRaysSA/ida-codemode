@@ -46,6 +46,7 @@ from ida_codemode.registry import (
     scan_instances,
 )
 from ida_codemode.resolver import ResolveError, expected_idb_path
+from ida_codemode.runtime import PythonExecutionResult
 
 STATE_DIR = Path.home() / ".ida-codemode"
 SESSIONS_DIR = STATE_DIR / "sessions"
@@ -213,11 +214,12 @@ def _as_tool_error(error: Exception) -> McpToolError:
     if isinstance(error, McpToolError):
         return error
     if isinstance(error, RemoteError):
-        message = str(error)
-        remote_traceback = error.details.get("traceback")
-        if isinstance(remote_traceback, str) and remote_traceback:
-            message = f"{message}\n\n{remote_traceback}"
-        return McpToolError(message)
+        sections = [str(error)]
+        for label in ("stdout", "stderr", "traceback"):
+            value = error.details.get(label)
+            if isinstance(value, str) and value:
+                sections.append(f"{label}:\n{value.rstrip()}")
+        return McpToolError("\n\n".join(sections))
     if isinstance(error, (ClientError, ResolveError, FileNotFoundError, ValueError)):
         return McpToolError(str(error))
     return McpToolError(str(error) or type(error).__name__)
@@ -498,7 +500,11 @@ class _DatabaseManager:
             raise McpToolError(f"unknown database instance: {target_id}")
         return target_id, session
 
-    def execute_python(self, code: str, instance_id: str | None) -> Any:
+    def execute_python(
+        self,
+        code: str,
+        instance_id: str | None,
+    ) -> PythonExecutionResult:
         target_id, session = self._get_session(instance_id)
         with session.operation_lock:
             if not session.handle.connected:
@@ -715,15 +721,15 @@ def execute_python(
             "Use the IDA reference tool before calling execute_python; do not guess the API shape. "
             "The runtime exposes db, ida_domain, Database, IdaCommandOptions, database_path, "
             "database_options, json, and to_jsonable(). Return JSON-serializable data. "
-            "Define run(...), execute(...), main(...), or pass a lambda expression."
+            "Define run(db), execute(db), main(db), or pass a `lambda db: ...` expression."
         ),
     ],
     instance_id: Annotated[
         str | None,
         "Optional database instance id. If omitted, use the current target.",
     ] = None,
-) -> Any:
-    """Execute Python against an open database. Use the IDA reference tool first."""
+) -> PythonExecutionResult:
+    """Execute Python and return its result plus captured stdout and stderr."""
 
     return _run_traced_tool(
         "execute_python",
