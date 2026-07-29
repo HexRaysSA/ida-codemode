@@ -171,7 +171,9 @@ class SemanticSessionTests(unittest.TestCase):
                 dashboard.SESSIONS_DIR = original
 
         self.assertIn("gpt-5.6", index)
-        self.assertEqual(next(s.agent for s in summaries if s.session_id == "agent"), "pi")
+        self.assertEqual(
+            next(s.agent for s in summaries if s.session_id == "agent"), "pi"
+        )
         self.assertEqual(
             {summary.session_id for summary in summaries},
             {"tool", "agent"},

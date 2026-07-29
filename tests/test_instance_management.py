@@ -3,9 +3,11 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import ida_codemode_mcp as mcp_app
 from ida_codemode.client import DatabaseHandle
+from ida_codemode.database import DatabaseError, DatabaseManager
 from ida_codemode.registry import (
     FileLock,
     InstanceIdentity,
@@ -110,24 +112,30 @@ def test_mcp_session_trace_metadata(tmp_path: Path, monkeypatch) -> None:
             self.records.append((event, fields))
 
     trace = FakeTrace()
+    manager = DatabaseManager(
+        tmp_path / "instances",
+        tmp_path / "spawn",
+        on_event=mcp_app._trace_database_event,
+    )
     monkeypatch.setattr(mcp_app, "TRACE", trace)
-    manager = mcp_app._DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+    monkeypatch.setattr(mcp_app, "DATABASE_MANAGER", manager)
+    monkeypatch.setattr(mcp_app, "_TRACE_STARTED", False)
+    monkeypatch.setattr(mcp_app, "_TRACE_STOPPED", False)
 
-    manager._emit("database_opened")
-    assert trace.records == []
-
-    manager.start("stdio", agent="test-agent")
+    mcp_app._start_mcp_trace("stdio", "test-agent")
     mcp_app.mcp.registry.methods["initialize"](
         "2025-06-18",
         {},
         {"name": "test-client", "version": "1.0"},
         {"model": "test-model"},
     )
-    manager.shutdown()
+    manager._emit("database_opened", instance_id="test-instance")
+    mcp_app._shutdown_server_state()
 
     assert [event for event, _fields in trace.records] == [
         "mcp_started",
         "mcp_initialized",
+        "database_opened",
         "mcp_stopped",
     ]
     assert trace.records[0][1]["agent"] == "test-agent"
@@ -136,6 +144,7 @@ def test_mcp_session_trace_metadata(tmp_path: Path, monkeypatch) -> None:
         "version": "1.0",
     }
     assert trace.records[1][1]["_meta"] == {"model": "test-model"}
+    assert trace.records[2][1]["instance_id"] == "test-instance"
 
 
 def test_list_databases_uses_idb_when_gui_executable_is_missing(tmp_path: Path) -> None:
@@ -152,7 +161,7 @@ def test_list_databases_uses_idb_when_gui_executable_is_missing(tmp_path: Path) 
     assert server.entry is not None
     entry = server.entry
     try:
-        result = mcp_app._DatabaseManager(registry_dir).list_databases()
+        result = DatabaseManager(registry_dir).list_databases()
     finally:
         server.stop()
         server.release_registration()
@@ -184,7 +193,7 @@ def test_list_databases_prefers_existing_gui_executable(tmp_path: Path) -> None:
     )
     server.start()
     try:
-        result = mcp_app._DatabaseManager(registry_dir).list_databases()
+        result = DatabaseManager(registry_dir).list_databases()
     finally:
         server.stop()
         server.release_registration()
@@ -221,7 +230,7 @@ def test_paths_preserve_case_but_matching_is_case_insensitive(tmp_path: Path) ->
     assert server.entry is not None
     try:
         # The listed path preserves case (no more lowercase databases).
-        result = mcp_app._DatabaseManager(registry_dir).list_databases()
+        result = DatabaseManager(registry_dir).list_databases()
         assert result["instances"][0]["path"].endswith("MixedCase.exe")
 
         # The model may pass the executable or the .i64; both find the one
@@ -276,13 +285,13 @@ def test_resolves_live_instance_when_idb_not_on_disk(tmp_path: Path) -> None:
 def test_get_session_waits_for_in_flight_startup_open(tmp_path: Path) -> None:
     # Regression: the agent's first tool call must not race a --database startup
     # open. _get_session waits for the background thread to finish attaching.
-    manager = mcp_app._DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
-    sentinel = object()
+    manager = DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+    sentinel: Any = object()
 
     def _startup() -> None:
         time.sleep(0.2)  # attach lands after the first tool call arrives
         with manager._lock:
-            manager._instances["inst-1"] = sentinel  # type: ignore[assignment]
+            manager._instances["inst-1"] = sentinel
             manager._current_instance_id = "inst-1"
 
     thread = threading.Thread(target=_startup, daemon=True)
@@ -296,31 +305,33 @@ def test_get_session_waits_for_in_flight_startup_open(tmp_path: Path) -> None:
 
 
 def test_get_session_raises_without_startup_open(tmp_path: Path) -> None:
-    manager = mcp_app._DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+    manager = DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
     try:
         manager._get_session(None)
-    except mcp_app.McpToolError as exc:
+    except DatabaseError as exc:
         assert "no open database instance" in str(exc)
     else:  # pragma: no cover
-        raise AssertionError("expected McpToolError")
+        raise AssertionError("expected DatabaseError")
 
 
 def test_get_session_raises_after_failed_startup_open(tmp_path: Path) -> None:
     # A startup open that finishes without setting a current DB (i.e. it failed)
     # must not hang the tool call: waiting ends when the thread ends.
-    manager = mcp_app._DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+    manager = DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
     thread = threading.Thread(target=lambda: None, daemon=True)
     manager._startup_open_thread = thread
     thread.start()
     try:
         manager._get_session(None)
-    except mcp_app.McpToolError as exc:
+    except DatabaseError as exc:
         assert "no open database instance" in str(exc)
     else:  # pragma: no cover
-        raise AssertionError("expected McpToolError")
+        raise AssertionError("expected DatabaseError")
 
 
-def test_gui_disconnect_invalidates_mcp_instance_without_spawning(tmp_path: Path) -> None:
+def test_gui_disconnect_invalidates_mcp_instance_without_spawning(
+    tmp_path: Path,
+) -> None:
     registry_dir = tmp_path / "instances"
     spawn_dir = tmp_path / "spawn"
     idb_path = tmp_path / "open.i64"
@@ -334,7 +345,7 @@ def test_gui_disconnect_invalidates_mcp_instance_without_spawning(tmp_path: Path
         registry_dir,
     )
     server.start()
-    manager = mcp_app._DatabaseManager(registry_dir, spawn_dir)
+    manager = DatabaseManager(registry_dir, spawn_dir)
     opened = manager.open_database(str(executable), set_current=True)
 
     server.stop()
@@ -346,7 +357,7 @@ def test_gui_disconnect_invalidates_mcp_instance_without_spawning(tmp_path: Path
     assert manager.list_databases() == {"instances": []}
     try:
         manager.execute_python("lambda: 1", opened["instance_id"])
-    except mcp_app.McpToolError as exc:
+    except DatabaseError as exc:
         assert "disconnected since it was last used" in str(exc)
     else:
         raise AssertionError("disconnected instance remained executable")

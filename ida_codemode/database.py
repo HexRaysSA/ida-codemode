@@ -1,0 +1,494 @@
+"""MCP-agnostic multi-instance database session manager.
+
+The manager owns database discovery, attachment, selection, and lease cleanup.
+Protocol adapters may subscribe to domain lifecycle events through ``on_event``;
+error presentation, request metadata, and tracing belong to those adapters.
+"""
+
+from __future__ import annotations
+
+import threading
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Annotated, Any, Literal, TypedDict
+
+from ida_codemode.client import ClientError, DatabaseHandle
+from ida_codemode.registry import (
+    LOG_DIR,
+    RegistryEntry,
+    canonical_path,
+    idb_key,
+    scan_instances,
+)
+from ida_codemode.registry import REGISTRY_DIR as DEFAULT_REGISTRY_DIR
+from ida_codemode.registry import SPAWN_DIR as DEFAULT_SPAWN_DIR
+from ida_codemode.resolver import expected_idb_path
+from ida_codemode.runtime import PythonExecutionResult
+
+DEFAULT_OPEN_TIMEOUT_SECONDS = 300.0
+DEFAULT_EXECUTE_TIMEOUT_SECONDS = 300.0
+
+
+class DatabaseError(Exception):
+    """Error raised by database session management."""
+
+
+DatabaseEventCallback = Callable[[str, dict[str, Any]], None]
+
+
+def _resolve_user_path(path: str) -> str:
+    return canonical_path(path)
+
+
+def _entry_target_fields(entry: RegistryEntry) -> dict[str, Any]:
+    return {
+        "record_id": entry.record_id,
+        "backend": entry.backend,
+        "pid": entry.pid,
+        "port": entry.port,
+        "idb_path": entry.idb_path,
+        "idb_key": entry.idb_key,
+        "exe_path": entry.exe_path,
+        "managed": entry.managed,
+        "started_at": entry.started_at,
+        "worker_log_path": (
+            str(LOG_DIR / f"{entry.record_id}.log")
+            if entry.backend == "idalib"
+            else None
+        ),
+    }
+
+
+DatabaseStatus = Literal["available", "attached", "current", "unavailable"]
+
+
+class DatabaseListing(TypedDict):
+    path: str
+    backend: Annotated[str, "Instance backend: gui or idalib."]
+    status: Annotated[
+        str,
+        "Action state: available, attached, current, or unavailable.",
+    ]
+    instance_id: str | None
+    error: str | None
+
+
+class ListDatabasesResult(TypedDict):
+    instances: list[DatabaseListing]
+
+
+class OpenDatabaseResult(TypedDict):
+    instance_id: str
+    backend: Annotated[str, "Instance backend: gui or idalib."]
+    status: Annotated[str, "Attachment state: attached or current."]
+
+
+class SaveDatabaseResult(TypedDict):
+    path: str
+
+
+class CloseDatabaseResult(TypedDict):
+    closed: bool
+
+
+@dataclass(frozen=True)
+class _AttachedDatabase:
+    entry: RegistryEntry
+    instance_id: str
+    current: bool
+
+
+@dataclass
+class _DatabaseSession:
+    instance_id: str
+    requested_path: str
+    handle: DatabaseHandle
+    operation_lock: threading.RLock = field(
+        default_factory=threading.RLock,
+        repr=False,
+    )
+
+
+class DatabaseManager:
+    def __init__(
+        self,
+        registry_dir: Path = DEFAULT_REGISTRY_DIR,
+        spawn_dir: Path = DEFAULT_SPAWN_DIR,
+        *,
+        on_event: DatabaseEventCallback | None = None,
+        open_timeout: float = DEFAULT_OPEN_TIMEOUT_SECONDS,
+        execute_timeout: float = DEFAULT_EXECUTE_TIMEOUT_SECONDS,
+    ) -> None:
+        self._on_event = on_event
+        self.registry_dir = registry_dir
+        self.spawn_dir = spawn_dir
+        self._open_timeout = open_timeout
+        self._execute_timeout = execute_timeout
+        self._instances: dict[str, _DatabaseSession] = {}
+        self._disconnected_instances: dict[str, str] = {}
+        self._disconnected_default: str | None = None
+        self._current_instance_id: str | None = None
+        self._lock = threading.RLock()
+        self._open_lock = threading.Lock()
+        self._shutdown_started = False
+        # Background thread from a scheduled startup open, if any. Operations
+        # that need the current database wait on it so they do not race the
+        # deliberately non-blocking attachment.
+        self._startup_open_thread: threading.Thread | None = None
+
+    def _emit(self, event: str, **fields: Any) -> None:
+        if self._on_event is not None:
+            self._on_event(event, fields)
+
+    def _database_info(self, session: _DatabaseSession) -> dict[str, Any]:
+        return {
+            "instance_id": session.instance_id,
+            "requested_path": session.requested_path,
+            **_entry_target_fields(session.handle.entry),
+        }
+
+    def _handle_disconnected(self, handle: DatabaseHandle, reason: str) -> None:
+        with self._lock:
+            session = next(
+                (
+                    candidate
+                    for candidate in self._instances.values()
+                    if candidate.handle is handle
+                ),
+                None,
+            )
+            if session is None:
+                return
+            self._instances.pop(session.instance_id, None)
+            self._disconnected_instances[session.instance_id] = reason
+            if self._current_instance_id == session.instance_id:
+                self._current_instance_id = None
+                self._disconnected_default = session.instance_id
+        self._emit(
+            "database_disconnected",
+            instance_id=session.instance_id,
+            target=self._database_info(session),
+            reason=reason,
+        )
+
+    def open_database(self, path: str, *, set_current: bool) -> OpenDatabaseResult:
+        # Do NOT require the path to exist on disk here. A live instance (e.g. an
+        # unsaved GUI database whose .i64 has not been written yet) may be
+        # registered for this path; resolve_instance matches the registry first
+        # and only needs a real file when it must spawn a worker (where it
+        # raises FileNotFoundError for the caller or protocol adapter to present).
+        resolved_path = _resolve_user_path(path)
+
+        # Serialize local opens so duplicate calls create at most one retained
+        # lease in this manager. Other managers retain their own leases.
+        with self._open_lock:
+            with self._lock:
+                candidate = next(
+                    (
+                        session
+                        for session in self._instances.values()
+                        if session.requested_path == resolved_path
+                        and session.handle.connected
+                    ),
+                    None,
+                )
+
+            existing: _DatabaseSession | None = None
+            if candidate is not None:
+                with candidate.operation_lock, self._lock:
+                    if self._instances.get(candidate.instance_id) is candidate:
+                        existing = candidate
+                        if set_current or self._current_instance_id is None:
+                            self._current_instance_id = candidate.instance_id
+                            self._disconnected_default = None
+                        current = self._current_instance_id
+
+            if existing is None:
+                handle = DatabaseHandle.open(
+                    resolved_path,
+                    timeout=self._open_timeout,
+                    registry_dir=self.registry_dir,
+                    spawn_dir=self.spawn_dir,
+                )
+                if not handle.connected:
+                    reason = handle.disconnect_reason or "database connection closed"
+                    handle.close()
+                    raise DatabaseError(
+                        f"database disconnected while opening: {reason}"
+                    )
+                entry = handle.entry
+                with self._lock:
+                    existing = next(
+                        (
+                            session
+                            for session in self._instances.values()
+                            if session.handle.connected
+                            and session.handle.entry.record_id == entry.record_id
+                        ),
+                        None,
+                    )
+                    if existing is not None:
+                        if set_current or self._current_instance_id is None:
+                            self._current_instance_id = existing.instance_id
+                            self._disconnected_default = None
+                        current = self._current_instance_id
+                    else:
+                        instance_id = uuid.uuid4().hex[:12]
+                        existing = _DatabaseSession(
+                            instance_id=instance_id,
+                            requested_path=resolved_path,
+                            handle=handle,
+                        )
+                        self._instances[instance_id] = existing
+                        if set_current or self._current_instance_id is None:
+                            self._current_instance_id = instance_id
+                            self._disconnected_default = None
+                        current = self._current_instance_id
+
+                if existing.handle is not handle:
+                    handle.close()
+                    event = "database_reused"
+                else:
+                    handle.set_disconnect_callback(self._handle_disconnected)
+                    if not handle.connected:
+                        reason = (
+                            handle.disconnect_reason or "database connection closed"
+                        )
+                        raise DatabaseError(
+                            f"database disconnected while opening: {reason}"
+                        )
+                    event = "database_opened"
+            else:
+                event = "database_reused"
+
+            self._emit(
+                event,
+                instance_id=existing.instance_id,
+                target=self._database_info(existing),
+            )
+            return OpenDatabaseResult(
+                instance_id=existing.instance_id,
+                backend=existing.handle.entry.backend,
+                status="current" if current == existing.instance_id else "attached",
+            )
+
+    @staticmethod
+    def _disconnected_error(instance_id: str) -> DatabaseError:
+        return DatabaseError(
+            f"database instance {instance_id} disconnected since it was last used "
+            "and is no longer valid; call list_databases() and open_database() again"
+        )
+
+    def schedule_startup_open(self, path: str) -> None:
+        """Open and activate a database in a background thread.
+
+        Opening may spawn a managed idalib worker, so startup consumers can use
+        this without blocking their own initialization. Operations that need the
+        current database wait through ``_await_startup_open`` instead of racing
+        the background attachment.
+        """
+        import sys
+
+        def _open() -> None:
+            try:
+                self.open_database(path, set_current=True)
+                print(f"Startup database ready: {path}", file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001 - report and let agents retry
+                print(f"Startup open failed for {path!r}: {exc}", file=sys.stderr)
+
+        thread = threading.Thread(target=_open, name="startup-open", daemon=True)
+        self._startup_open_thread = thread
+        thread.start()
+
+    def _await_startup_open(self) -> None:
+        """Block until an in-flight startup open finishes (success or failure).
+
+        Called with no locks held: the startup thread's open_database() takes
+        ``self._lock`` / ``self._open_lock``, so joining while holding either
+        would deadlock. Bounded by the same budget a single open is allowed.
+        """
+        thread = self._startup_open_thread
+        if thread is not None and thread.is_alive():
+            thread.join(self._open_timeout)
+
+    def _resolve_target_id(self, instance_id: str | None) -> str | None:
+        with self._lock:
+            return (
+                instance_id or self._current_instance_id or self._disconnected_default
+            )
+
+    def _get_session(self, instance_id: str | None) -> tuple[str, _DatabaseSession]:
+        target_id = self._resolve_target_id(instance_id)
+        if target_id is None:
+            # A scheduled startup open may still be attaching in the background.
+            # Wait for it, then look again, so the first operation does not
+            # spuriously see "no open database".
+            self._await_startup_open()
+            target_id = self._resolve_target_id(instance_id)
+        if target_id is None:
+            raise DatabaseError("no open database instance; call open_database() first")
+        with self._lock:
+            session = self._instances.get(target_id)
+            disconnected = self._disconnected_instances.get(target_id)
+        if session is None and disconnected is not None:
+            raise self._disconnected_error(target_id)
+        if session is None:
+            raise DatabaseError(f"unknown database instance: {target_id}")
+        return target_id, session
+
+    def execute_python(
+        self,
+        code: str,
+        instance_id: str | None,
+    ) -> PythonExecutionResult:
+        target_id, session = self._get_session(instance_id)
+        with session.operation_lock:
+            if not session.handle.connected:
+                raise self._disconnected_error(target_id)
+            try:
+                return session.handle.execute_python(
+                    code,
+                    timeout=self._execute_timeout,
+                )
+            except ClientError:
+                if not session.handle.connected:
+                    raise self._disconnected_error(target_id) from None
+                raise
+
+    def save_database(self, instance_id: str | None) -> SaveDatabaseResult:
+        target_id, session = self._get_session(instance_id)
+        with session.operation_lock:
+            if not session.handle.connected:
+                raise self._disconnected_error(target_id)
+            try:
+                result = session.handle.save_database()
+            except ClientError:
+                if not session.handle.connected:
+                    raise self._disconnected_error(target_id) from None
+                raise
+            self._emit(
+                "database_saved",
+                instance_id=target_id,
+                target=self._database_info(session),
+                result=result,
+            )
+            path = result.get("idb_path")
+            if not isinstance(path, str):
+                raise DatabaseError("save_database returned an invalid path")
+            return SaveDatabaseResult(path=path)
+
+    @staticmethod
+    def _listing_path(entry: RegistryEntry) -> str:
+        """Return a path that open_database() can use to reach this instance."""
+        if (
+            entry.exe_path
+            and Path(entry.exe_path).exists()
+            and (
+                entry.backend == "gui"
+                or idb_key(expected_idb_path(entry.exe_path)) == entry.idb_key
+            )
+        ):
+            return entry.exe_path
+        return entry.idb_path
+
+    def list_databases(self) -> ListDatabasesResult:
+        with self._lock:
+            sessions = list(self._instances.values())
+            current = self._current_instance_id
+
+        attached: dict[str, _AttachedDatabase] = {}
+        for session in sessions:
+            with session.operation_lock:
+                entry = session.handle.entry
+                attached[entry.record_id] = _AttachedDatabase(
+                    entry=entry,
+                    instance_id=session.instance_id,
+                    current=session.instance_id == current,
+                )
+
+        instances: list[DatabaseListing] = []
+        for discovered in scan_instances(self.registry_dir):
+            entry = discovered.entry
+            local = attached.pop(entry.record_id, None)
+            if discovered.state.value != "ready":
+                status: DatabaseStatus = "unavailable"
+            elif local is None:
+                status = "available"
+            elif local.current:
+                status = "current"
+            else:
+                status = "attached"
+            instances.append(
+                DatabaseListing(
+                    path=self._listing_path(entry),
+                    backend=entry.backend,
+                    status=status,
+                    instance_id=local.instance_id if local else None,
+                    error=discovered.detail if status == "unavailable" else None,
+                )
+            )
+
+        # A local lease remains actionable during a transient registry scan,
+        # so do not hide it merely because discovery missed its record.
+        for local in attached.values():
+            instances.append(
+                DatabaseListing(
+                    path=self._listing_path(local.entry),
+                    backend=local.entry.backend,
+                    status="current" if local.current else "attached",
+                    instance_id=local.instance_id,
+                    error=None,
+                )
+            )
+
+        status_order = {"current": 0, "attached": 1, "available": 2, "unavailable": 3}
+        instances.sort(
+            key=lambda item: (
+                status_order[item["status"]],
+                item["backend"] != "gui",
+                item["path"],
+            )
+        )
+        return {"instances": instances}
+
+    def close_database(self, instance_id: str | None) -> CloseDatabaseResult:
+        target_id, session = self._get_session(instance_id)
+        with session.operation_lock:
+            database = self._database_info(session)
+            with self._lock:
+                current_session = self._instances.get(target_id)
+                if current_session is not session:
+                    raise DatabaseError(f"unknown database instance: {target_id}")
+                self._instances.pop(target_id)
+                if self._current_instance_id == target_id:
+                    self._current_instance_id = next(iter(self._instances), None)
+            session.handle.close()
+        self._emit(
+            "database_released",
+            instance_id=target_id,
+            target=database,
+        )
+        return CloseDatabaseResult(closed=True)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            if self._shutdown_started:
+                return
+            self._shutdown_started = True
+            sessions = list(self._instances.values())
+            self._instances.clear()
+            self._disconnected_instances.clear()
+            self._disconnected_default = None
+            self._current_instance_id = None
+        for session in sessions:
+            try:
+                with session.operation_lock:
+                    session.handle.close()
+            except Exception as error:  # noqa: BLE001 -- best-effort shutdown reporting
+                self._emit(
+                    "database_release_error",
+                    instance_id=session.instance_id,
+                    error=error,
+                )

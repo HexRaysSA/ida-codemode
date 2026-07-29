@@ -22,31 +22,30 @@ import time
 import traceback
 import uuid
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any
 from urllib.parse import urlparse
 
 from zeromcp import McpServer, McpToolError
 
-from ida_codemode.client import ClientError, DatabaseHandle, RemoteError
+from ida_codemode.client import ClientError, RemoteError
+from ida_codemode.database import (
+    CloseDatabaseResult,
+    DatabaseError,
+    DatabaseManager,
+    ListDatabasesResult,
+    OpenDatabaseResult,
+    SaveDatabaseResult,
+)
 from ida_codemode.reference import (
     find_ida_domain_package_path,
     get_ida_domain_version,
     render_reference,
 )
-from ida_codemode.registry import (
-    LOG_DIR,
-    REGISTRY_DIR,
-    SPAWN_DIR,
-    RegistryEntry,
-    canonical_path,
-    idb_key,
-    scan_instances,
-)
-from ida_codemode.resolver import ResolveError, expected_idb_path
+from ida_codemode.resolver import ResolveError
 from ida_codemode.runtime import PythonExecutionResult
 
 STATE_DIR = Path.home() / ".ida-codemode"
@@ -61,15 +60,11 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _resolve_user_path(path: str) -> str:
-    return canonical_path(path)
-
-
 def _session_fields() -> dict[str, Any]:
     try:
         meta = mcp.context.meta or {}
     except (AttributeError, LookupError, RuntimeError):
-        # The shutdown path may run outside an MCP request context.
+        # Shutdown and asynchronous database events may have no MCP request.
         meta = {}
     fields: dict[str, Any] = {
         "codemode_id": os.environ.get("IDA_CODEMODE_ID") or None,
@@ -102,7 +97,7 @@ def _trace_jsonable(value: Any) -> Any:
 
 
 class _TraceLogger:
-    """Thread-safe semantic MCP trace shared by all database handles."""
+    """Thread-safe semantic trace owned by this MCP server."""
 
     def __init__(self) -> None:
         self.server_id = uuid.uuid4().hex[:12]
@@ -148,7 +143,6 @@ TRACE = _TraceLogger()
 
 def _install_initialize_trace_adapter() -> None:
     """Record MCP client identity and metadata from the initialize request."""
-
     original_initialize = mcp.registry.methods["initialize"]
 
     def initialize_with_trace(
@@ -170,8 +164,7 @@ def _install_initialize_trace_adapter() -> None:
 
 
 def _install_hook_input_meta_adapter() -> None:
-    """Promote Claude/Codex hook metadata from arguments into MCP request metadata."""
-
+    """Promote Claude/Codex hook metadata into MCP request metadata."""
     original_tools_call = mcp.registry.methods["tools/call"]
 
     def tools_call_with_meta(
@@ -181,13 +174,11 @@ def _install_hook_input_meta_adapter() -> None:
     ) -> dict[str, Any]:
         clean_arguments = arguments
         request_meta = dict(_meta) if isinstance(_meta, dict) else {}
-
         if isinstance(arguments, dict):
             clean_arguments = dict(arguments)
             input_meta = clean_arguments.pop("_meta", None)
             if isinstance(input_meta, dict):
                 request_meta.update(input_meta)
-
         return original_tools_call(name, clean_arguments, request_meta or None)
 
     mcp.registry.methods["tools/call"] = tools_call_with_meta
@@ -195,29 +186,6 @@ def _install_hook_input_meta_adapter() -> None:
 
 _install_initialize_trace_adapter()
 _install_hook_input_meta_adapter()
-
-
-def _entry_target_fields(entry: RegistryEntry) -> dict[str, Any]:
-    return {
-        "record_id": entry.record_id,
-        "backend": entry.backend,
-        "pid": entry.pid,
-        "port": entry.port,
-        "idb_path": entry.idb_path,
-        "idb_key": entry.idb_key,
-        "exe_path": entry.exe_path,
-        "managed": entry.managed,
-        "started_at": entry.started_at,
-        "worker_log_path": (
-            str(LOG_DIR / f"{entry.record_id}.log")
-            if entry.backend == "idalib"
-            else None
-        ),
-    }
-
-
-def _target_fields(handle: DatabaseHandle) -> dict[str, Any]:
-    return _entry_target_fields(handle.entry)
 
 
 def _error_fields(error: Exception) -> dict[str, Any]:
@@ -245,9 +213,59 @@ def _as_tool_error(error: Exception) -> McpToolError:
             if isinstance(value, str) and value:
                 sections.append(f"{label}:\n{value.rstrip()}")
         return McpToolError("\n\n".join(sections))
-    if isinstance(error, (ClientError, ResolveError, FileNotFoundError, ValueError)):
+    if isinstance(
+        error,
+        (DatabaseError, ClientError, ResolveError, FileNotFoundError, ValueError),
+    ):
         return McpToolError(str(error))
     return McpToolError(str(error) or type(error).__name__)
+
+
+def _trace_database_event(event: str, fields: dict[str, Any]) -> None:
+    fields = dict(fields)
+    error = fields.get("error")
+    if isinstance(error, Exception):
+        fields["error"] = _error_fields(error)
+    TRACE.emit(event, session=_session_fields(), **fields)
+
+
+DATABASE_MANAGER = DatabaseManager(
+    on_event=_trace_database_event,
+    open_timeout=OPEN_TIMEOUT_SECONDS,
+    execute_timeout=EXECUTE_TIMEOUT_SECONDS,
+)
+
+_TRACE_LIFECYCLE_LOCK = threading.Lock()
+_TRACE_STARTED = False
+_TRACE_STOPPED = False
+
+
+def _start_mcp_trace(transport: str, agent: str | None) -> None:
+    global _TRACE_STARTED
+    with _TRACE_LIFECYCLE_LOCK:
+        if _TRACE_STARTED:
+            return
+        _TRACE_STARTED = True
+    TRACE.emit(
+        "mcp_started",
+        session=_session_fields(),
+        transport=transport,
+        agent=agent,
+        trace_path=str(TRACE.path),
+    )
+
+
+def _shutdown_server_state() -> None:
+    global _TRACE_STOPPED
+    DATABASE_MANAGER.shutdown()
+    with _TRACE_LIFECYCLE_LOCK:
+        if not _TRACE_STARTED or _TRACE_STOPPED:
+            return
+        _TRACE_STOPPED = True
+    TRACE.emit("mcp_stopped", session=_session_fields())
+
+
+atexit.register(_shutdown_server_state)
 
 
 def _run_traced_tool(
@@ -291,473 +309,9 @@ def _run_traced_tool(
     return result
 
 
-DatabaseStatus = Literal["available", "attached", "current", "unavailable"]
-
-
-class DatabaseListing(TypedDict):
-    path: str
-    backend: Annotated[str, "Instance backend: gui or idalib."]
-    status: Annotated[
-        str,
-        "Action state: available, attached, current, or unavailable.",
-    ]
-    instance_id: str | None
-    error: str | None
-
-
-class ListDatabasesResult(TypedDict):
-    instances: list[DatabaseListing]
-
-
-class OpenDatabaseResult(TypedDict):
-    instance_id: str
-    backend: Annotated[str, "Instance backend: gui or idalib."]
-    status: Annotated[str, "Attachment state: attached or current."]
-    log_path: str
-    codemode_id: str | None
-    hint: str
-
-
-class SaveDatabaseResult(TypedDict):
-    path: str
-
-
-class CloseDatabaseResult(TypedDict):
-    closed: bool
-
-
-@dataclass(frozen=True)
-class _AttachedDatabase:
-    entry: RegistryEntry
-    instance_id: str
-    current: bool
-
-
-@dataclass
-class _DatabaseSession:
-    instance_id: str
-    requested_path: str
-    handle: DatabaseHandle
-    operation_lock: threading.RLock = field(
-        default_factory=threading.RLock,
-        repr=False,
-    )
-
-
-class _DatabaseManager:
-    def __init__(
-        self,
-        registry_dir: Path = REGISTRY_DIR,
-        spawn_dir: Path = SPAWN_DIR,
-    ) -> None:
-        self.registry_dir = registry_dir
-        self.spawn_dir = spawn_dir
-        self._instances: dict[str, _DatabaseSession] = {}
-        self._disconnected_instances: dict[str, str] = {}
-        self._disconnected_default: str | None = None
-        self._current_instance_id: str | None = None
-        self._lock = threading.RLock()
-        self._open_lock = threading.Lock()
-        self._shutdown_started = False
-        self._trace_lifecycle_started = False
-        # Background thread from a --database startup open, if any. Tool calls
-        # that need the current database wait on it so the agent's first call
-        # does not race the (deliberately non-blocking) startup open.
-        self._startup_open_thread: threading.Thread | None = None
-
-    def _emit(self, event: str, **fields: Any) -> None:
-        """Emit manager events only while this manager is serving an MCP session."""
-        with self._lock:
-            if not self._trace_lifecycle_started:
-                return
-        TRACE.emit(event, **fields)
-
-    def start(self, transport: str, *, agent: str | None = None) -> None:
-        with self._lock:
-            if self._trace_lifecycle_started:
-                return
-            self._trace_lifecycle_started = True
-        self._emit(
-            "mcp_started",
-            session=_session_fields(),
-            transport=transport,
-            agent=agent,
-            trace_path=str(TRACE.path),
-        )
-
-    def _database_info(self, session: _DatabaseSession) -> dict[str, Any]:
-        return {
-            "instance_id": session.instance_id,
-            "requested_path": session.requested_path,
-            **_target_fields(session.handle),
-        }
-
-    def _handle_disconnected(self, handle: DatabaseHandle, reason: str) -> None:
-        with self._lock:
-            session = next(
-                (
-                    candidate
-                    for candidate in self._instances.values()
-                    if candidate.handle is handle
-                ),
-                None,
-            )
-            if session is None:
-                return
-            self._instances.pop(session.instance_id, None)
-            self._disconnected_instances[session.instance_id] = reason
-            if self._current_instance_id == session.instance_id:
-                self._current_instance_id = None
-                self._disconnected_default = session.instance_id
-        self._emit(
-            "database_disconnected",
-            session=_session_fields(),
-            instance_id=session.instance_id,
-            target=self._database_info(session),
-            reason=reason,
-        )
-
-    def open_database(self, path: str, *, set_current: bool) -> OpenDatabaseResult:
-        # Do NOT require the path to exist on disk here. A live instance (e.g. an
-        # unsaved GUI database whose .i64 has not been written yet) may be
-        # registered for this path; resolve_instance matches the registry first
-        # and only needs a real file when it must spawn a worker (where it
-        # raises FileNotFoundError, surfaced cleanly via _as_tool_error).
-        resolved_path = _resolve_user_path(path)
-
-        # Serialize local opens so duplicate calls create at most one retained
-        # lease in this MCP server. Other MCP servers retain their own leases.
-        with self._open_lock:
-            with self._lock:
-                candidate = next(
-                    (
-                        session
-                        for session in self._instances.values()
-                        if session.requested_path == resolved_path
-                        and session.handle.connected
-                    ),
-                    None,
-                )
-
-            existing: _DatabaseSession | None = None
-            if candidate is not None:
-                with candidate.operation_lock, self._lock:
-                    if self._instances.get(candidate.instance_id) is candidate:
-                        existing = candidate
-                        if set_current or self._current_instance_id is None:
-                            self._current_instance_id = candidate.instance_id
-                            self._disconnected_default = None
-                        current = self._current_instance_id
-
-            if existing is None:
-                handle = DatabaseHandle.open(
-                    resolved_path,
-                    timeout=OPEN_TIMEOUT_SECONDS,
-                    registry_dir=self.registry_dir,
-                    spawn_dir=self.spawn_dir,
-                )
-                if not handle.connected:
-                    reason = handle.disconnect_reason or "database connection closed"
-                    handle.close()
-                    raise McpToolError(f"database disconnected while opening: {reason}")
-                entry = handle.entry
-                with self._lock:
-                    existing = next(
-                        (
-                            session
-                            for session in self._instances.values()
-                            if session.handle.connected
-                            and session.handle.entry.record_id == entry.record_id
-                        ),
-                        None,
-                    )
-                    if existing is not None:
-                        if set_current or self._current_instance_id is None:
-                            self._current_instance_id = existing.instance_id
-                            self._disconnected_default = None
-                        current = self._current_instance_id
-                    else:
-                        instance_id = uuid.uuid4().hex[:12]
-                        existing = _DatabaseSession(
-                            instance_id=instance_id,
-                            requested_path=resolved_path,
-                            handle=handle,
-                        )
-                        self._instances[instance_id] = existing
-                        if set_current or self._current_instance_id is None:
-                            self._current_instance_id = instance_id
-                            self._disconnected_default = None
-                        current = self._current_instance_id
-
-                if existing.handle is not handle:
-                    handle.close()
-                    event = "database_reused"
-                else:
-                    handle.set_disconnect_callback(self._handle_disconnected)
-                    if not handle.connected:
-                        reason = handle.disconnect_reason or "database connection closed"
-                        raise McpToolError(f"database disconnected while opening: {reason}")
-                    event = "database_opened"
-            else:
-                event = "database_reused"
-
-            session_fields = _session_fields()
-            self._emit(
-                event,
-                session=session_fields,
-                instance_id=existing.instance_id,
-                target=self._database_info(existing),
-            )
-            codemode_id = session_fields.get("codemode_id")
-            return OpenDatabaseResult(
-                instance_id=existing.instance_id,
-                backend=existing.handle.entry.backend,
-                status="current" if current == existing.instance_id else "attached",
-                log_path=str(TRACE.path),
-                codemode_id=codemode_id if isinstance(codemode_id, str) else None,
-                hint=(
-                    "Call reference(query) to inspect the IDA Domain API before "
-                    "using execute_python; `db` and `ida_domain` are available globally."
-                ),
-            )
-
-    @staticmethod
-    def _disconnected_tool_error(instance_id: str) -> McpToolError:
-        return McpToolError(
-            f"database instance {instance_id} disconnected since it was last used "
-            "and is no longer valid; call list_databases() and open_database() again"
-        )
-
-    def schedule_startup_open(self, path: str) -> None:
-        """Open and activate a database at startup so agents skip open_database().
-
-        Runs in a background daemon thread so opening (which may spawn a managed
-        idalib worker) never delays the MCP initialize handshake. The thread is
-        tracked so tool calls that need the current database can wait for it via
-        ``_await_startup_open`` instead of racing it. Agents may still call
-        open_database() themselves if the startup open ultimately fails.
-        """
-
-        def _open() -> None:
-            try:
-                self.open_database(path, set_current=True)
-                print(f"Startup database ready: {path}", file=sys.stderr)
-            except Exception as exc:  # noqa: BLE001 - report and let agents retry
-                print(f"Startup open failed for {path!r}: {exc}", file=sys.stderr)
-
-        thread = threading.Thread(target=_open, name="startup-open", daemon=True)
-        self._startup_open_thread = thread
-        thread.start()
-
-    def _await_startup_open(self) -> None:
-        """Block until an in-flight startup open finishes (success or failure).
-
-        Called with no locks held: the startup thread's open_database() takes
-        ``self._lock`` / ``self._open_lock``, so joining while holding either
-        would deadlock. Bounded by the same budget a single open is allowed.
-        """
-        thread = self._startup_open_thread
-        if thread is not None and thread.is_alive():
-            thread.join(OPEN_TIMEOUT_SECONDS)
-
-    def _resolve_target_id(self, instance_id: str | None) -> str | None:
-        with self._lock:
-            return (
-                instance_id
-                or self._current_instance_id
-                or self._disconnected_default
-            )
-
-    def _get_session(self, instance_id: str | None) -> tuple[str, _DatabaseSession]:
-        target_id = self._resolve_target_id(instance_id)
-        if target_id is None:
-            # No current database yet: a --database startup open may still be
-            # attaching in the background. Wait for it, then look again, so the
-            # agent's first call doesn't spuriously see "no open database".
-            self._await_startup_open()
-            target_id = self._resolve_target_id(instance_id)
-        if target_id is None:
-            raise McpToolError(
-                "no open database instance; call open_database() first"
-            )
-        with self._lock:
-            session = self._instances.get(target_id)
-            disconnected = self._disconnected_instances.get(target_id)
-        if session is None and disconnected is not None:
-            raise self._disconnected_tool_error(target_id)
-        if session is None:
-            raise McpToolError(f"unknown database instance: {target_id}")
-        return target_id, session
-
-    def execute_python(
-        self,
-        code: str,
-        instance_id: str | None,
-    ) -> PythonExecutionResult:
-        target_id, session = self._get_session(instance_id)
-        with session.operation_lock:
-            if not session.handle.connected:
-                raise self._disconnected_tool_error(target_id)
-            try:
-                return session.handle.execute_python(
-                    code,
-                    timeout=EXECUTE_TIMEOUT_SECONDS,
-                )
-            except ClientError:
-                if not session.handle.connected:
-                    raise self._disconnected_tool_error(target_id) from None
-                raise
-
-    def save_database(self, instance_id: str | None) -> SaveDatabaseResult:
-        target_id, session = self._get_session(instance_id)
-        with session.operation_lock:
-            if not session.handle.connected:
-                raise self._disconnected_tool_error(target_id)
-            try:
-                result = session.handle.save_database()
-            except ClientError:
-                if not session.handle.connected:
-                    raise self._disconnected_tool_error(target_id) from None
-                raise
-            self._emit(
-                "database_saved",
-                session=_session_fields(),
-                instance_id=target_id,
-                target=self._database_info(session),
-                result=result,
-            )
-            path = result.get("idb_path")
-            if not isinstance(path, str):
-                raise McpToolError("save_database returned an invalid path")
-            return SaveDatabaseResult(path=path)
-
-    @staticmethod
-    def _listing_path(entry: RegistryEntry) -> str:
-        """Return a path that open_database() can use to reach this instance."""
-
-        if (
-            entry.exe_path
-            and Path(entry.exe_path).exists()
-            and (
-                entry.backend == "gui"
-                or idb_key(expected_idb_path(entry.exe_path)) == entry.idb_key
-            )
-        ):
-            return entry.exe_path
-        return entry.idb_path
-
-    def list_databases(self) -> ListDatabasesResult:
-        with self._lock:
-            sessions = list(self._instances.values())
-            current = self._current_instance_id
-
-        attached: dict[str, _AttachedDatabase] = {}
-        for session in sessions:
-            with session.operation_lock:
-                entry = session.handle.entry
-                attached[entry.record_id] = _AttachedDatabase(
-                    entry=entry,
-                    instance_id=session.instance_id,
-                    current=session.instance_id == current,
-                )
-
-        instances: list[DatabaseListing] = []
-        for discovered in scan_instances(self.registry_dir):
-            entry = discovered.entry
-            local = attached.pop(entry.record_id, None)
-            if discovered.state.value != "ready":
-                status: DatabaseStatus = "unavailable"
-            elif local is None:
-                status = "available"
-            elif local.current:
-                status = "current"
-            else:
-                status = "attached"
-            instances.append(
-                DatabaseListing(
-                    path=self._listing_path(entry),
-                    backend=entry.backend,
-                    status=status,
-                    instance_id=local.instance_id if local else None,
-                    error=discovered.detail if status == "unavailable" else None,
-                )
-            )
-
-        # A local lease remains actionable during a transient registry scan,
-        # so do not hide it merely because discovery missed its record.
-        for local in attached.values():
-            instances.append(
-                DatabaseListing(
-                    path=self._listing_path(local.entry),
-                    backend=local.entry.backend,
-                    status="current" if local.current else "attached",
-                    instance_id=local.instance_id,
-                    error=None,
-                )
-            )
-
-        status_order = {"current": 0, "attached": 1, "available": 2, "unavailable": 3}
-        instances.sort(
-            key=lambda item: (
-                status_order[item["status"]],
-                item["backend"] != "gui",
-                item["path"],
-            )
-        )
-        return {"instances": instances}
-
-    def close_database(self, instance_id: str | None) -> CloseDatabaseResult:
-        target_id, session = self._get_session(instance_id)
-        with session.operation_lock:
-            database = self._database_info(session)
-            with self._lock:
-                current_session = self._instances.get(target_id)
-                if current_session is not session:
-                    raise McpToolError(f"unknown database instance: {target_id}")
-                self._instances.pop(target_id)
-                if self._current_instance_id == target_id:
-                    self._current_instance_id = next(iter(self._instances), None)
-            session.handle.close()
-        self._emit(
-            "database_released",
-            session=_session_fields(),
-            instance_id=target_id,
-            target=database,
-        )
-        return CloseDatabaseResult(closed=True)
-
-    def shutdown(self) -> None:
-        with self._lock:
-            if self._shutdown_started:
-                return
-            self._shutdown_started = True
-            sessions = list(self._instances.values())
-            self._instances.clear()
-            self._disconnected_instances.clear()
-            self._disconnected_default = None
-            self._current_instance_id = None
-        for session in sessions:
-            try:
-                with session.operation_lock:
-                    session.handle.close()
-            except Exception as error:  # noqa: BLE001 -- best-effort shutdown tracing
-                self._emit(
-                    "database_release_error",
-                    session=_session_fields(),
-                    instance_id=session.instance_id,
-                    error=_error_fields(error),
-                )
-        if self._trace_lifecycle_started:
-            self._emit("mcp_stopped", session=_session_fields())
-
-
-DATABASE_MANAGER = _DatabaseManager()
-atexit.register(DATABASE_MANAGER.shutdown)
-
-
 def _install_server_shutdown_handlers() -> None:
     def cleanup_and_exit(signum: int, _frame: Any) -> None:
-        DATABASE_MANAGER.shutdown()
+        _shutdown_server_state()
         try:
             mcp.stop()
         finally:
@@ -781,6 +335,27 @@ def reference(
     )
 
 
+class OpenDatabaseToolResult(OpenDatabaseResult):
+    log_path: str
+    codemode_id: str | None
+    hint: str
+
+
+def _open_database_result(path: str, set_current: bool) -> OpenDatabaseToolResult:
+    result = DATABASE_MANAGER.open_database(path, set_current=set_current)
+    session = _session_fields()
+    codemode_id = session.get("codemode_id")
+    return OpenDatabaseToolResult(
+        **result,
+        log_path=str(TRACE.path),
+        codemode_id=codemode_id if isinstance(codemode_id, str) else None,
+        hint=(
+            "Call reference(query) to inspect the IDA Domain API before using "
+            "execute_python; `db` and `ida_domain` are available globally."
+        ),
+    )
+
+
 @mcp.tool
 def open_database(
     path: Annotated[
@@ -791,13 +366,13 @@ def open_database(
         bool,
         "Whether this database should become the default target for execute_python().",
     ] = True,
-) -> OpenDatabaseResult:
+) -> OpenDatabaseToolResult:
     """Attach to a GUI database or shared managed idalib worker."""
 
     return _run_traced_tool(
         "open_database",
         {"path": path, "set_current": set_current},
-        lambda: DATABASE_MANAGER.open_database(path, set_current=set_current),
+        lambda: _open_database_result(path, set_current),
     )
 
 
@@ -881,7 +456,7 @@ def _serve(
     agent: str | None = None,
 ) -> None:
     _install_server_shutdown_handlers()
-    DATABASE_MANAGER.start(transport, agent=agent)
+    _start_mcp_trace(transport, agent)
 
     if database:
         DATABASE_MANAGER.schedule_startup_open(database)
@@ -890,7 +465,7 @@ def _serve(
         try:
             mcp.stdio()
         finally:
-            DATABASE_MANAGER.shutdown()
+            _shutdown_server_state()
         return
 
     url = urlparse(transport)
@@ -914,7 +489,7 @@ def _serve(
     except (KeyboardInterrupt, EOFError):
         print("\nStopping server...")
     finally:
-        DATABASE_MANAGER.shutdown()
+        _shutdown_server_state()
         mcp.stop()
 
 

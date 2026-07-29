@@ -238,6 +238,7 @@ class IDARuntime:
         import ida_loader
         import idaapi
         import idc
+
         version = tuple(
             int(part) for part in idaapi.get_kernel_version().split(".")[:2]
         )
@@ -343,8 +344,9 @@ class IDARuntime:
                         timer.start()
                         sys.settrace(timeout_trace)
                     if capture_output:
-                        with redirect_stdout(stdout_capture), redirect_stderr(
-                            stderr_capture
+                        with (
+                            redirect_stdout(stdout_capture),
+                            redirect_stderr(stderr_capture),
                         ):
                             result = function()
                     else:

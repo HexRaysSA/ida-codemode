@@ -15,8 +15,9 @@ directly.
 | `ida_codemode/registry.py` | Canonical identity, cross-platform file locks, atomic records, health classification, and stale-record cleanup. |
 | `ida_codemode/resolver.py` | GUI discovery, expected-IDB resolution, serialized worker spawning, and startup diagnostics. |
 | `ida_codemode/client.py` | `DatabaseHandle`, SSE lease monitoring, disconnection detection, execution, and saving. |
+| `ida_codemode/database.py` | Protocol-agnostic database attachment, local selection, lease cleanup, and lifecycle events. |
 | `ida_codemode/runtime.py` | Serializes IDA operations onto IDA's main thread and provides the Code Mode Python runtime. |
-| `ida_codemode_mcp.py` | MCP tools, MCP-local database selection, agent metadata, and semantic session tracing. |
+| `ida_codemode_mcp.py` | ZeroMCP tools and error mapping, agent metadata, and semantic session tracing. |
 | `ida_codemode_dashboard.py` | Renders semantic session traces and linked Claude, Codex, or Pi transcripts. |
 
 ## State layout

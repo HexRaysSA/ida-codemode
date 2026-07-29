@@ -707,7 +707,7 @@ def _summary_index_row(summary: SessionSummary) -> str:
         f'<a href="{_e(href)}"><strong>{_e(summary.display_target)}</strong></a>'
         f'<div class="mono muted">{_e(summary.session_id)}</div>{agents}</td>'
         f'<td class="mono model" data-sort="{_e(models.lower())}">'
-        f'{model_cell}</td>'
+        f"{model_cell}</td>"
         f'<td class="date" data-sort="{_e(started_sort)}">{_e(_format_ts(summary.started))}</td>'
         f'<td class="date" data-sort="{_e(activity_sort)}">{_e(_format_ts(summary.last_activity))}</td>'
         f'<td data-sort="{_e(summary.status)}">{_status_badge(summary)} {errors}</td>'
@@ -1157,9 +1157,10 @@ def _tool_input_html(tool_name: str, tool_input: object) -> str:
     if isinstance(tool_input, dict):
         tool_input = {k: v for k, v in tool_input.items() if k != "_meta"}
         code = tool_input.get("code")
-        if _codemode_tool_name(tool_name) in ("execute_python", "search") and isinstance(
-            code, str
-        ):
+        if _codemode_tool_name(tool_name) in (
+            "execute_python",
+            "search",
+        ) and isinstance(code, str):
             rest = {k: v for k, v in tool_input.items() if k != "code"}
             parts = [_python_block(code)]
             if rest:
