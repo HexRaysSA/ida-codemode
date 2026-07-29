@@ -70,12 +70,18 @@ def _resolve_existing(
     source: str,
     expected_idb: str,
 ) -> RegistryEntry | None:
+    # Match on the case-insensitive identity key, never the real (case-preserving)
+    # path string: a GUI instance registered as Foo.exe.i64 must still match a
+    # lookup spelled foo.exe.i64 on case-insensitive volumes.
     if not source.lower().endswith(".i64"):
+        source_key = idb_key(source)
         gui = _single(
             [
                 item
                 for item in instances
-                if item.entry.backend == "gui" and item.entry.exe_path == source
+                if item.entry.backend == "gui"
+                and item.entry.exe_path
+                and idb_key(item.entry.exe_path) == source_key
             ],
             f"executable {source}",
         )
@@ -87,8 +93,9 @@ def _resolve_existing(
                 f"{gui.detail or 'health probe failed'}"
             )
 
+    expected_key = idb_key(expected_idb)
     owner = _single(
-        [item for item in instances if item.entry.idb_path == expected_idb],
+        [item for item in instances if item.entry.idb_key == expected_key],
         f"IDB {expected_idb}",
     )
     if owner is None:
@@ -248,11 +255,13 @@ def resolve_instance(
     if timeout <= 0:
         raise ValueError("timeout must be positive")
     source = canonical_path(path)
-    if not os.path.exists(source):
-        raise FileNotFoundError(source)
     expected_idb = expected_idb_path(source)
     deadline = time.monotonic() + timeout
 
+    # Match a live instance before touching the filesystem: a registered
+    # instance (e.g. an unsaved GUI database whose .i64 is not on disk yet) is
+    # valid even when the path does not exist. Only spawning a worker below
+    # needs a real file to open.
     instance = _resolve_existing(scan_instances(registry_dir), source, expected_idb)
     if instance is not None:
         return instance
@@ -270,6 +279,8 @@ def resolve_instance(
             return instance
         if not spawn:
             raise NoInstance(expected_idb)
+        if not os.path.exists(source):
+            raise FileNotFoundError(source)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(f"timed out resolving {expected_idb}")

@@ -192,6 +192,134 @@ def test_list_databases_prefers_existing_gui_executable(tmp_path: Path) -> None:
     assert result["instances"][0]["path"] == canonical_path(executable)
 
 
+def test_paths_preserve_case_but_matching_is_case_insensitive(tmp_path: Path) -> None:
+    # Regression: real paths must keep their on-disk case (so IDBs are created
+    # exactly as IDA would name them, not lowercased), while discovery matching
+    # stays case-insensitive on macOS/Windows and works for either the
+    # executable or the .i64 path.
+    import sys
+
+    from ida_codemode.resolver import expected_idb_path, resolve_instance
+
+    idb_path = tmp_path / "MixedCase.exe.i64"
+    executable = tmp_path / "MixedCase.exe"
+    idb_path.write_bytes(b"idb")
+    executable.write_bytes(b"binary")
+
+    # Real paths keep case; the fold lives only in the identity key.
+    assert canonical_path(executable).endswith("MixedCase.exe")
+    assert expected_idb_path(executable).endswith("MixedCase.exe.i64")
+
+    registry_dir = tmp_path / "instances"
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity(str(idb_path), str(executable), "gui"),
+        AnalysisState(),
+        registry_dir,
+    )
+    server.start()
+    assert server.entry is not None
+    try:
+        # The listed path preserves case (no more lowercase databases).
+        result = mcp_app._DatabaseManager(registry_dir).list_databases()
+        assert result["instances"][0]["path"].endswith("MixedCase.exe")
+
+        # The model may pass the executable or the .i64; both find the one
+        # instance without spawning a worker.
+        variants = [executable, idb_path]
+        if sys.platform in ("darwin", "win32"):
+            # Case-insensitive volumes: differently-cased spellings name the
+            # same file and must resolve to the same instance.
+            variants += [tmp_path / "mixedcase.exe", tmp_path / "mixedcase.exe.i64"]
+        record_ids = {
+            resolve_instance(str(p), spawn=False, registry_dir=registry_dir).record_id
+            for p in variants
+        }
+        assert record_ids == {server.entry.record_id}
+    finally:
+        server.stop()
+        server.release_registration()
+
+
+def test_resolves_live_instance_when_idb_not_on_disk(tmp_path: Path) -> None:
+    # Regression: a freshly-opened GUI database has no .i64 on disk until it is
+    # saved. Attaching to that live instance must work via either the .i64 path
+    # (which does not exist yet) or the executable path, without a premature
+    # "database path does not exist" rejection.
+    from ida_codemode.resolver import resolve_instance
+
+    executable = tmp_path / "Fresh.exe"
+    executable.write_bytes(b"binary")
+    idb_path = tmp_path / "Fresh.exe.i64"  # intentionally NOT created on disk
+    assert not idb_path.exists()
+
+    registry_dir = tmp_path / "instances"
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity(str(idb_path), str(executable), "gui"),
+        AnalysisState(),
+        registry_dir,
+    )
+    server.start()
+    assert server.entry is not None
+    try:
+        for lookup in (idb_path, executable):
+            entry = resolve_instance(
+                str(lookup), spawn=False, registry_dir=registry_dir
+            )
+            assert entry.record_id == server.entry.record_id
+    finally:
+        server.stop()
+        server.release_registration()
+
+
+def test_get_session_waits_for_in_flight_startup_open(tmp_path: Path) -> None:
+    # Regression: the agent's first tool call must not race a --database startup
+    # open. _get_session waits for the background thread to finish attaching.
+    manager = mcp_app._DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+    sentinel = object()
+
+    def _startup() -> None:
+        time.sleep(0.2)  # attach lands after the first tool call arrives
+        with manager._lock:
+            manager._instances["inst-1"] = sentinel  # type: ignore[assignment]
+            manager._current_instance_id = "inst-1"
+
+    thread = threading.Thread(target=_startup, daemon=True)
+    manager._startup_open_thread = thread
+    thread.start()
+
+    # A naive lookup would fail here; _get_session must block on the thread.
+    target_id, session = manager._get_session(None)
+    assert target_id == "inst-1"
+    assert session is sentinel
+
+
+def test_get_session_raises_without_startup_open(tmp_path: Path) -> None:
+    manager = mcp_app._DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+    try:
+        manager._get_session(None)
+    except mcp_app.McpToolError as exc:
+        assert "no open database instance" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected McpToolError")
+
+
+def test_get_session_raises_after_failed_startup_open(tmp_path: Path) -> None:
+    # A startup open that finishes without setting a current DB (i.e. it failed)
+    # must not hang the tool call: waiting ends when the thread ends.
+    manager = mcp_app._DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+    thread = threading.Thread(target=lambda: None, daemon=True)
+    manager._startup_open_thread = thread
+    thread.start()
+    try:
+        manager._get_session(None)
+    except mcp_app.McpToolError as exc:
+        assert "no open database instance" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected McpToolError")
+
+
 def test_gui_disconnect_invalidates_mcp_instance_without_spawning(tmp_path: Path) -> None:
     registry_dir = tmp_path / "instances"
     spawn_dir = tmp_path / "spawn"

@@ -45,19 +45,38 @@ def ensure_private_directory(path: str | os.PathLike[str]) -> Path:
 
 
 def canonical_path(path: str | os.PathLike[str]) -> str:
-    value = os.path.realpath(os.path.abspath(os.path.expanduser(os.fspath(path))))
+    """Resolve a path to its real, absolute form, preserving case.
+
+    This is the *real filesystem path*: it is what we open, create databases at,
+    hand to workers, and store/display in registry entries. Case is deliberately
+    preserved so an IDB is created exactly as IDA would name it (``Foo.exe.i64``,
+    not ``foo.exe.i64``). Case-insensitive identity matching lives entirely in
+    ``identity_key`` / ``idb_key`` and never leaks back into a path on disk.
+    """
+    return os.path.realpath(os.path.abspath(os.path.expanduser(os.fspath(path))))
+
+
+def identity_key(path: str | os.PathLike[str]) -> str:
+    """Fold a real path to a stable identity used for discovery/matching only.
+
+    On case-insensitive volumes (macOS, Windows) two spellings that differ only
+    in case name the same file, so they must resolve to one identity. This fold
+    is used solely to compare and deduplicate instances; the result is never used
+    as a path that touches the filesystem.
+    """
+    value = canonical_path(path)
     if sys.platform == "win32":
-        value = os.path.normcase(value)
-    elif sys.platform == "darwin":
+        return os.path.normcase(value)
+    if sys.platform == "darwin":
         # normcase() is a no-op in posixpath, while normal macOS volumes are
         # case-insensitive. This intentionally treats case-sensitive APFS the
         # same way so all Code Mode clients calculate one stable identity.
-        value = value.casefold()
+        return value.casefold()
     return value
 
 
 def idb_key(path: str | os.PathLike[str]) -> str:
-    return hashlib.sha256(canonical_path(path).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(identity_key(path).encode("utf-8")).hexdigest()[:16]
 
 
 class FileLock:

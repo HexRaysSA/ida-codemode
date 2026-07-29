@@ -43,6 +43,7 @@ from ida_codemode.registry import (
     SPAWN_DIR,
     RegistryEntry,
     canonical_path,
+    idb_key,
     scan_instances,
 )
 from ida_codemode.resolver import ResolveError, expected_idb_path
@@ -359,6 +360,10 @@ class _DatabaseManager:
         self._open_lock = threading.Lock()
         self._shutdown_started = False
         self._trace_lifecycle_started = False
+        # Background thread from a --database startup open, if any. Tool calls
+        # that need the current database wait on it so the agent's first call
+        # does not race the (deliberately non-blocking) startup open.
+        self._startup_open_thread: threading.Thread | None = None
 
     def _emit(self, event: str, **fields: Any) -> None:
         """Emit manager events only while this manager is serving an MCP session."""
@@ -413,9 +418,12 @@ class _DatabaseManager:
         )
 
     def open_database(self, path: str, *, set_current: bool) -> OpenDatabaseResult:
+        # Do NOT require the path to exist on disk here. A live instance (e.g. an
+        # unsaved GUI database whose .i64 has not been written yet) may be
+        # registered for this path; resolve_instance matches the registry first
+        # and only needs a real file when it must spawn a worker (where it
+        # raises FileNotFoundError, surfaced cleanly via _as_tool_error).
         resolved_path = _resolve_user_path(path)
-        if not Path(resolved_path).exists():
-            raise McpToolError(f"database path does not exist: {resolved_path}")
 
         # Serialize local opens so duplicate calls create at most one retained
         # lease in this MCP server. Other MCP servers retain their own leases.
@@ -520,15 +528,59 @@ class _DatabaseManager:
             "and is no longer valid; call list_databases() and open_database() again"
         )
 
-    def _get_session(self, instance_id: str | None) -> tuple[str, _DatabaseSession]:
+    def schedule_startup_open(self, path: str) -> None:
+        """Open and activate a database at startup so agents skip open_database().
+
+        Runs in a background daemon thread so opening (which may spawn a managed
+        idalib worker) never delays the MCP initialize handshake. The thread is
+        tracked so tool calls that need the current database can wait for it via
+        ``_await_startup_open`` instead of racing it. Agents may still call
+        open_database() themselves if the startup open ultimately fails.
+        """
+
+        def _open() -> None:
+            try:
+                self.open_database(path, set_current=True)
+                print(f"Startup database ready: {path}", file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001 - report and let agents retry
+                print(f"Startup open failed for {path!r}: {exc}", file=sys.stderr)
+
+        thread = threading.Thread(target=_open, name="startup-open", daemon=True)
+        self._startup_open_thread = thread
+        thread.start()
+
+    def _await_startup_open(self) -> None:
+        """Block until an in-flight startup open finishes (success or failure).
+
+        Called with no locks held: the startup thread's open_database() takes
+        ``self._lock`` / ``self._open_lock``, so joining while holding either
+        would deadlock. Bounded by the same budget a single open is allowed.
+        """
+        thread = self._startup_open_thread
+        if thread is not None and thread.is_alive():
+            thread.join(OPEN_TIMEOUT_SECONDS)
+
+    def _resolve_target_id(self, instance_id: str | None) -> str | None:
         with self._lock:
-            target_id = instance_id or self._current_instance_id
-            if target_id is None:
-                target_id = self._disconnected_default
-                if target_id is None:
-                    raise McpToolError(
-                        "no open database instance; call open_database() first"
-                    )
+            return (
+                instance_id
+                or self._current_instance_id
+                or self._disconnected_default
+            )
+
+    def _get_session(self, instance_id: str | None) -> tuple[str, _DatabaseSession]:
+        target_id = self._resolve_target_id(instance_id)
+        if target_id is None:
+            # No current database yet: a --database startup open may still be
+            # attaching in the background. Wait for it, then look again, so the
+            # agent's first call doesn't spuriously see "no open database".
+            self._await_startup_open()
+            target_id = self._resolve_target_id(instance_id)
+        if target_id is None:
+            raise McpToolError(
+                "no open database instance; call open_database() first"
+            )
+        with self._lock:
             session = self._instances.get(target_id)
             disconnected = self._disconnected_instances.get(target_id)
         if session is None and disconnected is not None:
@@ -588,7 +640,7 @@ class _DatabaseManager:
             and Path(entry.exe_path).exists()
             and (
                 entry.backend == "gui"
-                or expected_idb_path(entry.exe_path) == entry.idb_path
+                or idb_key(expected_idb_path(entry.exe_path)) == entry.idb_key
             )
         ):
             return entry.exe_path
@@ -823,25 +875,6 @@ def close_database(
     )
 
 
-def _schedule_startup_open(path: str) -> None:
-    """Open and activate a database at startup so agents can skip open_database().
-
-    Runs in a background daemon thread so opening (which may spawn a managed
-    idalib worker) never delays the MCP initialize handshake. The database
-    becomes the current target once the open completes; agents may still call
-    open_database() themselves if the startup open fails.
-    """
-
-    def _open() -> None:
-        try:
-            DATABASE_MANAGER.open_database(path, set_current=True)
-            print(f"Startup database ready: {path}", file=sys.stderr)
-        except Exception as exc:  # noqa: BLE001 - report and let agents retry
-            print(f"Startup open failed for {path!r}: {exc}", file=sys.stderr)
-
-    threading.Thread(target=_open, name="startup-open", daemon=True).start()
-
-
 def _serve(
     transport: str,
     database: str | None = None,
@@ -851,7 +884,7 @@ def _serve(
     DATABASE_MANAGER.start(transport, agent=agent)
 
     if database:
-        _schedule_startup_open(database)
+        DATABASE_MANAGER.schedule_startup_open(database)
 
     if transport == "stdio":
         try:
