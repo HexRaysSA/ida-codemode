@@ -392,6 +392,13 @@ table.sessions th::after { content: ""; opacity: 0.6; font-size: 10px; }
 table.sessions th.sort-asc::after { content: " \\2191"; }
 table.sessions th.sort-desc::after { content: " \\2193"; }
 table.sessions tr:last-child td { border-bottom: none; }
+table.sessions td.date { white-space: nowrap; }
+table.sessions td.model { white-space: nowrap; }
+table.sessions td.model > div + div { margin-top: 2px; }
+table.sessions th:first-child, table.sessions td:first-child {
+  max-width: 320px; width: 320px; }
+table.sessions td:first-child a { word-break: break-all; }
+.table-scroll { overflow-x: auto; }
 .badge { display: inline-block; padding: 1px 8px; border-radius: 10px;
   font-size: 11px; font-weight: 600; border: 1px solid var(--border); }
 .badge.claude { color: #b0530a; border-color: #b0530a55; }
@@ -683,7 +690,13 @@ def _summary_index_row(summary: SessionSummary) -> str:
         f"{summary.last_activity.timestamp():.6f}" if summary.last_activity else ""
     )
     href = f"/session/{quote(summary.path.name)}"
-    models = ", ".join(_session_model_names(summary))
+    model_names = _session_model_names(summary)
+    models = ", ".join(model_names)
+    model_cell = (
+        "".join(f"<div>{_e(name)}</div>" for name in model_names)
+        if model_names
+        else "—"
+    )
     agents = " ".join(
         _agent_link(kind, path)
         for kind, path in sorted(_summary_agent_sessions(summary))
@@ -693,10 +706,10 @@ def _summary_index_row(summary: SessionSummary) -> str:
         f'<td data-sort="{_e(summary.display_target.lower())}">'
         f'<a href="{_e(href)}"><strong>{_e(summary.display_target)}</strong></a>'
         f'<div class="mono muted">{_e(summary.session_id)}</div>{agents}</td>'
-        f'<td class="mono" data-sort="{_e(models.lower())}">'
-        f'{_e(models) if models else "—"}</td>'
-        f'<td data-sort="{_e(started_sort)}">{_e(_format_ts(summary.started))}</td>'
-        f'<td data-sort="{_e(activity_sort)}">{_e(_format_ts(summary.last_activity))}</td>'
+        f'<td class="mono model" data-sort="{_e(models.lower())}">'
+        f'{model_cell}</td>'
+        f'<td class="date" data-sort="{_e(started_sort)}">{_e(_format_ts(summary.started))}</td>'
+        f'<td class="date" data-sort="{_e(activity_sort)}">{_e(_format_ts(summary.last_activity))}</td>'
         f'<td data-sort="{_e(summary.status)}">{_status_badge(summary)} {errors}</td>'
         f'<td class="mono" data-sort="{_e(cost_sort)}">{cost}</td>'
         "</tr>"
@@ -715,6 +728,7 @@ def render_index() -> str:
     rows = "".join(_summary_index_row(summary) for summary in summaries)
     body = f"""
 <h2>Analysis sessions <span class="muted">({len(summaries)})</span></h2>
+<div class="table-scroll">
 <table class="sessions">
 <thead><tr>
   <th>Targets / session</th><th>Model</th>
@@ -723,6 +737,7 @@ def render_index() -> str:
 </tr></thead>
 <tbody>{rows}</tbody>
 </table>
+</div>
 <p class="muted" style="font-size:12px;margin-top:8px">Click a column header to sort.</p>
 """
     return _page("ida-codemode dashboard", body)
