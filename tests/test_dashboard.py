@@ -62,6 +62,37 @@ class TranscriptTests(unittest.TestCase):
         )
         self.assertIn("ida · execute_python", "".join(item.html for item in items))
 
+    def test_transcript_cache_replaces_changed_file_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pi.jsonl"
+            path.write_text(
+                json.dumps({"type": "session", "version": 3, "id": "pi-session"})
+                + "\n",
+                encoding="utf-8",
+            )
+            dashboard._AGENT_ITEMS_CACHE.clear()
+            first = dashboard._load_agent_items(str(path))
+
+            with path.open("a", encoding="utf-8") as file:
+                file.write(
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "message": {
+                                "role": "assistant",
+                                "model": "gpt-5.6",
+                                "content": [],
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            second = dashboard._load_agent_items(str(path))
+
+        self.assertEqual(len(dashboard._AGENT_ITEMS_CACHE), 1)
+        self.assertIsNot(first, second)
+        self.assertEqual(second[1]["model"], "gpt-5.6")
+
     def test_extracts_models_from_supported_agent_transcripts(self) -> None:
         self.assertEqual(
             dashboard._agent_models(

@@ -1671,7 +1671,13 @@ def _codex_session_totals(records: list[dict]) -> dict[str, Any]:
     return totals
 
 
-_AGENT_ITEMS_CACHE: dict[str, tuple[Any, ...]] = {}
+_AgentItemsResult = tuple[
+    list[TranscriptItem],
+    dict[str, str],
+    str,
+    dict[str, Any],
+]
+_AGENT_ITEMS_CACHE: dict[str, tuple[int, int, _AgentItemsResult]] = {}
 
 
 def _load_agent_items(
@@ -1688,12 +1694,17 @@ def _load_agent_items(
 
     try:
         stat = path.stat()
-        cache_key = f"{session_path}:{stat.st_mtime_ns}:{stat.st_size}"
+        cache_signature = (stat.st_mtime_ns, stat.st_size)
     except OSError:
-        cache_key = None
+        cache_signature = None
 
-    if cache_key is not None and cache_key in _AGENT_ITEMS_CACHE:
-        return _AGENT_ITEMS_CACHE[cache_key]
+    cached = _AGENT_ITEMS_CACHE.get(session_path)
+    if (
+        cache_signature is not None
+        and cached is not None
+        and cached[:2] == cache_signature
+    ):
+        return cached[2]
 
     records = _read_jsonl(path)
     kind = _detect_agent_kind(records)
@@ -1717,9 +1728,12 @@ def _load_agent_items(
     if models:
         meta["model"] = ", ".join(models)
 
-    result = (items, meta, kind, totals)
-    if cache_key is not None:
-        _AGENT_ITEMS_CACHE[cache_key] = result
+    result: _AgentItemsResult = (items, meta, kind, totals)
+    if cache_signature is not None:
+        # Replace the previous revision for this transcript. Active transcript
+        # files grow frequently, so retaining every (mtime, size) revision
+        # would otherwise keep complete historical renderings forever.
+        _AGENT_ITEMS_CACHE[session_path] = (*cache_signature, result)
     return result
 
 
