@@ -18,7 +18,14 @@ def _parser() -> argparse.ArgumentParser:
         prog="ida-codemode-worker",
         description="Open one executable in idalib and expose the IDA Code Mode API",
     )
-    parser.add_argument("input", type=Path, help="Executable or existing IDB to open")
+    parser.add_argument(
+        "input", nargs="?", type=Path, help="Executable or existing IDB to open"
+    )
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="Initialize idalib without opening a database, then exit",
+    )
     parser.add_argument(
         "--new-database",
         action="store_true",
@@ -49,6 +56,11 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def probe() -> None:
+    """Initialize idalib without opening a database."""
+    importlib.import_module("ida_domain")
+
+
 def _redirect_output(record_id: str) -> Path:
     directory = ensure_private_directory(LOG_DIR)
     path = directory / f"{record_id}.log"
@@ -64,7 +76,22 @@ def _redirect_output(record_id: str) -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.probe:
+        if args.input is not None:
+            parser.error("input cannot be used with --probe")
+        try:
+            probe()
+        except Exception as exc:  # noqa: BLE001 -- idalib may raise arbitrary errors
+            print(
+                f"[ida-codemode] idalib initialization failed: {exc}", file=sys.stderr
+            )
+            return 1
+        return 0
+    if args.input is None:
+        parser.error("the following arguments are required: input")
+
     suffix = args.record_suffix or os.urandom(3).hex()
     if len(suffix) != 6 or any(c not in "0123456789abcdef" for c in suffix):
         print("[ida-codemode] invalid record suffix", file=sys.stderr)
@@ -84,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     # Import ida-domain only after the process-specific log is installed. In
     # library mode it loads idapro first, which makes the IDAPython modules
     # available and records initialization failures in the worker log.
-    importlib.import_module("ida_domain")
+    probe()
 
     import ida_auto
     import ida_kernwin
