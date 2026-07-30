@@ -11,6 +11,17 @@
     "mcp"
   ],
   "repository": "https://github.com/HexRaysSA/ida-codemode-mcp.git",
+  "files": [
+    ".python-version",
+    "ida-codemode.ts",
+    "ida_codemode/*.py",
+    "ida_codemode_dashboard.py",
+    "ida_codemode_mcp.py",
+    "ida_codemode_plugin.py",
+    "migrate_logs.py",
+    "pyproject.toml",
+    "uv.lock"
+  ],
   "pi": {
     "extensions": [
       "./ida-codemode.ts"
