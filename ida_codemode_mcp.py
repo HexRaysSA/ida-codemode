@@ -12,6 +12,7 @@ This server exposes a compact Code Mode surface for the ida-domain API:
 import argparse
 import atexit
 import inspect
+import ipaddress
 import json
 import os
 import signal
@@ -383,7 +384,7 @@ def execute_python(
     return DATABASE_MANAGER.execute_python(code, instance_id)
 
 
-def _gui_plugin_installed():
+def _gui_plugin_installed() -> bool:
     """Check whether the ida-codemode-mcp GUI plugin is installed."""
     plugin_dir = get_idausr_dir() / "plugins" / "ida-codemode"
     plugin_manifest = plugin_dir / "ida-plugin.json"
@@ -467,6 +468,17 @@ def _serve(
     url = urlparse(transport)
     if url.hostname is None or url.port is None:
         raise ValueError(f"Invalid transport URL: {transport}")
+
+    try:
+        loopback = ipaddress.ip_address(url.hostname).is_loopback
+    except ValueError:
+        loopback = url.hostname.casefold() == "localhost"
+    if not loopback:
+        print(
+            "WARNING: MCP HTTP transport is bound to a non-loopback host without "
+            "built-in authentication; execute_python may be reachable over the network.",
+            file=sys.stderr,
+        )
 
     print("Starting IDA Code Mode MCP server...")
     print(

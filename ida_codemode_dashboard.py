@@ -9,6 +9,7 @@ Run with: ida-codemode-dashboard [--host 127.0.0.1] [--port 8736] [--open]
 
 import argparse
 import html
+import ipaddress
 import json
 import os
 import re
@@ -1854,6 +1855,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 
 def serve(host: str, port: int, open_browser: bool = False) -> None:
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host.casefold() == "localhost"
+    if not loopback:
+        print(
+            "WARNING: dashboard is bound to a non-loopback host without built-in "
+            "authentication; session traces may be reachable over the network."
+        )
+
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     url = f"http://{host}:{port}/"
     print(f"ida-codemode dashboard: {url}")
