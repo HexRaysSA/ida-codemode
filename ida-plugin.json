@@ -19,7 +19,7 @@
       "repository": "https://github.com/HexRaysSA/ida-codemode-mcp"
     },
     "pythonDependencies": [
-      "ida-domain @ git+https://github.com/HexRaysSA/ida-domain.git@include-docs-examples"
+      "ida-domain @ git+https://github.com/HexRaysSA/ida-domain.git@main"
     ]
   }
 }
