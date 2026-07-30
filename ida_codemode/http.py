@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import hmac
 import json
 import socketserver
@@ -44,7 +42,7 @@ def json_response(
 class RequestHandler(BaseHTTPRequestHandler):
     """Authenticated HTTP/1.1 handler with bounded request decoding."""
 
-    server: LocalHTTPServer
+    server: "LocalHTTPServer"
     server_version = "ida-codemode/0.2.0"
     sys_version = ""
     protocol_version = "HTTP/1.1"

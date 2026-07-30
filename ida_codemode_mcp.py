@@ -9,8 +9,6 @@ This server exposes a compact Code Mode surface for the ida-domain API:
 - close_database(...): release this MCP server's handle and lease
 """
 
-from __future__ import annotations
-
 import argparse
 import atexit
 import inspect

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import os
 import sys
 from pathlib import Path
@@ -17,7 +15,7 @@ from ida_codemode.server import CodeModeHTTPServer
 
 
 class ReadyToRunHook(ida_kernwin.UI_Hooks):
-    def __init__(self, plugin: CodeModePlugin) -> None:
+    def __init__(self, plugin: "CodeModePlugin") -> None:
         super().__init__()
         self.plugin = plugin
 

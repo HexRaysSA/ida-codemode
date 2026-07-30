@@ -5,8 +5,6 @@ Protocol adapters may subscribe to domain lifecycle events through ``on_event``;
 error presentation, request metadata, and tracing belong to those adapters.
 """
 
-from __future__ import annotations
-
 import threading
 import uuid
 from collections.abc import Callable

@@ -1,7 +1,5 @@
 """One-shot migration of pre-0.2 ida-codemode logs into semantic sessions."""
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json

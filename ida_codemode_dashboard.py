@@ -7,8 +7,6 @@ session as a timeline linked to its Claude Code, Codex, or Pi transcript.
 Run with: ida-codemode-dashboard [--host 127.0.0.1] [--port 8736] [--open]
 """
 
-from __future__ import annotations
-
 import argparse
 import html
 import json

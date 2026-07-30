@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import http.client
 import json
 import socket
@@ -46,7 +44,7 @@ class DatabaseHandle:
         path: str,
         entry: RegistryEntry,
         *,
-        on_disconnect: Callable[[DatabaseHandle, str], None] | None = None,
+        on_disconnect: Callable[["DatabaseHandle", str], None] | None = None,
     ) -> None:
         self.path = path
         self._on_disconnect = on_disconnect
@@ -76,8 +74,8 @@ class DatabaseHandle:
         timeout: float = 120.0,
         registry_dir: str | Path = REGISTRY_DIR,
         spawn_dir: str | Path = SPAWN_DIR,
-        on_disconnect: Callable[[DatabaseHandle, str], None] | None = None,
-    ) -> DatabaseHandle:
+        on_disconnect: Callable[["DatabaseHandle", str], None] | None = None,
+    ) -> "DatabaseHandle":
         entry = resolve_instance(
             path,
             spawn=spawn,
@@ -116,7 +114,7 @@ class DatabaseHandle:
 
     def set_disconnect_callback(
         self,
-        callback: Callable[[DatabaseHandle, str], None],
+        callback: Callable[["DatabaseHandle", str], None],
     ) -> None:
         self._on_disconnect = callback
         if self._disconnected.is_set():
