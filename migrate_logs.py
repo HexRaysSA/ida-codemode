@@ -22,6 +22,15 @@ _AGENT_FIELDS = {
 _GUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
+_UNSAFE_COMPONENT_RE = re.compile(r"[^A-Za-z0-9_-]+")
+_WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
 
 
 def _read_records(path: Path, report: list[str]) -> list[tuple[int, dict[str, Any]]]:
@@ -71,9 +80,12 @@ def _session_key(fields: dict[str, Any], source: Path) -> tuple[str, str]:
 
 
 def _safe_component(value: str) -> str:
-    value = "".join(c if c.isalnum() or c in "-_" else "-" for c in value)
-    value = re.sub(r"-+", "-", value).strip("-")
-    return value[:64] or "session"
+    value = _UNSAFE_COMPONENT_RE.sub("-", value)
+    value = re.sub(r"-+", "-", value).strip("-_")
+    value = value[:64] or "session"
+    if value.upper() in _WINDOWS_RESERVED_NAMES:
+        value = f"session-{value}"
+    return value
 
 
 def _session_id(key: tuple[str, str]) -> str:
@@ -462,8 +474,17 @@ def migrate(
         if not isinstance(server_id, str) or not server_id:
             report.append(f"ERROR {path} has no mcp_server_id")
             continue
+        safe_server_id = _safe_component(server_id)
+        if safe_server_id != server_id:
+            report.append(
+                f"SANITIZED {path}: mcp_server_id {server_id!r} -> {safe_server_id!r}"
+            )
         written += _write_session(
-            destination, server_id, records, dry_run=dry_run, report=report
+            destination,
+            safe_server_id,
+            records,
+            dry_run=dry_run,
+            report=report,
         )
 
     migrated, discarded = _translate_legacy(legacy, report, verbose=verbose)
