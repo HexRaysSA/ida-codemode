@@ -62,6 +62,7 @@ class DatabaseHandle:
         self._rpc_last_used: float | None = None
         self._lease_connection: http.client.HTTPConnection | None = None
         self._lease_response: http.client.HTTPResponse | None = None
+        self._lease_socket: socket.socket | None = None
         self._lease_thread: threading.Thread | None = None
         self._install_lease(entry)
         thread = threading.Thread(
@@ -133,7 +134,7 @@ class DatabaseHandle:
 
     def _open_lease(
         self, entry: RegistryEntry
-    ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+    ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse, socket.socket]:
         connection = http.client.HTTPConnection(HOST, entry.port, timeout=10.0)
         try:
             connection.request(
@@ -162,12 +163,15 @@ class DatabaseHandle:
         if lease_socket is None and response.fp is not None:
             raw = getattr(response.fp, "raw", None)
             lease_socket = getattr(raw, "_sock", None)
-        if lease_socket is not None:
-            lease_socket.settimeout(None)
-        return connection, response
+        if lease_socket is None:
+            response.close()
+            connection.close()
+            raise ClientError("failed to establish instance lease: socket unavailable")
+        lease_socket.settimeout(None)
+        return connection, response, lease_socket
 
     def _install_lease(self, entry: RegistryEntry) -> None:
-        connection, response = self._open_lease(entry)
+        connection, response, lease_socket = self._open_lease(entry)
         with self._lock:
             if self._closed.is_set():
                 response.close()
@@ -175,9 +179,16 @@ class DatabaseHandle:
                 raise ClientError("database handle is closed")
             old_response = self._lease_response
             old_connection = self._lease_connection
+            old_socket = self._lease_socket
             self._entry = entry
             self._lease_connection = connection
             self._lease_response = response
+            self._lease_socket = lease_socket
+        if old_socket is not None:
+            try:
+                old_socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         if old_response is not None:
             old_response.close()
         if old_connection is not None:
@@ -208,6 +219,7 @@ class DatabaseHandle:
             rpc_connection = self._rpc_connection
             self._lease_response = None
             self._lease_connection = None
+            self._lease_socket = None
             self._rpc_connection = None
             self._rpc_last_used = None
         if response is not None:
@@ -272,6 +284,7 @@ class DatabaseHandle:
         payload: dict[str, Any],
         *,
         timeout: float | None = None,
+        unwrap_result: bool = True,
     ) -> Any:
         body = json.dumps(payload).encode("utf-8")
         with self._request_lock:
@@ -319,7 +332,7 @@ class DatabaseHandle:
             raise ClientError("Code Mode response was not valid JSON") from exc
         if not isinstance(response_payload, dict):
             raise ClientError("Code Mode response was not a JSON object")
-        if status != 200 or not response_payload.get("ok"):
+        if status != 200 or (unwrap_result and not response_payload.get("ok")):
             error = response_payload.get("error")
             if isinstance(error, dict):
                 details = {
@@ -334,7 +347,7 @@ class DatabaseHandle:
                     details,
                 )
             raise ClientError(f"Code Mode request failed with HTTP {status}")
-        return response_payload.get("result")
+        return response_payload.get("result") if unwrap_result else response_payload
 
     def execute_python(self, code: str, timeout: float | None = None) -> Any:
         payload: dict[str, Any] = {"code": code}
@@ -347,55 +360,16 @@ class DatabaseHandle:
 
     def wait_autoanalysis(self, timeout: float | None = None) -> dict[str, Any]:
         """Wait for initial autoanalysis through the public Code Mode route."""
-        if self._closed.is_set():
-            raise ClientError("database handle is closed")
-        if self._disconnected.is_set():
-            raise InstanceDisconnectedError(
-                self._disconnect_reason or "database instance disconnected"
-            )
-        entry = self.entry
         payload: dict[str, Any] = {}
         if timeout is not None:
             payload["timeout"] = timeout
-        request = Request(
-            f"http://{HOST}:{entry.port}/wait_autoanalysis",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {entry.token}",
-            },
-            method="POST",
-        )
         http_timeout = None if timeout is None else timeout + 5.0
-        try:
-            with urlopen(request, timeout=http_timeout) as response:
-                result = json.loads(response.read())
-                status = response.status
-        except HTTPError as exc:
-            status = exc.code
-            try:
-                result = json.loads(exc.read())
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                raise ClientError(
-                    f"Code Mode request failed with HTTP {status}"
-                ) from exc
-        except (TimeoutError, URLError, OSError) as exc:
-            raise ClientError(f"Code Mode request failed: {exc}") from exc
-        if status != 200:
-            error = result.get("error") if isinstance(result, dict) else None
-            if isinstance(error, dict):
-                raise RemoteError(
-                    str(error.get("code", "remote_error")),
-                    str(error.get("message", "Code Mode request failed")),
-                    status,
-                    {
-                        str(key): value
-                        for key, value in error.items()
-                        if key not in {"code", "message"}
-                    },
-                )
-            raise ClientError(f"Code Mode request failed with HTTP {status}")
+        result = self._request(
+            "/wait_autoanalysis",
+            payload,
+            timeout=http_timeout,
+            unwrap_result=False,
+        )
         if not isinstance(result, dict) or not isinstance(result.get("complete"), bool):
             raise ClientError("wait_autoanalysis returned an invalid result")
         return result
@@ -413,25 +387,44 @@ class DatabaseHandle:
         with self._lock:
             response = self._lease_response
             connection = self._lease_connection
+            lease_socket = self._lease_socket
             rpc_connection = self._rpc_connection
             thread = self._lease_thread
             self._lease_response = None
             self._lease_connection = None
+            self._lease_socket = None
             self._rpc_connection = None
             self._rpc_last_used = None
-        if connection is not None and connection.sock is not None:
+        if lease_socket is not None:
             try:
-                connection.sock.shutdown(socket.SHUT_RDWR)
+                lease_socket.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-        if response is not None:
-            response.close()
-        if connection is not None:
-            connection.close()
+        # On Windows, shutdown() does not wake a BufferedReader blocked in
+        # readline() when HTTPResponse owns the socket through SocketIO. Close
+        # that raw stream directly; HTTPResponse.close() would instead wait for
+        # the BufferedReader lock until the next SSE heartbeat.
+        raw_stream = None
+        if response is not None and response.fp is not None:
+            raw_stream = getattr(response.fp, "raw", None)
+        if raw_stream is not None:
+            try:
+                raw_stream.close()
+            except OSError:
+                pass
         if rpc_connection is not None:
             rpc_connection.close()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
+        if response is not None:
+            try:
+                response.close()
+            except (OSError, ValueError):
+                # The raw stream was intentionally closed above to wake the
+                # monitor; HTTPResponse.flush() may observe that closed stream.
+                pass
+        if connection is not None:
+            connection.close()
 
     disconnect = close
 

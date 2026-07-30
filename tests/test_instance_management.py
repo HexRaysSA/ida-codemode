@@ -124,6 +124,40 @@ def test_resolver_timeout_is_shared_across_registry_probes(
     assert time.monotonic() - started < 0.15
 
 
+def test_handle_close_does_not_wait_for_sse_heartbeat(tmp_path: Path) -> None:
+    executable = tmp_path / "sample.exe"
+    idb_path = tmp_path / "sample.exe.i64"
+    executable.write_bytes(b"binary")
+    idb_path.write_bytes(b"idb")
+    registry_dir = tmp_path / "instances"
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity(str(idb_path), str(executable), "gui"),
+        AnalysisState(),
+        registry_dir,
+        heartbeat_interval=30.0,
+    )
+    server.start()
+    handle = DatabaseHandle.open(
+        str(executable),
+        spawn=False,
+        registry_dir=registry_dir,
+        spawn_dir=tmp_path / "spawn",
+    )
+    try:
+        # Let the monitor consume the initial event and block waiting for the
+        # deliberately distant heartbeat.
+        time.sleep(0.05)
+        started = time.monotonic()
+        handle.close()
+        elapsed = time.monotonic() - started
+        assert elapsed < 1.0
+    finally:
+        handle.close()
+        server.stop()
+        server.release_registration()
+
+
 def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
     executable = tmp_path / "sample.exe"
     funny_idb = tmp_path / "saved-elsewhere.i64"
