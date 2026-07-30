@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import inspect
 import json
 import os
 import signal
@@ -25,8 +26,9 @@ from collections.abc import Callable
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from enum import Enum
+from functools import wraps
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, ParamSpec, TypeVar
 from urllib.parse import urlparse
 
 from zeromcp import McpServer, McpToolError
@@ -54,30 +56,6 @@ OPEN_TIMEOUT_SECONDS = 300
 EXECUTE_TIMEOUT_SECONDS = 300
 
 mcp = McpServer("ida", version="0.2.0")
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(UTC).isoformat()
-
-
-def _session_fields() -> dict[str, Any]:
-    try:
-        meta = mcp.context.meta or {}
-    except (AttributeError, LookupError, RuntimeError):
-        # Shutdown and asynchronous database events may have no MCP request.
-        meta = {}
-    fields: dict[str, Any] = {
-        "codemode_id": os.environ.get("IDA_CODEMODE_ID") or None,
-    }
-    for name in (
-        "claude_session_path",
-        "codex_session_path",
-        "pi_session_path",
-    ):
-        value = meta.get(name)
-        if isinstance(value, str) and value:
-            fields[name] = value
-    return fields
 
 
 def _trace_jsonable(value: Any) -> Any:
@@ -113,7 +91,7 @@ class _TraceLogger:
     def emit(self, event: str, **fields: Any) -> None:
         record = {
             "schema": 1,
-            "ts": _utc_now_iso(),
+            "ts": datetime.now(UTC).isoformat(),
             "mcp_server_id": self.server_id,
             "pid": os.getpid(),
             "event": event,
@@ -139,6 +117,26 @@ class _TraceLogger:
 
 
 TRACE = _TraceLogger()
+
+
+def _session_fields() -> dict[str, Any]:
+    try:
+        meta = mcp.context.meta or {}
+    except (AttributeError, LookupError, RuntimeError):
+        # Shutdown and asynchronous database events may have no MCP request.
+        meta = {}
+    fields: dict[str, Any] = {
+        "codemode_id": os.environ.get("IDA_CODEMODE_ID") or None,
+    }
+    for name in (
+        "claude_session_path",
+        "codex_session_path",
+        "pi_session_path",
+    ):
+        value = meta.get(name)
+        if isinstance(value, str) and value:
+            fields[name] = value
+    return fields
 
 
 def _install_initialize_trace_adapter() -> None:
@@ -268,60 +266,58 @@ def _shutdown_server_state() -> None:
 atexit.register(_shutdown_server_state)
 
 
-def _run_traced_tool(
-    tool: str,
-    arguments: dict[str, Any],
-    action: Callable[[], Any],
-) -> Any:
-    call_id = uuid.uuid4().hex
-    session = _session_fields()
-    TRACE.emit(
-        "tool_call",
-        call_id=call_id,
-        tool=tool,
-        session=session,
-        input=arguments,
-    )
-    started = time.monotonic()
-    try:
-        result = action()
-    except Exception as error:
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def tool(func: Callable[P, R]) -> Callable[P, R]:
+    """Register an MCP tool and trace each invocation."""
+    signature = inspect.signature(func)
+
+    @wraps(func)
+    def traced(*args: P.args, **kwargs: P.kwargs) -> R:
+        name = getattr(func, "__name__", "<unnamed>")
+        arguments = signature.bind(*args, **kwargs)
+        arguments.apply_defaults()
+        call_id = uuid.uuid4().hex
+        session = _session_fields()
         TRACE.emit(
-            "tool_error",
+            "tool_call",
             call_id=call_id,
-            tool=tool,
+            tool=name,
+            session=session,
+            input=dict(arguments.arguments),
+        )
+        started = time.monotonic()
+        try:
+            result = func(*args, **kwargs)
+        except Exception as error:
+            TRACE.emit(
+                "tool_error",
+                call_id=call_id,
+                tool=name,
+                session=session,
+                duration_ms=round((time.monotonic() - started) * 1000, 3),
+                error=_error_fields(error),
+            )
+            tool_error = _as_tool_error(error)
+            if tool_error is error:
+                raise
+            raise tool_error from error
+        TRACE.emit(
+            "tool_result",
+            call_id=call_id,
+            tool=name,
             session=session,
             duration_ms=round((time.monotonic() - started) * 1000, 3),
-            error=_error_fields(error),
+            output=result,
         )
-        tool_error = _as_tool_error(error)
-        if tool_error is error:
-            raise
-        raise tool_error from error
-    TRACE.emit(
-        "tool_result",
-        call_id=call_id,
-        tool=tool,
-        session=session,
-        duration_ms=round((time.monotonic() - started) * 1000, 3),
-        output=result,
-    )
-    return result
+        return result
+
+    return mcp.tool(traced)
 
 
-def _install_server_shutdown_handlers() -> None:
-    def cleanup_and_exit(signum: int, _frame: Any) -> None:
-        _shutdown_server_state()
-        try:
-            mcp.stop()
-        finally:
-            raise SystemExit(128 + signum)
-
-    signal.signal(signal.SIGINT, cleanup_and_exit)
-    signal.signal(signal.SIGTERM, cleanup_and_exit)
-
-
-@mcp.tool
+@tool
 def reference(
     query: Annotated[
         str,
@@ -330,9 +326,7 @@ def reference(
 ) -> str:
     """Look up the active ida-domain API and return a plain-text IDA reference."""
 
-    return _run_traced_tool(
-        "reference", {"query": query}, lambda: render_reference(query)
-    )
+    return render_reference(query)
 
 
 class OpenDatabaseToolResult(OpenDatabaseResult):
@@ -341,7 +335,19 @@ class OpenDatabaseToolResult(OpenDatabaseResult):
     hint: str
 
 
-def _open_database_result(path: str, set_current: bool) -> OpenDatabaseToolResult:
+@tool
+def open_database(
+    path: Annotated[
+        str,
+        "Path to a local executable or IDB. A GUI instance is used when available.",
+    ],
+    set_current: Annotated[
+        bool,
+        "Whether this database should become the default target for execute_python().",
+    ] = True,
+) -> OpenDatabaseToolResult:
+    """Attach to a GUI database or shared managed idalib worker."""
+
     result = DATABASE_MANAGER.open_database(path, set_current=set_current)
     session = _session_fields()
     codemode_id = session.get("codemode_id")
@@ -356,27 +362,7 @@ def _open_database_result(path: str, set_current: bool) -> OpenDatabaseToolResul
     )
 
 
-@mcp.tool
-def open_database(
-    path: Annotated[
-        str,
-        "Path to a local executable or IDB. A GUI instance is used when available.",
-    ],
-    set_current: Annotated[
-        bool,
-        "Whether this database should become the default target for execute_python().",
-    ] = True,
-) -> OpenDatabaseToolResult:
-    """Attach to a GUI database or shared managed idalib worker."""
-
-    return _run_traced_tool(
-        "open_database",
-        {"path": path, "set_current": set_current},
-        lambda: _open_database_result(path, set_current),
-    )
-
-
-@mcp.tool
+@tool
 def execute_python(
     code: Annotated[
         str,
@@ -396,25 +382,17 @@ def execute_python(
 ) -> PythonExecutionResult:
     """Execute Python and return its result plus captured stdout and stderr."""
 
-    return _run_traced_tool(
-        "execute_python",
-        {"code": code, "instance_id": instance_id},
-        lambda: DATABASE_MANAGER.execute_python(code, instance_id),
-    )
+    return DATABASE_MANAGER.execute_python(code, instance_id)
 
 
-@mcp.tool
+@tool
 def list_databases() -> ListDatabasesResult:
     """Discover registered GUI and idalib databases, including local attachments."""
 
-    return _run_traced_tool(
-        "list_databases",
-        {},
-        DATABASE_MANAGER.list_databases,
-    )
+    return DATABASE_MANAGER.list_databases()
 
 
-@mcp.tool
+@tool
 def save_database(
     instance_id: Annotated[
         str | None,
@@ -423,14 +401,10 @@ def save_database(
 ) -> SaveDatabaseResult:
     """Explicitly save an active GUI or idalib database."""
 
-    return _run_traced_tool(
-        "save_database",
-        {"instance_id": instance_id},
-        lambda: DATABASE_MANAGER.save_database(instance_id),
-    )
+    return DATABASE_MANAGER.save_database(instance_id)
 
 
-@mcp.tool
+@tool
 def close_database(
     instance_id: Annotated[
         str | None,
@@ -443,11 +417,19 @@ def close_database(
     exits after its lease grace period. GUI databases are never closed here.
     """
 
-    return _run_traced_tool(
-        "close_database",
-        {"instance_id": instance_id},
-        lambda: DATABASE_MANAGER.close_database(instance_id),
-    )
+    return DATABASE_MANAGER.close_database(instance_id)
+
+
+def _install_server_shutdown_handlers() -> None:
+    def cleanup_and_exit(signum: int, _frame: Any) -> None:
+        _shutdown_server_state()
+        try:
+            mcp.stop()
+        finally:
+            raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGINT, cleanup_and_exit)
+    signal.signal(signal.SIGTERM, cleanup_and_exit)
 
 
 def _serve(
