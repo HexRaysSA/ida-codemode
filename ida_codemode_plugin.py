@@ -115,7 +115,13 @@ class CodeModePlugin(idaapi.plugin_t):
         try:
             server.start()
         except Exception:
-            database.unhook()
+            try:
+                database.unhook()
+            finally:
+                # start() may have acquired the lifetime lock before HTTP
+                # startup or publication failed. Release it only after the
+                # ida-domain database has detached from the GUI IDB.
+                server.release_registration()
             raise
         self._runtime = runtime
         self._server = server
