@@ -81,15 +81,25 @@ class DatabaseHandle:
         timeout: float = 120.0,
         registry_dir: str | Path = REGISTRY_DIR,
         spawn_dir: str | Path = SPAWN_DIR,
+        output_database: str | Path | None = None,
+        processor: str | None = None,
+        loading_address: int | None = None,
+        file_type: str | None = None,
+        new_database: bool = False,
         on_disconnect: Callable[["DatabaseHandle", str], None] | None = None,
     ) -> "DatabaseHandle":
-        entry = resolve_instance(
-            path,
-            spawn=spawn,
-            timeout=timeout,
-            registry_dir=registry_dir,
-            spawn_dir=spawn_dir,
-        )
+        resolve_options = {
+            "spawn": spawn,
+            "timeout": timeout,
+            "registry_dir": registry_dir,
+            "spawn_dir": spawn_dir,
+            "output_database": output_database,
+            "processor": processor,
+            "loading_address": loading_address,
+            "file_type": file_type,
+            "new_database": new_database,
+        }
+        entry = resolve_instance(path, **resolve_options)
         try:
             return cls(path, entry, on_disconnect=on_disconnect)
         except ClientError:
@@ -97,13 +107,7 @@ class DatabaseHandle:
             # resolve and the SSE handshake. Resolve once more as promised by
             # the instance lifecycle contract.
             time.sleep(0.05)
-            replacement = resolve_instance(
-                path,
-                spawn=spawn,
-                timeout=timeout,
-                registry_dir=registry_dir,
-                spawn_dir=spawn_dir,
-            )
+            replacement = resolve_instance(path, **resolve_options)
             return cls(path, replacement, on_disconnect=on_disconnect)
 
     @property
@@ -150,6 +154,16 @@ class DatabaseHandle:
             raise ClientError(
                 f"failed to establish instance lease: HTTP {response.status}: {body}"
             )
+        # The 10-second timeout bounds only the handshake. A lease is an
+        # indefinite SSE stream; leaving that timeout on the socket can falsely
+        # disconnect healthy instances if a heartbeat is delayed by scheduling
+        # or system sleep.
+        lease_socket = connection.sock
+        if lease_socket is None and response.fp is not None:
+            raw = getattr(response.fp, "raw", None)
+            lease_socket = getattr(raw, "_sock", None)
+        if lease_socket is not None:
+            lease_socket.settimeout(None)
         return connection, response
 
     def _install_lease(self, entry: RegistryEntry) -> None:
@@ -330,6 +344,61 @@ class DatabaseHandle:
         # operation-timeout response.
         http_timeout = None if timeout is None else timeout + 5.0
         return self._request("/execute_python", payload, timeout=http_timeout)
+
+    def wait_autoanalysis(self, timeout: float | None = None) -> dict[str, Any]:
+        """Wait for initial autoanalysis through the public Code Mode route."""
+        if self._closed.is_set():
+            raise ClientError("database handle is closed")
+        if self._disconnected.is_set():
+            raise InstanceDisconnectedError(
+                self._disconnect_reason or "database instance disconnected"
+            )
+        entry = self.entry
+        payload: dict[str, Any] = {}
+        if timeout is not None:
+            payload["timeout"] = timeout
+        request = Request(
+            f"http://{HOST}:{entry.port}/wait_autoanalysis",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {entry.token}",
+            },
+            method="POST",
+        )
+        http_timeout = None if timeout is None else timeout + 5.0
+        try:
+            with urlopen(request, timeout=http_timeout) as response:
+                result = json.loads(response.read())
+                status = response.status
+        except HTTPError as exc:
+            status = exc.code
+            try:
+                result = json.loads(exc.read())
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise ClientError(
+                    f"Code Mode request failed with HTTP {status}"
+                ) from exc
+        except (TimeoutError, URLError, OSError) as exc:
+            raise ClientError(f"Code Mode request failed: {exc}") from exc
+        if status != 200:
+            error = result.get("error") if isinstance(result, dict) else None
+            if isinstance(error, dict):
+                raise RemoteError(
+                    str(error.get("code", "remote_error")),
+                    str(error.get("message", "Code Mode request failed")),
+                    status,
+                    {
+                        str(key): value
+                        for key, value in error.items()
+                        if key not in {"code", "message"}
+                    },
+                )
+            raise ClientError(f"Code Mode request failed with HTTP {status}")
+        if not isinstance(result, dict) or not isinstance(result.get("complete"), bool):
+            raise ClientError("wait_autoanalysis returned an invalid result")
+        return result
 
     def save_database(self) -> dict[str, Any]:
         result = self._request("/save_database", {}, timeout=305.0)

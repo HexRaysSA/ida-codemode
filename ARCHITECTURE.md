@@ -102,12 +102,16 @@ disk permanently to avoid split-inode locking races.
 3. Otherwise find the unique owner of the expected IDB.
 4. Return a `READY` owner or report a lock-held `BLOCKED` owner.
 5. Acquire `spawn/<idb-key>.lock` and repeat the scan.
-6. If still absent, start the `ida-codemode-worker` console script as a detached managed worker.
-7. Wait for a record with both the child PID and expected IDB key.
+6. If still absent, start the `ida-codemode-worker` console script as a hidden,
+   detached managed worker.
+7. Wait for a record with the expected IDB key and launch identity. Normally the
+   PID is sufficient; on Windows the console launcher can hand off to a Python
+   child, so the random record suffix is authoritative across both processes.
 
 The spawn lock is held until the child becomes ready or fails. Startup waiting
-checks `Popen.poll()` and includes the tail of `logs/<record-id>.log` when the
-child exits, so import, licensing, and IDA load failures are reported directly.
+checks `Popen.poll()` without mistaking a successful Windows launcher handoff
+for worker exit, and includes the tail of `logs/<record-id>.log` when startup
+fails, so import, licensing, and IDA load failures are reported directly.
 
 IDA itself remains the final protection against an unregistered IDA process or
 a race with an independently opened GUI.

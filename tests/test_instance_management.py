@@ -1,8 +1,10 @@
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import ida_codemode.resolver as resolver_mod
 import ida_codemode_mcp as mcp_app
 from ida_codemode.client import DatabaseHandle
 from ida_codemode.database import DatabaseError, DatabaseManager
@@ -143,6 +145,18 @@ def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
         )
         assert entry.backend == "gui"
         assert entry.idb_path.endswith("saved-elsewhere.i64")
+        try:
+            resolve_instance(
+                executable,
+                spawn=False,
+                new_database=True,
+                registry_dir=tmp_path / "instances",
+                spawn_dir=tmp_path / "spawn",
+            )
+        except resolver_mod.IdbBusy as exc:
+            assert "cannot create a fresh database" in str(exc)
+        else:
+            raise AssertionError("fresh open reused a live GUI owner")
     finally:
         server.stop()
         server.release_registration()
@@ -511,6 +525,72 @@ def test_database_handle_reuses_http11_rpc_connection(tmp_path: Path) -> None:
         server.release_registration()
 
 
+def test_windows_console_launcher_can_exit_before_worker_child() -> None:
+    assert resolver_mod._launcher_exit_is_fatal(0, "nt") is False
+    assert resolver_mod._launcher_exit_is_fatal(1, "nt") is True
+    assert resolver_mod._launcher_exit_is_fatal(0, "posix") is True
+
+
+def test_fresh_worker_opens_source_instead_of_existing_idb(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "sample.exe"
+    expected_idb = tmp_path / "sample.exe.i64"
+    source.write_bytes(b"binary")
+    expected_idb.write_bytes(b"old idb")
+    captured = {}
+
+    def fake_popen(command, **kwargs):
+        captured.update(command=command, **kwargs)
+        return SimpleNamespace(pid=123)
+
+    monkeypatch.setattr(resolver_mod, "_find_console_script", lambda name: "worker")
+    monkeypatch.setattr(resolver_mod.subprocess, "Popen", fake_popen)
+    _process, _log = resolver_mod.spawn_worker(
+        str(source),
+        str(expected_idb),
+        20.0,
+        resolver_mod.WorkerLaunchOptions(new_database=True),
+    )
+
+    command = captured["command"]
+    assert command[1] == str(source)
+    assert command[command.index("--output-database") + 1] == str(expected_idb)
+    assert "--new-database" in command
+    if resolver_mod.os.name == "nt":
+        assert captured["creationflags"] & resolver_mod.subprocess.CREATE_NO_WINDOW
+        assert not captured["creationflags"] & resolver_mod.subprocess.DETACHED_PROCESS
+
+
+def test_await_ready_accepts_console_launcher_child_pid(
+    tmp_path: Path, monkeypatch
+) -> None:
+    expected_idb = str(tmp_path / "sample.i64")
+    entry = SimpleNamespace(
+        pid=222,
+        record_id="222-abcdef",
+        idb_key=resolver_mod.idb_key(expected_idb),
+        idb_path=expected_idb,
+    )
+    discovered = SimpleNamespace(
+        entry=entry,
+        state=resolver_mod.InstanceState.READY,
+        detail=None,
+    )
+    process = SimpleNamespace(pid=111, poll=lambda: None)
+    monkeypatch.setattr(resolver_mod, "scan_instances", lambda *args, **kwargs: [discovered])
+
+    result = resolver_mod._await_ready(
+        process,
+        expected_idb,
+        tmp_path / "111-abcdef.log",
+        time.monotonic() + 1,
+        tmp_path / "instances",
+    )
+
+    assert result is entry
+
+
 def test_multiple_leases_share_one_managed_server(tmp_path: Path) -> None:
     stopped = threading.Event()
     server = CodeModeHTTPServer(
@@ -533,6 +613,10 @@ def test_multiple_leases_share_one_managed_server(tmp_path: Path) -> None:
         assert second.execute_python("lambda: 1", 1) == {
             "code": "lambda: 1",
             "timeout": 1.0,
+        }
+        assert second.wait_autoanalysis(1) == {
+            "status": "complete",
+            "complete": True,
         }
     finally:
         second.close()

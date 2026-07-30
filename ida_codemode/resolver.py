@@ -4,6 +4,7 @@ import sys
 import sysconfig
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from .registry import (
@@ -42,7 +43,20 @@ class WorkerStartError(ResolveError):
     pass
 
 
-WorkerSpawner = Callable[[str, str, float], tuple[subprocess.Popen[bytes], Path]]
+@dataclass(frozen=True)
+class WorkerLaunchOptions:
+    """Import options used only when a new idalib worker must be spawned."""
+
+    processor: str | None = None
+    loading_address: int | None = None
+    file_type: str | None = None
+    new_database: bool = False
+
+
+WorkerSpawner = Callable[
+    [str, str, float, WorkerLaunchOptions],
+    tuple[subprocess.Popen[bytes], Path],
+]
 
 
 def expected_idb_path(path: str | os.PathLike[str]) -> str:
@@ -139,9 +153,17 @@ def spawn_worker(
     source: str,
     expected_idb: str,
     lease_grace: float,
+    options: WorkerLaunchOptions | None = None,
 ) -> tuple[subprocess.Popen[bytes], Path]:
+    options = options or WorkerLaunchOptions()
     suffix = os.urandom(3).hex()
-    input_path = expected_idb if os.path.exists(expected_idb) else source
+    # A fresh database must be created from the original input, never by
+    # reopening the old IDB that is about to be replaced.
+    input_path = (
+        source
+        if options.new_database
+        else expected_idb if os.path.exists(expected_idb) else source
+    )
     worker = _find_console_script("ida-codemode-worker")
     if worker is None:
         raise ResolveError(
@@ -159,6 +181,14 @@ def spawn_worker(
     ]
     if input_path == source and source != expected_idb:
         command.extend(["--output-database", expected_idb])
+    if options.processor:
+        command.extend(["--processor", options.processor])
+    if options.loading_address is not None:
+        command.extend(["--loading-address", hex(options.loading_address)])
+    if options.file_type:
+        command.extend(["--file-type", options.file_type])
+    if options.new_database:
+        command.append("--new-database")
 
     process: subprocess.Popen[bytes]
     if os.name == "nt":
@@ -169,7 +199,7 @@ def spawn_worker(
             stderr=subprocess.DEVNULL,
             text=False,
             creationflags=(
-                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
             ),
         )
     else:
@@ -212,6 +242,12 @@ def _scan_until(
     )
 
 
+def _launcher_exit_is_fatal(returncode: int, platform: str) -> bool:
+    """Whether a launcher exit proves that no worker child can become ready."""
+
+    return platform != "nt" or returncode != 0
+
+
 def _await_ready(
     process: subprocess.Popen[bytes],
     expected_idb: str,
@@ -220,19 +256,16 @@ def _await_ready(
     registry_dir: str | os.PathLike[str],
 ) -> RegistryEntry:
     expected_key = idb_key(expected_idb)
+    # Windows console-script launchers may keep a wrapper PID while Python runs
+    # the worker as a child. The random suffix is passed explicitly to that
+    # worker and is therefore the stable launch identity across both processes.
+    record_suffix = log_path.stem.rsplit("-", 1)[-1]
     last_detail: str | None = None
+    actual_log_path = log_path
     while True:
-        returncode = process.poll()
-        if returncode is not None:
-            tail = _log_tail(log_path)
-            message = f"idalib worker {process.pid} exited with status {returncode}"
-            if tail:
-                message += f"\n\n{tail}"
-            raise WorkerStartError(message)
-
         now = time.monotonic()
         if now >= deadline:
-            tail = _log_tail(log_path)
+            tail = _log_tail(actual_log_path)
             message = f"timed out waiting for idalib worker {process.pid}"
             if last_detail:
                 message += f": {last_detail}"
@@ -250,17 +283,43 @@ def _await_ready(
             # Let the top of the loop produce the worker-specific timeout with
             # any available startup log and last health detail.
             continue
+        matched_record = False
         for instance in instances:
-            if instance.entry.pid != process.pid:
+            entry = instance.entry
+            launched_by_us = entry.pid == process.pid or entry.record_id.endswith(
+                f"-{record_suffix}"
+            )
+            if not launched_by_us:
                 continue
-            if instance.entry.idb_key != expected_key:
+            matched_record = True
+            actual_log_path = log_path.with_name(f"{entry.record_id}.log")
+            if entry.idb_key != expected_key:
                 raise WorkerStartError(
-                    f"worker {process.pid} opened {instance.entry.idb_path}, "
+                    f"worker {entry.pid} opened {entry.idb_path}, "
                     f"expected {expected_idb}"
                 )
             if instance.state is InstanceState.READY:
-                return instance.entry
+                return entry
             last_detail = instance.detail
+
+        returncode = process.poll()
+        if returncode is not None and not matched_record:
+            matches = list(log_path.parent.glob(f"*-{record_suffix}.log"))
+            if matches:
+                actual_log_path = max(matches, key=lambda path: path.stat().st_mtime)
+            # uv/pip console-script launchers on Windows can exit successfully
+            # after starting the real Python worker under a different PID. The
+            # suffix remains authoritative, so keep waiting for its record.
+            if _launcher_exit_is_fatal(returncode, os.name):
+                tail = _log_tail(actual_log_path)
+                message = (
+                    f"idalib worker launcher {process.pid} exited with status "
+                    f"{returncode}"
+                )
+                if tail:
+                    message += f"\n\n{tail}"
+                raise WorkerStartError(message)
+
         time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
 
@@ -272,22 +331,45 @@ def resolve_instance(
     registry_dir: str | os.PathLike[str] = REGISTRY_DIR,
     spawn_dir: str | os.PathLike[str] = SPAWN_DIR,
     lease_grace: float = 20.0,
+    output_database: str | os.PathLike[str] | None = None,
+    processor: str | None = None,
+    loading_address: int | None = None,
+    file_type: str | None = None,
+    new_database: bool = False,
     spawner: WorkerSpawner = spawn_worker,
 ) -> RegistryEntry:
     if timeout <= 0:
         raise ValueError("timeout must be positive")
     source = canonical_path(path)
-    expected_idb = expected_idb_path(source)
+    expected_idb = (
+        canonical_path(output_database)
+        if output_database is not None
+        else expected_idb_path(source)
+    )
+    launch_options = WorkerLaunchOptions(
+        processor=processor,
+        loading_address=loading_address,
+        file_type=file_type,
+        new_database=new_database,
+    )
     deadline = time.monotonic() + timeout
 
     # Match a live instance before touching the filesystem: a registered
-    # instance (e.g. an unsaved GUI database whose .i64 is not on disk yet) is
-    # valid even when the path does not exist. Only spawning a worker below
-    # needs a real file to open.
+    # instance (e.g. an unsaved GUI database whose .i64 has not been written)
+    # is valid even when the path does not exist. An explicit output path is a
+    # request for that IDB identity, so do not attach to a GUI that merely has
+    # the same input executable open under a different database path.
     instance = _resolve_existing(
-        _scan_until(registry_dir, deadline), source, expected_idb
+        _scan_until(registry_dir, deadline),
+        source if output_database is None else expected_idb,
+        expected_idb,
     )
     if instance is not None:
+        if new_database:
+            raise IdbBusy(
+                f"cannot create a fresh database while instance "
+                f"{instance.record_id} owns {expected_idb}"
+            )
         return instance
 
     spawn_lock = FileLock(
@@ -299,9 +381,16 @@ def resolve_instance(
     spawn_lock.acquire(remaining)
     try:
         instance = _resolve_existing(
-            _scan_until(registry_dir, deadline), source, expected_idb
+            _scan_until(registry_dir, deadline),
+            source if output_database is None else expected_idb,
+            expected_idb,
         )
         if instance is not None:
+            if new_database:
+                raise IdbBusy(
+                    f"cannot create a fresh database while instance "
+                    f"{instance.record_id} owns {expected_idb}"
+                )
             return instance
         if not spawn:
             raise NoInstance(expected_idb)
@@ -310,7 +399,12 @@ def resolve_instance(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(f"timed out resolving {expected_idb}")
-        process, log_path = spawner(source, expected_idb, lease_grace)
+        process, log_path = spawner(
+            source,
+            expected_idb,
+            lease_grace,
+            launch_options,
+        )
         return _await_ready(process, expected_idb, log_path, deadline, registry_dir)
     finally:
         spawn_lock.close()

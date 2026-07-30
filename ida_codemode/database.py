@@ -83,6 +83,11 @@ class OpenDatabaseResult(TypedDict):
     status: Annotated[str, "Attachment state: attached or current."]
 
 
+class WaitAutoanalysisResult(TypedDict):
+    status: str
+    complete: bool
+
+
 class SaveDatabaseResult(TypedDict):
     path: str
 
@@ -367,6 +372,26 @@ class DatabaseManager:
                 if not session.handle.connected:
                     raise self._disconnected_error(target_id) from None
                 raise
+
+    def wait_autoanalysis(
+        self,
+        instance_id: str | None,
+        timeout: float | None = None,
+    ) -> WaitAutoanalysisResult:
+        target_id, session = self._get_session(instance_id)
+        with session.operation_lock:
+            if not session.handle.connected:
+                raise self._disconnected_error(target_id)
+            try:
+                result = session.handle.wait_autoanalysis(timeout)
+            except ClientError:
+                if not session.handle.connected:
+                    raise self._disconnected_error(target_id) from None
+                raise
+            return WaitAutoanalysisResult(
+                status=str(result["status"]),
+                complete=bool(result["complete"]),
+            )
 
     def save_database(self, instance_id: str | None) -> SaveDatabaseResult:
         target_id, session = self._get_session(instance_id)

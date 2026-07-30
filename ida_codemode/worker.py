@@ -35,6 +35,12 @@ def _parser() -> argparse.ArgumentParser:
         help="Write a newly-created database to this path",
     )
     parser.add_argument("--processor", help="IDA processor module name")
+    parser.add_argument(
+        "--loading-address",
+        type=lambda value: int(value, 0),
+        help="IDA loader address (-b value)",
+    )
+    parser.add_argument("--file-type", help="IDA loader/file type (-T value)")
     parser.add_argument("--log-file", type=Path, help="IDA kernel log file")
     parser.add_argument(
         "--managed",
@@ -149,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
                 else None
             ),
             processor=args.processor,
+            loading_address=args.loading_address,
+            file_type=args.file_type,
             log_file=(
                 str(args.log_file.expanduser().resolve()) if args.log_file else None
             ),
