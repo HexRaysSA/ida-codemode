@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .registry import (
+    DEFAULT_TIMEOUT,
     LOG_DIR,
     REGISTRY_DIR,
     SPAWN_DIR,
@@ -195,6 +196,22 @@ def _log_tail(path: Path, limit: int = 16 * 1024) -> str:
         return ""
 
 
+def _scan_until(
+    registry_dir: str | os.PathLike[str],
+    deadline: float,
+    *,
+    probe_timeout: float = DEFAULT_TIMEOUT,
+) -> list[DiscoveredInstance]:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("timed out scanning Code Mode instances")
+    return scan_instances(
+        registry_dir,
+        timeout=min(probe_timeout, remaining),
+        deadline=deadline,
+    )
+
+
 def _await_ready(
     process: subprocess.Popen[bytes],
     expected_idb: str,
@@ -223,10 +240,17 @@ def _await_ready(
                 message += f"\n\n{tail}"
             raise WorkerStartError(message)
 
-        for instance in scan_instances(
-            registry_dir,
-            timeout=min(0.25, max(0.05, deadline - now)),
-        ):
+        try:
+            instances = _scan_until(
+                registry_dir,
+                deadline,
+                probe_timeout=0.25,
+            )
+        except TimeoutError:
+            # Let the top of the loop produce the worker-specific timeout with
+            # any available startup log and last health detail.
+            continue
+        for instance in instances:
             if instance.entry.pid != process.pid:
                 continue
             if instance.entry.idb_key != expected_key:
@@ -260,7 +284,9 @@ def resolve_instance(
     # instance (e.g. an unsaved GUI database whose .i64 is not on disk yet) is
     # valid even when the path does not exist. Only spawning a worker below
     # needs a real file to open.
-    instance = _resolve_existing(scan_instances(registry_dir), source, expected_idb)
+    instance = _resolve_existing(
+        _scan_until(registry_dir, deadline), source, expected_idb
+    )
     if instance is not None:
         return instance
 
@@ -272,7 +298,9 @@ def resolve_instance(
         raise TimeoutError(f"timed out resolving {expected_idb}")
     spawn_lock.acquire(remaining)
     try:
-        instance = _resolve_existing(scan_instances(registry_dir), source, expected_idb)
+        instance = _resolve_existing(
+            _scan_until(registry_dir, deadline), source, expected_idb
+        )
         if instance is not None:
             return instance
         if not spawn:

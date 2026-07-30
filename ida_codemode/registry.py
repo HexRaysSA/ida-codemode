@@ -434,8 +434,14 @@ def sweep_orphan_locks(directory: str | os.PathLike[str]) -> None:
 def scan_instances(
     registry_dir: str | os.PathLike[str] | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    *,
+    deadline: float | None = None,
 ) -> list[DiscoveredInstance]:
-    """Return live records, reaping only records whose lock is acquirable."""
+    """Return live records, reaping only records whose lock is acquirable.
+
+    When ``deadline`` is supplied, it is an absolute monotonic deadline for the
+    complete scan rather than a fresh timeout budget for every health probe.
+    """
 
     directory = ensure_private_directory(
         REGISTRY_DIR if registry_dir is None else registry_dir
@@ -468,7 +474,13 @@ def scan_instances(
             continue
         lock.close()
 
-        valid, detail = probe_health(entry, timeout)
+        probe_timeout = timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("timed out scanning Code Mode instances")
+            probe_timeout = min(probe_timeout, remaining)
+        valid, detail = probe_health(entry, probe_timeout)
         discovered.append(
             DiscoveredInstance(
                 entry,

@@ -74,6 +74,53 @@ def test_scan_reaps_a_record_after_its_lifetime_lock_dies(tmp_path: Path) -> Non
     registration.release()
 
 
+def test_resolver_timeout_is_shared_across_registry_probes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry_dir = tmp_path / "instances"
+    registrations = [
+        InstanceRegistration(
+            registry_dir,
+            InstanceIdentity(
+                f"/tmp/unrelated-{index}.i64",
+                f"/tmp/unrelated-{index}",
+                "gui",
+            ),
+            token=f"token-{index}",
+        )
+        for index in range(2)
+    ]
+    for index, registration in enumerate(registrations):
+        registration.publish(12000 + index)
+
+    def slow_probe(_entry, timeout: float):
+        time.sleep(timeout)
+        return False, "timeout"
+
+    monkeypatch.setattr("ida_codemode.registry.probe_health", slow_probe)
+    started = time.monotonic()
+    try:
+        try:
+            resolve_instance(
+                tmp_path / "missing.exe",
+                spawn=False,
+                timeout=0.05,
+                registry_dir=registry_dir,
+                spawn_dir=tmp_path / "spawn",
+            )
+        except TimeoutError:
+            pass
+        else:  # pragma: no cover
+            raise AssertionError("expected the resolver deadline to expire")
+    finally:
+        for registration in registrations:
+            registration.release()
+
+    # The timeout is one budget for the whole scan, not one budget per record.
+    assert time.monotonic() - started < 0.15
+
+
 def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
     executable = tmp_path / "sample.exe"
     funny_idb = tmp_path / "saved-elsewhere.i64"
