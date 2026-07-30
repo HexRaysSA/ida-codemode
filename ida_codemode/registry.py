@@ -17,8 +17,9 @@ from typing import Any, Literal, Self
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from ida_codemode.paths import STATE_DIR
+
 HOST = "127.0.0.1"
-STATE_DIR = Path.home() / ".ida-codemode"
 REGISTRY_DIR = STATE_DIR / "instances"
 SPAWN_DIR = STATE_DIR / "spawn"
 LOG_DIR = STATE_DIR / "logs"

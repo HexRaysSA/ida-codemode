@@ -23,13 +23,17 @@ directly.
 ## State layout
 
 ```text
-~/.ida-codemode/
+<IDAUSR>/codemode/
   instances/<record-id>.json       published instance metadata
   instances/<record-id>.lock       held for the instance lifetime
   spawn/<idb-key>.lock             serializes worker creation
   logs/<record-id>.log             IDA/worker operational output
   sessions/<session-id>.jsonl      semantic MCP/agent trace
 ```
+
+`<IDAUSR>` is the first directory in the `IDAUSR` environment variable. When
+unset, it follows IDA's platform default (`~/.idapro` on Unix-like systems or
+`%APPDATA%/Hex-Rays/IDA Pro` on Windows).
 
 `record-id` is `<pid>-<six random hex digits>`. The random suffix prevents a
 stale Windows lock filename from colliding with a new process after PID reuse.
@@ -193,7 +197,7 @@ shutdown.
 The MCP server writes one session-oriented JSONL trace to:
 
 ```text
-~/.ida-codemode/sessions/<mcp-server-id>.jsonl
+<IDAUSR>/codemode/sessions/<mcp-server-id>.jsonl
 ```
 
 Every record includes schema version, timestamp, MCP server ID, MCP PID, and an

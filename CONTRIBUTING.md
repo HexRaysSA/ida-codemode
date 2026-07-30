@@ -93,13 +93,17 @@ There are no client process refcounts and no remote database-close endpoint.
 ## Local state
 
 ```text
-~/.ida-codemode/
+<IDAUSR>/codemode/
   instances/<record-id>.json
   instances/<record-id>.lock
   spawn/<idb-key>.lock
   logs/<record-id>.log
   sessions/<session-id>.jsonl
 ```
+
+`<IDAUSR>` is the first directory in the `IDAUSR` environment variable. When
+unset, IDA's platform default is used (`~/.idapro` on Unix-like systems or
+`%APPDATA%/Hex-Rays/IDA Pro` on Windows).
 
 - `instances/` is the live discovery registry.
 - `spawn/` serializes idalib worker creation.
@@ -116,7 +120,7 @@ origins, and enforce bounded request decoding.
 Every MCP process writes one schema-1 JSONL trace:
 
 ```text
-~/.ida-codemode/sessions/<mcp-server-id>.jsonl
+<IDAUSR>/codemode/sessions/<mcp-server-id>.jsonl
 ```
 
 The trace contains:
@@ -143,7 +147,7 @@ Run the stdlib-only local dashboard with:
 ```bash
 uv run ida-codemode-dashboard --open
 uv run ida-codemode-dashboard --port 9000 \
-  --sessions-dir ~/.ida-codemode/sessions
+  --sessions-dir "$IDAUSR/codemode/sessions"
 ```
 
 The dashboard provides:
@@ -171,9 +175,9 @@ uv run python migrate_logs.py --dry-run --verbose  # print every discarded recor
 uv run python migrate_logs.py
 ```
 
-It reads legacy logs from `~/.ida-codemode/logs`, reconstructs sessions using
+It reads legacy logs from `<IDAUSR>/codemode/logs`, reconstructs sessions using
 per-request agent transcript paths or GUIDs, and writes the 0.2 schema under
-`~/.ida-codemode/sessions`.
+`<IDAUSR>/codemode/sessions`.
 
 Migration never modifies source logs. Known `bridge_output` records are
 operational noise, so the default output reports a count per source file while
@@ -185,8 +189,15 @@ schema.
 ## Running a worker directly
 
 The resolver normally starts idalib workers on demand, but the worker is also
-exposed as a console script for reuse and diagnostics. It opens one executable
-or IDB in idalib and serves the same authenticated loopback HTTP API:
+exposed as a console script for reuse and diagnostics. To verify that idalib
+initializes without opening a database:
+
+```bash
+uv run ida-codemode-worker --probe
+```
+
+To open one executable or IDB in idalib and serve the same authenticated
+loopback HTTP API:
 
 ```bash
 uv run ida-codemode-worker /path/to/target.elf

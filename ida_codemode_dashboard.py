@@ -1,8 +1,8 @@
 """Web dashboard for ida-codemode semantic sessions.
 
 Serves a local HTTP UI (stdlib only, no extra dependencies) that lists the
-JSONL traces in ~/.ida-codemode/sessions and renders each MCP/agent session as
-a timeline linked to its Claude Code, Codex, or Pi transcript.
+JSONL traces under ``<IDAUSR>/codemode/sessions`` and renders each MCP/agent
+session as a timeline linked to its Claude Code, Codex, or Pi transcript.
 
 Run with: ida-codemode-dashboard [--host 127.0.0.1] [--port 8736] [--open]
 """
@@ -24,7 +24,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
-STATE_DIR = Path.home() / ".ida-codemode"
+from ida_codemode.paths import STATE_DIR
+
 DEFAULT_SESSIONS_DIR = STATE_DIR / "sessions"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8736

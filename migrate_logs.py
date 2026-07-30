@@ -12,7 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-STATE_DIR = Path.home() / ".ida-codemode"
+from ida_codemode.paths import STATE_DIR
+
 DEFAULT_SOURCE = STATE_DIR / "logs"
 DEFAULT_DESTINATION = STATE_DIR / "sessions"
 _AGENT_FIELDS = {

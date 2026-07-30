@@ -42,6 +42,7 @@ from ida_codemode.database import (
     OpenDatabaseResult,
     SaveDatabaseResult,
 )
+from ida_codemode.paths import STATE_DIR
 from ida_codemode.reference import (
     find_ida_domain_package_path,
     get_ida_domain_version,
@@ -50,7 +51,6 @@ from ida_codemode.reference import (
 from ida_codemode.resolver import ResolveError
 from ida_codemode.runtime import PythonExecutionResult
 
-STATE_DIR = Path.home() / ".ida-codemode"
 SESSIONS_DIR = STATE_DIR / "sessions"
 OPEN_TIMEOUT_SECONDS = 300
 EXECUTE_TIMEOUT_SECONDS = 300
