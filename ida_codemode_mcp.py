@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from functools import wraps
 from pathlib import Path
-from typing import Annotated, Any, ParamSpec, TypeVar
+from typing import Annotated, Any, NotRequired, ParamSpec, TypeVar
 from urllib.parse import urlparse
 
 from zeromcp import McpServer, McpToolError
@@ -40,7 +40,7 @@ from ida_codemode.database import (
     OpenDatabaseResult,
     SaveDatabaseResult,
 )
-from ida_codemode.paths import STATE_DIR
+from ida_codemode.paths import STATE_DIR, get_idausr_dir
 from ida_codemode.reference import (
     find_ida_domain_package_path,
     get_ida_domain_version,
@@ -383,11 +383,27 @@ def execute_python(
     return DATABASE_MANAGER.execute_python(code, instance_id)
 
 
-@tool
-def list_databases() -> ListDatabasesResult:
-    """Discover registered GUI and idalib databases, including local attachments."""
+def _gui_plugin_installed():
+    """Check whether the ida-codemode-mcp GUI plugin is installed."""
+    plugin_dir = get_idausr_dir() / "plugins" / "ida-codemode"
+    plugin_manifest = plugin_dir / "ida-plugin.json"
+    plugin_entrypoint = plugin_dir / "ida_codemode_plugin.py"
+    return plugin_manifest.is_file() and plugin_entrypoint.is_file()
 
-    return DATABASE_MANAGER.list_databases()
+
+class ListDatabasesToolResult(ListDatabasesResult):
+    hint: NotRequired[str]
+
+
+@tool
+def list_databases() -> ListDatabasesToolResult:
+    """Discover registered GUI and idalib databases."""
+    result = ListDatabasesToolResult(**DATABASE_MANAGER.list_databases())
+    if not _gui_plugin_installed():
+        result["hint"] = (
+            "To enable GUI database discovery, install the ida-codemode plugin: hcli plugin install https://github.com/HexRaysSA/ida-codemode-mcp"
+        )
+    return result
 
 
 @tool
