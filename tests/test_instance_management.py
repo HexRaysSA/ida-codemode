@@ -10,6 +10,7 @@ from ida_codemode.registry import (
     FileLock,
     InstanceIdentity,
     InstanceRegistration,
+    RegistryEntry,
     canonical_path,
     find_gui_owner,
     scan_instances,
@@ -300,6 +301,78 @@ def test_get_session_waits_for_in_flight_startup_open(tmp_path: Path) -> None:
     target_id, session = manager._get_session(None)
     assert target_id == "inst-1"
     assert session is sentinel
+
+
+def test_shutdown_during_open_releases_the_late_handle(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    open_started = threading.Event()
+    finish_open = threading.Event()
+    handle_closed = threading.Event()
+    failures: list[Exception] = []
+
+    entry = RegistryEntry(
+        record_id="123-abcdef",
+        backend="gui",
+        pid=123,
+        port=12345,
+        token="token",
+        version=1,
+        idb_path="/tmp/test.i64",
+        idb_key="test-key",
+        exe_path="/tmp/test",
+        managed=False,
+        started_at=0.0,
+    )
+
+    class SlowHandle:
+        def __init__(self) -> None:
+            self.entry = entry
+            self.disconnect_reason = None
+            self._connected = True
+
+        @property
+        def connected(self) -> bool:
+            return self._connected
+
+        @classmethod
+        def open(cls, *_args, **_kwargs):
+            open_started.set()
+            assert finish_open.wait(2)
+            return cls()
+
+        def set_disconnect_callback(self, _callback) -> None:
+            pass
+
+        def close(self) -> None:
+            self._connected = False
+            handle_closed.set()
+
+    monkeypatch.setattr("ida_codemode.database.DatabaseHandle", SlowHandle)
+    manager = DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+
+    def open_database() -> None:
+        try:
+            manager.open_database("/tmp/test", set_current=True)
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion
+            failures.append(exc)
+
+    thread = threading.Thread(target=open_database)
+    thread.start()
+    assert open_started.wait(1)
+
+    # Reproduction: shutdown completes while handle creation is still blocked.
+    manager.shutdown()
+    finish_open.set()
+    thread.join(2)
+
+    assert not thread.is_alive()
+    assert handle_closed.is_set()
+    assert len(failures) == 1
+    assert isinstance(failures[0], DatabaseError)
+    assert "shutting down" in str(failures[0])
+    assert manager._instances == {}
 
 
 def test_get_session_raises_without_startup_open(tmp_path: Path) -> None:

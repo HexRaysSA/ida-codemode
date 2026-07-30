@@ -183,6 +183,8 @@ class DatabaseManager:
         # lease in this manager. Other managers retain their own leases.
         with self._open_lock:
             with self._lock:
+                if self._shutdown_started:
+                    raise DatabaseError("database manager is shutting down")
                 candidate = next(
                     (
                         session
@@ -218,33 +220,44 @@ class DatabaseManager:
                     )
                 entry = handle.entry
                 with self._lock:
-                    existing = next(
-                        (
-                            session
-                            for session in self._instances.values()
-                            if session.handle.connected
-                            and session.handle.entry.record_id == entry.record_id
-                        ),
-                        None,
-                    )
-                    if existing is not None:
-                        if set_current or self._current_instance_id is None:
-                            self._current_instance_id = existing.instance_id
-                            self._disconnected_default = None
-                        current = self._current_instance_id
+                    # shutdown() may have run while DatabaseHandle.open() was
+                    # resolving or establishing its lease. Never install a
+                    # handle after shutdown has cleared the manager.
+                    shutting_down = self._shutdown_started
+                    if shutting_down:
+                        existing = None
                     else:
-                        instance_id = uuid.uuid4().hex[:12]
-                        existing = _DatabaseSession(
-                            instance_id=instance_id,
-                            requested_path=resolved_path,
-                            handle=handle,
+                        existing = next(
+                            (
+                                session
+                                for session in self._instances.values()
+                                if session.handle.connected
+                                and session.handle.entry.record_id == entry.record_id
+                            ),
+                            None,
                         )
-                        self._instances[instance_id] = existing
-                        if set_current or self._current_instance_id is None:
-                            self._current_instance_id = instance_id
-                            self._disconnected_default = None
-                        current = self._current_instance_id
+                        if existing is not None:
+                            if set_current or self._current_instance_id is None:
+                                self._current_instance_id = existing.instance_id
+                                self._disconnected_default = None
+                            current = self._current_instance_id
+                        else:
+                            instance_id = uuid.uuid4().hex[:12]
+                            existing = _DatabaseSession(
+                                instance_id=instance_id,
+                                requested_path=resolved_path,
+                                handle=handle,
+                            )
+                            self._instances[instance_id] = existing
+                            if set_current or self._current_instance_id is None:
+                                self._current_instance_id = instance_id
+                                self._disconnected_default = None
+                            current = self._current_instance_id
 
+                if shutting_down:
+                    handle.close()
+                    raise DatabaseError("database manager is shutting down")
+                assert existing is not None
                 if existing.handle is not handle:
                     handle.close()
                     event = "database_reused"
