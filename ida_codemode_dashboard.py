@@ -278,7 +278,24 @@ def _add_target(summary: SessionSummary, value: object) -> None:
     summary.targets.append(dict(target))
 
 
-def _summarize_session(path: Path) -> SessionSummary:
+def _resolve_agent_session_path(recorded: str, trace_path: Path) -> str:
+    if Path(recorded).is_file():
+        return recorded
+    resolved_root = SESSIONS_DIR.resolve()
+    for ancestor in (trace_path.parent, trace_path.parent.parent):
+        candidate = ancestor / "session.jsonl"
+        if (
+            candidate.is_file()
+            and candidate.resolve().is_relative_to(resolved_root)
+            and candidate != trace_path
+        ):
+            return str(candidate)
+    return recorded
+
+
+def _summarize_session(
+    path: Path, *, agent_transcript: Path | None = None
+) -> SessionSummary:
     summary = SessionSummary(path, path.stem, path.stat().st_size)
     records = _read_jsonl(path)
     summary.events = len(records)
@@ -301,6 +318,10 @@ def _summarize_session(path: Path) -> SessionSummary:
         for kind in ("claude", "codex", "pi"):
             session_path = session.get(f"{kind}_session_path")
             if isinstance(session_path, str) and session_path:
+                if agent_transcript is not None:
+                    session_path = str(agent_transcript)
+                else:
+                    session_path = _resolve_agent_session_path(session_path, path)
                 summary.agent_sessions[kind] = session_path
                 summary.agent_session_refs.add((kind, session_path))
 
@@ -324,14 +345,67 @@ def _summarize_session(path: Path) -> SessionSummary:
     return summary
 
 
+def _is_session_jsonl(path: Path) -> bool:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            first_line = f.readline().strip()
+            if not first_line:
+                return False
+            record = json.loads(first_line)
+            return isinstance(record, dict) and record.get("schema") == 1
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def _session_route_name(path: Path) -> str:
+    try:
+        return str(path.relative_to(SESSIONS_DIR))
+    except ValueError:
+        return path.name
+
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+def _is_benchmark_dir(directory: Path) -> bool:
+    for child in directory.iterdir():
+        if child.is_dir() and _UUID_RE.match(child.name):
+            return (child / "result.json").is_file()
+    return False
+
+
+def _scan_benchmark_runs(directory: Path) -> list[SessionSummary]:
+    summaries: list[SessionSummary] = []
+    for run_dir in sorted(directory.iterdir()):
+        if not run_dir.is_dir() or not _UUID_RE.match(run_dir.name):
+            continue
+        mcp_trace = run_dir / "logs" / "ida-codemode" / "session.jsonl"
+        if not mcp_trace.is_file() or not _is_session_jsonl(mcp_trace):
+            continue
+        agent_transcript = run_dir / "logs" / "session.jsonl"
+        summary = _summarize_session(
+            mcp_trace,
+            agent_transcript=agent_transcript if agent_transcript.is_file() else None,
+        )
+        if summary.has_analysis_activity:
+            summaries.append(summary)
+    return summaries
+
+
 def _scan_sessions() -> list[SessionSummary]:
     if not SESSIONS_DIR.is_dir():
         return []
-    summaries = [
-        summary
-        for path in sorted(SESSIONS_DIR.glob("*.jsonl"))
-        if (summary := _summarize_session(path)).has_analysis_activity
-    ]
+    if _is_benchmark_dir(SESSIONS_DIR):
+        summaries = _scan_benchmark_runs(SESSIONS_DIR)
+    else:
+        summaries = [
+            summary
+            for path in sorted(SESSIONS_DIR.glob("*.jsonl"))
+            if _is_session_jsonl(path)
+            and (summary := _summarize_session(path)).has_analysis_activity
+        ]
     summaries.sort(key=lambda item: item.started or _MIN_DT, reverse=True)
     return summaries
 
@@ -689,7 +763,7 @@ def _summary_index_row(summary: SessionSummary) -> str:
     activity_sort = (
         f"{summary.last_activity.timestamp():.6f}" if summary.last_activity else ""
     )
-    href = f"/session/{quote(summary.path.name)}"
+    href = f"/session/{quote(_session_route_name(summary.path))}"
     model_names = _session_model_names(summary)
     models = ", ".join(model_names)
     model_cell = (
@@ -847,7 +921,7 @@ def _add_session_timeline(
 
 
 def _transcript_window(
-    summary: SessionSummary, name: str, session_path: str
+    summary: SessionSummary, session_path_key: Path, session_path: str
 ) -> tuple[datetime | None, datetime | None]:
     """Time bounds attributing transcript items to this semantic session.
 
@@ -861,7 +935,7 @@ def _transcript_window(
     lower: datetime | None = None
     upper: datetime | None = None
     for index, sibling in enumerate(ordered):
-        if sibling.path.name != name:
+        if sibling.path != session_path_key:
             continue
         if index > 0:
             lower = ordered[index - 1].last_activity
@@ -883,7 +957,6 @@ def _in_window(
 
 def _interleave_transcript(
     summary: SessionSummary,
-    name: str,
     add_event: Callable[[datetime | None, str], None],
 ) -> int:
     """Add linked-transcript conversation items to the timeline, in time order.
@@ -894,7 +967,7 @@ def _interleave_transcript(
     """
     added = 0
     for _kind, session_path in _summary_agent_sessions(summary):
-        lower, upper = _transcript_window(summary, name, session_path)
+        lower, upper = _transcript_window(summary, summary.path, session_path)
         items, _meta, _kind, _totals = _load_agent_items(session_path)
         for item in items:
             if (
@@ -917,7 +990,7 @@ def _session_usage(summary: SessionSummary) -> dict[str, Any]:
     """
     totals = _blank_totals()
     for _kind, session_path in _summary_agent_sessions(summary):
-        lower, upper = _transcript_window(summary, summary.path.name, session_path)
+        lower, upper = _transcript_window(summary, summary.path, session_path)
         items, _meta, kind, session_totals = _load_agent_items(session_path)
         windowed = [
             it.usage for it in items if it.usage and _in_window(it.ts, lower, upper)
@@ -945,10 +1018,10 @@ def _totals_summary_html(totals: dict[str, Any]) -> str:
 
 def render_session(name: str, *, export: bool = False) -> str | None:
     """Render one semantic MCP session, optionally as self-contained HTML."""
-    if "/" in name or "\\" in name or not name.endswith(".jsonl"):
+    if "\\" in name or not name.endswith(".jsonl"):
         return None
-    path = SESSIONS_DIR / name
-    if not path.is_file():
+    path = (SESSIONS_DIR / name).resolve()
+    if not path.is_relative_to(SESSIONS_DIR) or not path.is_file():
         return None
     summary = _summarize_session(path)
     records = _read_jsonl(path)
@@ -962,7 +1035,7 @@ def render_session(name: str, *, export: bool = False) -> str | None:
         sequence += 1
 
     _add_session_timeline(records, add_event)
-    transcript_count = _interleave_transcript(summary, name, add_event)
+    transcript_count = _interleave_transcript(summary, add_event)
     events.sort(key=lambda item: (item[0], item[1]))
 
     agents = " ".join(
@@ -1754,7 +1827,7 @@ def render_agent_session(session_path: str) -> str | None:
     transcript_html = "".join(item.html for item in items)
 
     related = "".join(
-        f'<a href="/session/{quote(s.path.name)}">{_e(s.display_target)} '
+        f'<a href="/session/{quote(_session_route_name(s.path))}">{_e(s.display_target)} '
         f'<span class="mono muted">{_e(s.session_id)}</span></a><br>'
         for s in known[session_path]
     )

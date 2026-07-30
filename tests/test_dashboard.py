@@ -211,5 +211,92 @@ class SemanticSessionTests(unittest.TestCase):
         )
 
 
+    def test_benchmark_autodetect_and_agent_resolution(self) -> None:
+        def write(path: Path, records: list[dict[str, object]]) -> None:
+            path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+        base = {
+            "schema": 1,
+            "ts": "2026-01-01T00:00:00Z",
+            "pid": 999999,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            sessions_dir = Path(directory)
+            run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            run_dir = sessions_dir / run_id
+            logs_dir = run_dir / "logs"
+            mcp_dir = logs_dir / "ida-codemode"
+            mcp_dir.mkdir(parents=True)
+
+            (run_dir / "result.json").write_text("{}", encoding="utf-8")
+
+            write(
+                logs_dir / "session.jsonl",
+                [
+                    {"type": "user", "message": {"role": "user", "content": "hi"}},
+                    {"type": "assistant", "message": {"role": "assistant", "model": "claude-opus-5", "content": [{"type": "text", "text": "hello"}]}},
+                ],
+            )
+
+            write(
+                mcp_dir / "session.jsonl",
+                [
+                    {
+                        **base,
+                        "event": "mcp_started",
+                        "mcp_server_id": "bench-test",
+                        "agent": "claude-code",
+                        "session": {
+                            "claude_session_path": "/root/.claude/nonexistent.jsonl",
+                        },
+                    },
+                    {
+                        **base,
+                        "event": "tool_call",
+                        "mcp_server_id": "bench-test",
+                        "tool": "execute_python",
+                    },
+                ],
+            )
+
+            original_dir = dashboard.SESSIONS_DIR
+            dashboard.SESSIONS_DIR = sessions_dir
+            try:
+                self.assertTrue(dashboard._is_benchmark_dir(sessions_dir))
+                summaries = dashboard._scan_sessions()
+                self.assertEqual(len(summaries), 1)
+                summary = summaries[0]
+                self.assertEqual(summary.session_id, "bench-test")
+                resolved = summary.agent_sessions.get("claude")
+                self.assertIsNotNone(resolved)
+                self.assertEqual(
+                    Path(resolved),
+                    logs_dir / "session.jsonl",
+                )
+            finally:
+                dashboard.SESSIONS_DIR = original_dir
+
+    def test_schema_validation_rejects_non_matching_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sessions_dir = Path(directory)
+            (sessions_dir / "random.jsonl").write_text(
+                '{"foo": "bar"}\n', encoding="utf-8"
+            )
+            (sessions_dir / "empty.jsonl").write_text("", encoding="utf-8")
+            (sessions_dir / "bad.jsonl").write_text("not json\n", encoding="utf-8")
+
+            original = dashboard.SESSIONS_DIR
+            dashboard.SESSIONS_DIR = sessions_dir
+            try:
+                summaries = dashboard._scan_sessions()
+            finally:
+                dashboard.SESSIONS_DIR = original
+
+            self.assertEqual(len(summaries), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
