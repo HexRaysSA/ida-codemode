@@ -72,6 +72,12 @@ export default function idaCodemode(pi: ExtensionAPI) {
       cwd: PACKAGE_ROOT,
       env: {
         IDA_CODEMODE_ID: process.env.IDA_CODEMODE_ID ?? "",
+        ...(process.env.IDAUSR !== undefined
+          ? { IDAUSR: process.env.IDAUSR }
+          : {}),
+        ...(process.env.IDA_CODEMODE_STATE_DIR !== undefined
+          ? { IDA_CODEMODE_STATE_DIR: process.env.IDA_CODEMODE_STATE_DIR }
+          : {}),
       },
     });
 
