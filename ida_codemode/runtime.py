@@ -4,6 +4,7 @@ import builtins
 import importlib
 import inspect
 import io
+import math
 import queue
 import sys
 import threading
@@ -67,8 +68,13 @@ class AnalysisState:
 
 
 def to_jsonable(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, (str, int, bool)):
         return value
+    if isinstance(value, float):
+        # NaN and infinities are accepted by Python's encoder but are not JSON.
+        # Preserve them as readable values without putting invalid JSON on the
+        # versioned HTTP wire protocol.
+        return value if math.isfinite(value) else repr(value)
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, Enum):

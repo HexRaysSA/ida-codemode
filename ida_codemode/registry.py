@@ -2,6 +2,7 @@ import errno
 import glob
 import hashlib
 import json
+import math
 import os
 import socket
 import sys
@@ -328,9 +329,14 @@ def load_registry_entry(path: str | os.PathLike[str]) -> RegistryEntry:
         "managed",
         "started_at",
     }
-    if set(payload) != required:
-        raise ValueError("registry entry has unexpected fields")
-    if payload["record_id"] != entry_path.stem:
+    missing = required.difference(payload)
+    if missing:
+        names = ", ".join(sorted(missing))
+        raise ValueError(f"registry entry is missing required fields: {names}")
+    record_id = payload["record_id"]
+    if not isinstance(record_id, str):
+        raise TypeError("registry entry has an invalid record ID")
+    if record_id != entry_path.stem:
         raise ValueError("record ID does not match its filename")
     if payload["backend"] not in ("gui", "idalib"):
         raise ValueError("registry entry has an invalid backend")
@@ -340,8 +346,14 @@ def load_registry_entry(path: str | os.PathLike[str]) -> RegistryEntry:
         or payload["pid"] <= 0
     ):
         raise ValueError("registry entry has an invalid pid")
-    if not payload["record_id"].startswith(f"{payload['pid']}-"):
-        raise ValueError("record ID does not match its pid")
+    expected_prefix = f"{payload['pid']}-"
+    suffix = record_id.removeprefix(expected_prefix)
+    if (
+        not record_id.startswith(expected_prefix)
+        or len(suffix) != 6
+        or any(character not in "0123456789abcdef" for character in suffix)
+    ):
+        raise ValueError("record ID does not match its pid or suffix format")
     if (
         not isinstance(payload["port"], int)
         or isinstance(payload["port"], bool)
@@ -359,11 +371,16 @@ def load_registry_entry(path: str | os.PathLike[str]) -> RegistryEntry:
         raise ValueError("registry entry has an invalid IDB key")
     if not isinstance(payload["managed"], bool):
         raise TypeError("registry entry has an invalid managed flag")
-    if isinstance(payload["started_at"], bool) or not isinstance(
-        payload["started_at"], (int, float)
+    if (
+        isinstance(payload["started_at"], bool)
+        or not isinstance(payload["started_at"], (int, float))
+        or not math.isfinite(payload["started_at"])
     ):
         raise TypeError("registry entry has an invalid start time")
-    return RegistryEntry(**payload)
+    # Protocol v1 readers ignore additive fields. This lets records gain
+    # optional metadata without making older clients classify a live owner as
+    # absent and potentially spawn over it.
+    return RegistryEntry(**{name: payload[name] for name in required})
 
 
 def _is_timeout(error: BaseException) -> bool:
@@ -374,6 +391,12 @@ def _is_timeout(error: BaseException) -> bool:
 def probe_health(
     entry: RegistryEntry, timeout: float = DEFAULT_TIMEOUT
 ) -> tuple[bool, str | None]:
+    if entry.version != PROTOCOL_VERSION:
+        return (
+            False,
+            f"unsupported protocol version {entry.version}; expected {PROTOCOL_VERSION}",
+        )
+
     request = Request(
         f"http://{HOST}:{entry.port}/health",
         headers={
@@ -396,7 +419,10 @@ def probe_health(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False, "health response was not JSON"
     expected = {"status": "ok", **entry.health_identity()}
-    if payload != expected:
+    if not isinstance(payload, dict) or any(
+        name not in payload or payload[name] != value
+        for name, value in expected.items()
+    ):
         return False, "health identity did not match the registry entry"
     return True, None
 

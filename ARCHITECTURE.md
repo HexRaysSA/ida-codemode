@@ -110,16 +110,16 @@ before releasing that lock.
 The JSON file is discovery metadata; the kernel lock is the liveness authority.
 Conceptually, a scanner classifies a parseable record as:
 
-- `READY`: lifetime lock is held and authenticated health identity matches.
-- `BLOCKED`: lifetime lock is held but health is unavailable or does not match
-  the published record.
+- `READY`: lifetime lock is held, the protocol version is supported, and the
+  authenticated health identity matches.
+- `BLOCKED`: lifetime lock is held but the protocol version is unsupported,
+  health is unavailable, or health does not match the published record.
 - `DEAD`: lifetime lock is acquirable; the scanner reaps it instead of returning it.
 
-Only `DEAD` records may be removed. Timeouts, authentication mismatches, and
-malformed health responses never justify spawning over a lock-held instance.
-The protocol version participates in the health identity but is not separately
-negotiated. A malformed registry record is likewise removed only when its
-corresponding lock is acquirable.
+Only `DEAD` records may be removed. Version mismatches, timeouts,
+authentication mismatches, and malformed health responses never justify
+spawning over a lock-held instance. A malformed registry record is likewise
+removed only when its corresponding lock is acquirable.
 
 A hard-killed process leaves files behind, but the kernel releases its lock.
 Any scanner may then reap the JSON and lock files idempotently. Acquirable
@@ -195,6 +195,90 @@ result. As an alternative, code without a trailing
 expression may define `run(db)`, `execute(db)`, or `main(db)` for automatic
 invocation. Timeout tracing and IDA cancellation prevent one timed-out request
 from poisoning the next operation.
+
+## Protocol contract and versioning
+
+`PROTOCOL_VERSION` is currently `1`. It is an exact compatibility version for
+the private discovery registry and per-database HTTP API. There is no downgrade
+or highest-common-version negotiation: a scanner whose local version differs
+from a lock-held record marks that owner `BLOCKED` before probing HTTP. This is
+deliberate—starting a replacement could corrupt an IDB already owned by a peer
+that the scanner does not understand.
+
+Protocol version 1 consists of the following interoperable contracts.
+
+### Discovery contract
+
+A published `instances/<record-id>.json` record has these required fields:
+
+| Fields | Contract |
+|---|---|
+| `record_id` | `<pid>-<six lowercase hex digits>` and equal to the filename stem. |
+| `backend` | `gui` or `idalib`. |
+| `pid`, `port` | Positive process ID and loopback TCP port. |
+| `token` | Bearer secret used by every per-database HTTP request. |
+| `version` | Exact Code Mode protocol version. |
+| `idb_path`, `exe_path` | Case-preserving canonical paths; the executable path may be empty. |
+| `idb_key` | The 16-hex-digit identity described in **Database identity**. |
+| `managed` | Whether zero leases trigger worker shutdown. |
+| `started_at` | Unix start timestamp. |
+
+The matching lifetime lock, atomic publication order, IDB identity algorithm,
+spawn-lock naming, and `READY`/`BLOCKED`/`DEAD` rules are part of this discovery
+contract. Readers require all fields above but ignore unknown additive fields.
+
+`GET /health` must return `status: "ok"` plus the record's `record_id`,
+`backend`, `pid`, `version`, `idb_path`, `idb_key`, `exe_path`, `managed`, and
+`started_at`. The port and token are not echoed. A client compares every known
+field but ignores unknown additive health fields.
+
+### Wire and lifecycle contract
+
+All non-streaming request bodies are JSON objects. The operation contracts are:
+
+| Route | Request and response contract |
+|---|---|
+| `GET /health` | Raw health identity object described above. |
+| `GET /health?sse=1` | `text/event-stream`; one initial `health` event, heartbeat comments, and connection lifetime equal to lease lifetime. |
+| `POST /execute_python` | `{code, timeout?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. |
+| `POST /save_database` | An object; success is `{"ok":true,"result":{"saved":true,"idb_path":...}}`. |
+| `GET /poll_autoanalysis` | Raw `{status, complete}` analysis object. |
+| `GET` or `POST /wait_autoanalysis` | The same raw analysis object; POST accepts an optional positive finite timeout in seconds. |
+
+Operation failures use a non-2xx status and, once application dispatch has
+begun, `{"ok":false,"error":{"code":...,"message":...}}`; additional error
+details are optional. Authentication, framing, and unknown-route failures may
+use simpler non-2xx JSON bodies, so clients must not assume a structured error
+for every rejection. There is no remote close operation, and clients must not
+retry a POST whose execution outcome is unknown.
+
+The execution rules (`db`/`ida_domain`, trailing-expression results, optional
+entry functions, JSON-compatible result conversion, output capture, and
+serialized IDA execution) and the SSE-driven managed shutdown semantics are
+also protocol behavior because clients observe them. Result conversion is
+recursive; notably, non-finite Python floats become the strings `nan`, `inf`,
+or `-inf` so the service never emits non-standard JSON numbers.
+
+### When to bump the version
+
+Version 1 is intended to remain stable; it is not the package or release
+version. Readers and writers should preserve it for:
+
+- implementation, performance, timeout, or heartbeat changes that retain the
+  behavior above;
+- new optional registry, health, request, response, or error-detail fields;
+- new optional routes that old peers may safely reject;
+- changes to MCP tools, worker CLI options, semantic traces, dashboard output,
+  or agent integrations. The trace format has its own `schema` field, while MCP
+  has its own protocol negotiation.
+
+Bump `PROTOCOL_VERSION` only when an existing version-1 peer could no longer
+interoperate safely—for example, when removing or changing the type or meaning
+of a required registry field; changing path identity, lock ownership, auth, or
+lease semantics; or incompatibly changing an existing route's method, request,
+response, error, execution, or save behavior. A feature that must be relied on
+across mixed installations needs either an optional capability probe or a
+protocol bump; it must not silently reinterpret a version-1 field.
 
 ## Shared leases and managed shutdown
 
@@ -304,6 +388,7 @@ and intentionally discarded from migrated sessions.
 | MCP/client exits cleanly | Its leases close; other clients continue. |
 | MCP/client is killed | Kernel closes sockets; heartbeat observes the loss. |
 | Managed worker is killed | Lifetime lock releases; stale metadata is reaped on scan. |
+| Protocol version differs | Instance is `BLOCKED` before HTTP probing; no replacement is spawned. |
 | Health times out | Instance is `BLOCKED`; no replacement is spawned. |
 | Worker exits during startup | Resolver raises with process status and log tail. |
 | Worker begins idle shutdown before the first lease | The handle resolves and attempts attachment once more. |

@@ -33,7 +33,7 @@ def json_response(
 ) -> HTTPResponse:
     return HTTPResponse(
         status=status,
-        body=json.dumps(payload).encode("utf-8") + b"\n",
+        body=json.dumps(payload, allow_nan=False).encode("utf-8") + b"\n",
         headers=headers or {},
         after_send=after_send,
     )

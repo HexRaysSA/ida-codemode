@@ -1,6 +1,7 @@
 import atexit
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -306,8 +307,10 @@ class CodeModeHTTPServer:
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
             raise APIError("invalid_timeout", "timeout must be a positive number")
         timeout = float(timeout)
-        if timeout <= 0:
-            raise APIError("invalid_timeout", "timeout must be a positive number")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise APIError(
+                "invalid_timeout", "timeout must be a positive finite number"
+            )
         return timeout
 
     @staticmethod

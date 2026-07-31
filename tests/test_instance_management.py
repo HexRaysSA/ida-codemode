@@ -1,5 +1,7 @@
+import json
 import threading
 import time
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -10,9 +12,11 @@ from ida_codemode.client import DatabaseHandle
 from ida_codemode.database import DatabaseError, DatabaseManager
 from ida_codemode.http import RequestHandler
 from ida_codemode.registry import (
+    PROTOCOL_VERSION,
     FileLock,
     InstanceIdentity,
     InstanceRegistration,
+    InstanceState,
     RegistryEntry,
     canonical_path,
     find_gui_owner,
@@ -75,6 +79,69 @@ def test_scan_reaps_a_record_after_its_lifetime_lock_dies(tmp_path: Path) -> Non
     assert scan_instances(tmp_path, timeout=0.01) == []
     assert not (tmp_path / f"{entry.record_id}.json").exists()
     registration.release()
+
+
+def test_scan_blocks_an_unsupported_protocol_version(tmp_path: Path) -> None:
+    registry_dir = tmp_path / "instances"
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
+        AnalysisState(),
+        registry_dir,
+    )
+    server.start()
+    assert server.entry is not None
+    unsupported = replace(server.entry, version=PROTOCOL_VERSION + 1)
+    server._entry = unsupported
+    record_path = registry_dir / f"{unsupported.record_id}.json"
+    record_path.write_text(json.dumps(asdict(unsupported)), encoding="utf-8")
+
+    try:
+        discovered = scan_instances(registry_dir)
+    finally:
+        server.stop()
+        server.release_registration()
+
+    assert len(discovered) == 1
+    assert discovered[0].entry == unsupported
+    assert discovered[0].state is InstanceState.BLOCKED
+    assert discovered[0].detail == (
+        f"unsupported protocol version {PROTOCOL_VERSION + 1}; "
+        f"expected {PROTOCOL_VERSION}"
+    )
+
+
+def test_scan_accepts_additive_protocol_fields(tmp_path: Path) -> None:
+    registry_dir = tmp_path / "instances"
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
+        AnalysisState(),
+        registry_dir,
+    )
+    server.start()
+    assert server.entry is not None
+    entry = server.entry
+    record_path = registry_dir / f"{entry.record_id}.json"
+    payload = json.loads(record_path.read_text(encoding="utf-8"))
+    payload["future_registry_field"] = {"optional": True}
+    record_path.write_text(json.dumps(payload), encoding="utf-8")
+    original_health_payload = server._health_payload
+
+    def health_payload() -> dict[str, Any]:
+        return {**original_health_payload(), "future_health_field": True}
+
+    server._health_payload = health_payload
+
+    try:
+        discovered = scan_instances(registry_dir)
+    finally:
+        server.stop()
+        server.release_registration()
+
+    assert len(discovered) == 1
+    assert discovered[0].entry == entry
+    assert discovered[0].state is InstanceState.READY
 
 
 def test_resolver_timeout_is_shared_across_registry_probes(

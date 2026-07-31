@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ida_codemode.http import POST_BODY_LIMIT
 from ida_codemode.registry import InstanceIdentity, load_registry_entry
-from ida_codemode.runtime import AnalysisState
+from ida_codemode.runtime import AnalysisState, to_jsonable
 from ida_codemode.server import CodeModeHTTPServer
 
 
@@ -92,6 +92,14 @@ def make_server(tmp_path: Path, *, gui: bool = False):
     return server, backend
 
 
+def test_result_conversion_emits_standard_json_for_nonfinite_floats():
+    converted = to_jsonable(
+        {"nan": float("nan"), "positive": float("inf"), "negative": -float("inf")}
+    )
+    assert converted == {"nan": "nan", "positive": "inf", "negative": "-inf"}
+    assert json.loads(json.dumps(converted, allow_nan=False)) == converted
+
+
 def test_health_registry_and_authentication(tmp_path: Path):
     server, _ = make_server(tmp_path)
     try:
@@ -146,6 +154,24 @@ def test_execute_wait_and_save_routes(tmp_path: Path):
             ("wait", 4.0),
             ("save",),
         ]
+    finally:
+        server.stop()
+        server.release_registration()
+
+
+def test_execute_rejects_invalid_timeouts(tmp_path: Path):
+    server, backend = make_server(tmp_path)
+    try:
+        for timeout in (0, -1, float("nan"), float("inf"), "1", True):
+            status, payload, _ = request(
+                server,
+                "POST",
+                "/execute_python",
+                {"code": "lambda: 1", "timeout": timeout},
+            )
+            assert status == 400
+            assert payload["error"]["code"] == "invalid_timeout"
+        assert backend.calls == []
     finally:
         server.stop()
         server.release_registration()
