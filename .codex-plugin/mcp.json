@@ -1,19 +1,13 @@
 {
-  "mcpServers": {
-    "ida": {
-      "command": "uv",
-      "args": [
-        "run",
-        "ida-codemode-mcp",
-        "--agent",
-        "codex"
-      ],
-      "cwd": ".",
-      "env": {
-        "IDA_CODEMODE_ID": "${IDA_CODEMODE_ID}",
-        "IDAUSR": "${IDAUSR}",
-        "IDA_CODEMODE_STATE_DIR": "${IDA_CODEMODE_STATE_DIR}"
-      }
-    }
+  "ida": {
+    "command": "uv",
+    "args": [
+      "run",
+      "ida-codemode-mcp",
+      "--agent",
+      "codex"
+    ],
+    "cwd": ".",
+    "env_vars": ["IDA_CODEMODE_ID", "IDAUSR", "IDA_CODEMODE_STATE_DIR"]
   }
 }

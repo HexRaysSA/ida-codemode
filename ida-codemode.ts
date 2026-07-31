@@ -71,11 +71,11 @@ export default function idaCodemode(pi: ExtensionAPI) {
       args: ["run", "--project", PACKAGE_ROOT, "ida-codemode-mcp", "--agent", "pi"],
       cwd: PACKAGE_ROOT,
       env: {
-        IDA_CODEMODE_ID: process.env.IDA_CODEMODE_ID ?? "",
-        ...(process.env.IDAUSR !== undefined
-          ? { IDAUSR: process.env.IDAUSR }
+        ...(process.env.IDA_CODEMODE_ID
+          ? { IDA_CODEMODE_ID: process.env.IDA_CODEMODE_ID }
           : {}),
-        ...(process.env.IDA_CODEMODE_STATE_DIR !== undefined
+        ...(process.env.IDAUSR ? { IDAUSR: process.env.IDAUSR } : {}),
+        ...(process.env.IDA_CODEMODE_STATE_DIR
           ? { IDA_CODEMODE_STATE_DIR: process.env.IDA_CODEMODE_STATE_DIR }
           : {}),
       },

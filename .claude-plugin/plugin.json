@@ -14,9 +14,9 @@
         "claude"
       ],
       "env": {
-        "IDA_CODEMODE_ID": "${IDA_CODEMODE_ID}",
-        "IDAUSR": "${IDAUSR}",
-        "IDA_CODEMODE_STATE_DIR": "${IDA_CODEMODE_STATE_DIR}"
+        "IDA_CODEMODE_ID": "${IDA_CODEMODE_ID:-}",
+        "IDAUSR": "${IDAUSR:-}",
+        "IDA_CODEMODE_STATE_DIR": "${IDA_CODEMODE_STATE_DIR:-}"
       }
     }
   },

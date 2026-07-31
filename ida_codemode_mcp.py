@@ -30,6 +30,20 @@ from pathlib import Path
 from typing import Annotated, Any, NotRequired, ParamSpec, TypeVar
 from urllib.parse import urlparse
 
+MCP_ENVIRONMENT_VARIABLES = (
+    "IDA_CODEMODE_ID",
+    "IDAUSR",
+    "IDA_CODEMODE_STATE_DIR",
+)
+
+
+def _unset_empty_environment_variables() -> None:
+    """Prevent MCP child processes from inheriting empty overrides."""
+    for name in MCP_ENVIRONMENT_VARIABLES:
+        if os.environ.get(name) == "":
+            del os.environ[name]
+
+
 from zeromcp import McpServer, McpToolError
 
 from ida_codemode.client import ClientError, RemoteError
@@ -452,6 +466,7 @@ def _serve(
     database: str | None = None,
     agent: str | None = None,
 ) -> None:
+    _unset_empty_environment_variables()
     _install_server_shutdown_handlers()
     _start_mcp_trace(transport, agent)
 

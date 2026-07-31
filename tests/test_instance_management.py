@@ -436,6 +436,18 @@ def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
         server.release_registration()
 
 
+def test_mcp_unsets_empty_forwarded_environment_variables(monkeypatch) -> None:
+    monkeypatch.setenv("IDA_CODEMODE_ID", "")
+    monkeypatch.setenv("IDAUSR", "/tmp/ida-user")
+    monkeypatch.setenv("IDA_CODEMODE_STATE_DIR", "")
+
+    mcp_app._unset_empty_environment_variables()
+
+    assert "IDA_CODEMODE_ID" not in mcp_app.os.environ
+    assert mcp_app.os.environ["IDAUSR"] == "/tmp/ida-user"
+    assert "IDA_CODEMODE_STATE_DIR" not in mcp_app.os.environ
+
+
 def test_mcp_session_trace_metadata(tmp_path: Path, monkeypatch) -> None:
     class FakeTrace:
         path = tmp_path / "session.jsonl"
