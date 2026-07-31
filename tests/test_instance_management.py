@@ -6,6 +6,7 @@ from typing import Any
 import ida_codemode_mcp as mcp_app
 from ida_codemode.client import DatabaseHandle
 from ida_codemode.database import DatabaseError, DatabaseManager
+from ida_codemode.http import RequestHandler
 from ida_codemode.registry import (
     FileLock,
     InstanceIdentity,
@@ -481,6 +482,33 @@ def test_gui_disconnect_invalidates_mcp_instance_without_spawning(
         raise AssertionError("disconnected instance remained executable")
     assert not list(registry_dir.glob("*.json"))
     manager.shutdown()
+
+
+def test_database_handle_reuses_http11_rpc_connection(tmp_path: Path) -> None:
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib"),
+        AnalysisState(),
+        tmp_path / "instances",
+    )
+    server.start()
+    assert server.entry is not None
+    handle = DatabaseHandle("/tmp/test", server.entry)
+    try:
+        assert handle.execute_python("lambda: 1", 1)["code"] == "lambda: 1"
+        connection = handle._rpc_connection
+        assert connection is not None
+        sock = connection.sock
+        assert sock is not None
+
+        assert handle.execute_python("lambda: 2", 1)["code"] == "lambda: 2"
+        assert handle._rpc_connection is connection
+        assert connection.sock is sock
+        assert RequestHandler.disable_nagle_algorithm is True
+    finally:
+        handle.close()
+        server.stop()
+        server.release_registration()
 
 
 def test_multiple_leases_share_one_managed_server(tmp_path: Path) -> None:

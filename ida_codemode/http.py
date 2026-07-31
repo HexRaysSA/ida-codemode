@@ -47,6 +47,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     sys_version = ""
     protocol_version = "HTTP/1.1"
     timeout = 30
+    disable_nagle_algorithm = True
 
     def handle(self) -> None:
         try:
