@@ -1,3 +1,4 @@
+import argparse
 import json
 import threading
 import time
@@ -6,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import ida_codemode.client as client_mod
 import ida_codemode.resolver as resolver_mod
 import ida_codemode_mcp as mcp_app
 from ida_codemode.client import DatabaseHandle
@@ -25,6 +27,14 @@ from ida_codemode.registry import (
 from ida_codemode.resolver import resolve_instance
 from ida_codemode.runtime import AnalysisState
 from ida_codemode.server import CodeModeHTTPServer
+from ida_codemode.worker import (
+    _build_ida_options,
+    _image_base_to_paragraphs,
+    _parse_image_base,
+)
+from ida_codemode.worker import (
+    _parser as worker_parser,
+)
 
 
 class StaticBackend:
@@ -189,6 +199,169 @@ def test_resolver_timeout_is_shared_across_registry_probes(
 
     # The timeout is one budget for the whole scan, not one budget per record.
     assert time.monotonic() - started < 0.15
+
+
+def test_database_handle_forwards_import_options(monkeypatch) -> None:
+    captured = {}
+    entry = SimpleNamespace(record_id="test-entry")
+
+    def fake_resolve(path, **options):
+        captured.update(path=path, options=options)
+        return entry
+
+    class CapturingHandle(DatabaseHandle):
+        def __init__(self, path, resolved_entry, on_disconnect=None):
+            self.opened = (path, resolved_entry, on_disconnect)
+
+    monkeypatch.setattr(client_mod, "resolve_instance", fake_resolve)
+    handle = CapturingHandle.open(
+        "firmware.bin",
+        output_database="firmware.i64",
+        auto_analysis=True,
+        image_base=0x8000,
+        new_database=True,
+        compiler="gcc",
+        first_pass_directives=("FIRST=1",),
+        second_pass_directives=("SECOND=1",),
+        disable_fpp=True,
+        entry_point=0x8010,
+        jit_debugger=False,
+        log_file="ida.log",
+        disable_mouse=True,
+        plugin_options="sample:option",
+        processor="arm",
+        db_compression="pack",
+        run_debugger="linux",
+        load_resources=True,
+        script_file="startup.py",
+        script_args=("arg",),
+        file_type="ZIP",
+        file_member="nested.bin",
+        empty_database=True,
+        windows_dir="windows",
+        no_segmentation=True,
+        debug_flags=("ldr",),
+    )
+
+    assert handle.opened[:2] == ("firmware.bin", entry)
+    assert captured["path"] == "firmware.bin"
+    assert captured["options"] == {
+        "spawn": True,
+        "timeout": 120.0,
+        "registry_dir": client_mod.REGISTRY_DIR,
+        "spawn_dir": client_mod.SPAWN_DIR,
+        "output_database": "firmware.i64",
+        "auto_analysis": True,
+        "image_base": 0x8000,
+        "new_database": True,
+        "compiler": "gcc",
+        "first_pass_directives": ("FIRST=1",),
+        "second_pass_directives": ("SECOND=1",),
+        "disable_fpp": True,
+        "entry_point": 0x8010,
+        "jit_debugger": False,
+        "log_file": "ida.log",
+        "disable_mouse": True,
+        "plugin_options": "sample:option",
+        "processor": "arm",
+        "db_compression": "pack",
+        "run_debugger": "linux",
+        "load_resources": True,
+        "script_file": "startup.py",
+        "script_args": ("arg",),
+        "file_type": "ZIP",
+        "file_member": "nested.bin",
+        "empty_database": True,
+        "windows_dir": "windows",
+        "no_segmentation": True,
+        "debug_flags": ("ldr",),
+    }
+
+
+def test_resolver_builds_worker_import_options(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "firmware.bin"
+    output = tmp_path / "analysis" / "firmware.i64"
+    source.write_bytes(b"binary")
+    captured = {}
+    entry = SimpleNamespace(record_id="worker")
+
+    def fake_spawner(source_path, expected_idb, lease_grace, options):
+        captured.update(
+            source=source_path,
+            expected_idb=expected_idb,
+            lease_grace=lease_grace,
+            options=options,
+        )
+        return SimpleNamespace(pid=1), tmp_path / "worker.log"
+
+    monkeypatch.setattr(resolver_mod, "_scan_until", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        resolver_mod,
+        "_await_ready",
+        lambda *args, **kwargs: entry,
+    )
+
+    result = resolve_instance(
+        source,
+        registry_dir=tmp_path / "instances",
+        spawn_dir=tmp_path / "spawn",
+        output_database=output,
+        auto_analysis=True,
+        image_base=0x8000,
+        new_database=True,
+        compiler="gcc",
+        first_pass_directives="FIRST=1",
+        second_pass_directives=["SECOND=1"],
+        disable_fpp=True,
+        entry_point=0x8010,
+        jit_debugger=False,
+        log_file=tmp_path / "ida.log",
+        disable_mouse=True,
+        plugin_options="sample:option",
+        processor="arm",
+        db_compression="no_pack",
+        run_debugger="linux",
+        load_resources=True,
+        script_file=tmp_path / "startup.py",
+        script_args="argument",
+        file_type="ZIP",
+        file_member="nested.bin",
+        empty_database=True,
+        windows_dir=tmp_path / "windows",
+        no_segmentation=True,
+        debug_flags="ldr",
+        spawner=fake_spawner,
+    )
+
+    assert result is entry
+    assert captured["source"] == str(source.resolve())
+    assert captured["expected_idb"] == str(output.resolve())
+    assert captured["options"] == resolver_mod.WorkerLaunchOptions(
+        auto_analysis=True,
+        image_base=0x8000,
+        new_database=True,
+        compiler="gcc",
+        first_pass_directives=("FIRST=1",),
+        second_pass_directives=("SECOND=1",),
+        disable_fpp=True,
+        entry_point=0x8010,
+        jit_debugger=False,
+        log_file=str(tmp_path / "ida.log"),
+        disable_mouse=True,
+        plugin_options="sample:option",
+        processor="arm",
+        db_compression="no_pack",
+        run_debugger="linux",
+        load_resources=True,
+        script_file=str(tmp_path / "startup.py"),
+        script_args=("argument",),
+        file_type="ZIP",
+        file_member="nested.bin",
+        empty_database=True,
+        windows_dir=str(tmp_path / "windows"),
+        no_segmentation=True,
+        debug_flags=("ldr",),
+    )
 
 
 def test_handle_close_does_not_wait_for_sse_heartbeat(tmp_path: Path) -> None:
@@ -632,6 +805,27 @@ def test_windows_console_launcher_can_exit_before_worker_child() -> None:
     assert resolver_mod._launcher_exit_is_fatal(0, "posix") is True
 
 
+def test_image_base_uses_byte_units_and_requires_paragraph_alignment() -> None:
+    assert _parse_image_base("0x8000") == 0x8000
+    assert _image_base_to_paragraphs(0x8000) == 0x800
+    assert _image_base_to_paragraphs(None) is None
+    parsed = worker_parser().parse_args(["input.bin", "--debug-mask", "0x80"])
+    assert _build_ida_options(parsed, lambda **kwargs: kwargs)["debug_flags"] == 0x80
+    for value in ("-1", "0x8001", "not-an-address"):
+        try:
+            _parse_image_base(value)
+        except argparse.ArgumentTypeError:
+            pass
+        else:
+            raise AssertionError(f"invalid image base accepted: {value}")
+    try:
+        resolver_mod.WorkerLaunchOptions(image_base=0x8001)
+    except ValueError as exc:
+        assert "16-byte aligned" in str(exc)
+    else:
+        raise AssertionError("unaligned API image base accepted")
+
+
 def test_fresh_worker_opens_source_instead_of_existing_idb(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -651,16 +845,129 @@ def test_fresh_worker_opens_source_instead_of_existing_idb(
         str(source),
         str(expected_idb),
         20.0,
-        resolver_mod.WorkerLaunchOptions(new_database=True),
+        resolver_mod.WorkerLaunchOptions(
+            image_base=0x8000,
+            new_database=True,
+        ),
     )
 
     command = captured["command"]
     assert command[1] == str(source)
     assert command[command.index("--output-database") + 1] == str(expected_idb)
+    assert command[command.index("--image-base") + 1] == "0x8000"
     assert "--new-database" in command
     if resolver_mod.os.name == "nt":
         assert captured["creationflags"] & resolver_mod.subprocess.CREATE_NO_WINDOW
         assert not captured["creationflags"] & resolver_mod.subprocess.DETACHED_PROCESS
+
+
+def test_worker_launch_forwards_all_ida_command_options(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "firmware.bin"
+    expected_idb = tmp_path / "firmware.i64"
+    source.write_bytes(b"binary")
+    log_file = tmp_path / "ida kernel.log"
+    script_file = tmp_path / "startup.py"
+    windows_dir = tmp_path / "windows"
+    captured = {}
+
+    def fake_popen(command, **kwargs):
+        captured.update(command=command, **kwargs)
+        return SimpleNamespace(pid=456)
+
+    monkeypatch.setattr(resolver_mod, "_find_console_script", lambda name: "worker")
+    monkeypatch.setattr(resolver_mod.subprocess, "Popen", fake_popen)
+    resolver_mod.spawn_worker(
+        str(source),
+        str(expected_idb),
+        7.5,
+        resolver_mod.WorkerLaunchOptions(
+            auto_analysis=True,
+            image_base=0x8000,
+            new_database=True,
+            compiler="gcc:sysv",
+            first_pass_directives=("FIRST=1", "FIRST=2"),
+            second_pass_directives=("SECOND=1",),
+            disable_fpp=True,
+            entry_point=0x8010,
+            jit_debugger=False,
+            log_file=str(log_file),
+            disable_mouse=True,
+            plugin_options="sample:option",
+            processor="arm",
+            db_compression="compress",
+            run_debugger="linux",
+            load_resources=True,
+            script_file=str(script_file),
+            script_args=("--flag", "argument two"),
+            file_type="ZIP",
+            file_member="nested.bin",
+            empty_database=True,
+            windows_dir=str(windows_dir),
+            no_segmentation=True,
+            debug_flags=("ldr", "debugger"),
+        ),
+    )
+
+    command = captured["command"]
+    assert "--auto-analysis" in command
+    assert command[command.index("--image-base") + 1] == "0x8000"
+    assert "--new-database" in command
+    assert "--compiler=gcc:sysv" in command
+    assert "--first-pass-directive=FIRST=1" in command
+    assert "--first-pass-directive=FIRST=2" in command
+    assert "--second-pass-directive=SECOND=1" in command
+    assert "--disable-fpp" in command
+    assert command[command.index("--entry-point") + 1] == "0x8010"
+    assert "--no-jit-debugger" in command
+    assert command[command.index("--log-file") + 1] == str(log_file)
+    assert "--disable-mouse" in command
+    assert "--plugin-options=sample:option" in command
+    assert command[command.index("--processor") + 1] == "arm"
+    assert command[command.index("--db-compression") + 1] == "compress"
+    assert "--run-debugger=linux" in command
+    assert "--load-resources" in command
+    assert command[command.index("--script-file") + 1] == str(script_file)
+    assert "--script-arg=--flag" in command
+    assert "--script-arg=argument two" in command
+    assert command[command.index("--file-type") + 1] == "ZIP"
+    assert command[command.index("--file-member") + 1] == "nested.bin"
+    assert "--empty-database" in command
+    assert command[command.index("--windows-dir") + 1] == str(windows_dir)
+    assert "--no-segmentation" in command
+    assert "--debug-flag=ldr" in command
+    assert "--debug-flag=debugger" in command
+
+    parsed = worker_parser().parse_args(command[1:])
+    ida_options = _build_ida_options(parsed, lambda **kwargs: kwargs)
+    assert ida_options == {
+        "auto_analysis": True,
+        "loading_address": 0x800,
+        "new_database": True,
+        "compiler": "gcc:sysv",
+        "first_pass_directives": ["FIRST=1", "FIRST=2"],
+        "second_pass_directives": ["SECOND=1"],
+        "disable_fpp": True,
+        "entry_point": 0x8010,
+        "jit_debugger": False,
+        "log_file": str(log_file.resolve()),
+        "disable_mouse": True,
+        "plugin_options": "sample:option",
+        "output_database": str(expected_idb.resolve()),
+        "processor": "arm",
+        "db_compression": "compress",
+        "run_debugger": "linux",
+        "load_resources": True,
+        "script_file": str(script_file.resolve()),
+        "script_args": ["--flag", "argument two"],
+        "file_type": "ZIP",
+        "file_member": "nested.bin",
+        "empty_database": True,
+        "windows_dir": str(windows_dir.resolve()),
+        "no_segmentation": True,
+        "debug_flags": ["ldr", "debugger"],
+    }
 
 
 def test_await_ready_accepts_console_launcher_child_pid(
@@ -679,7 +986,9 @@ def test_await_ready_accepts_console_launcher_child_pid(
         detail=None,
     )
     process = SimpleNamespace(pid=111, poll=lambda: None)
-    monkeypatch.setattr(resolver_mod, "scan_instances", lambda *args, **kwargs: [discovered])
+    monkeypatch.setattr(
+        resolver_mod, "scan_instances", lambda *args, **kwargs: [discovered]
+    )
 
     result = resolver_mod._await_ready(
         process,

@@ -3,7 +3,7 @@ import json
 import socket
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
@@ -83,22 +83,70 @@ class DatabaseHandle:
         registry_dir: str | Path = REGISTRY_DIR,
         spawn_dir: str | Path = SPAWN_DIR,
         output_database: str | Path | None = None,
-        processor: str | None = None,
-        loading_address: int | None = None,
-        file_type: str | None = None,
+        auto_analysis: bool = False,
+        image_base: int | None = None,
         new_database: bool = False,
+        compiler: str | None = None,
+        first_pass_directives: Sequence[str] = (),
+        second_pass_directives: Sequence[str] = (),
+        disable_fpp: bool = False,
+        entry_point: int | None = None,
+        jit_debugger: bool | None = None,
+        log_file: str | Path | None = None,
+        disable_mouse: bool = False,
+        plugin_options: str | None = None,
+        processor: str | None = None,
+        db_compression: str | None = None,
+        run_debugger: str | None = None,
+        load_resources: bool = False,
+        script_file: str | Path | None = None,
+        script_args: Sequence[str] = (),
+        file_type: str | None = None,
+        file_member: str | None = None,
+        empty_database: bool = False,
+        windows_dir: str | Path | None = None,
+        no_segmentation: bool = False,
+        debug_flags: int | Sequence[str] = 0,
         on_disconnect: Callable[["DatabaseHandle", str], None] | None = None,
     ) -> "DatabaseHandle":
+        """Attach to a shared instance, spawning a configured worker if needed.
+
+        IDA command options are spawn-only: they configure a newly imported
+        idalib database and cannot reconfigure a reused GUI or worker. ``image_base``
+        is a byte address and must be 16-byte aligned; the worker converts it to
+        IDA's paragraph-based ``-b`` value.
+        """
+
         resolve_options = {
             "spawn": spawn,
             "timeout": timeout,
             "registry_dir": registry_dir,
             "spawn_dir": spawn_dir,
             "output_database": output_database,
-            "processor": processor,
-            "loading_address": loading_address,
-            "file_type": file_type,
+            "auto_analysis": auto_analysis,
+            "image_base": image_base,
             "new_database": new_database,
+            "compiler": compiler,
+            "first_pass_directives": first_pass_directives,
+            "second_pass_directives": second_pass_directives,
+            "disable_fpp": disable_fpp,
+            "entry_point": entry_point,
+            "jit_debugger": jit_debugger,
+            "log_file": log_file,
+            "disable_mouse": disable_mouse,
+            "plugin_options": plugin_options,
+            "processor": processor,
+            "db_compression": db_compression,
+            "run_debugger": run_debugger,
+            "load_resources": load_resources,
+            "script_file": script_file,
+            "script_args": script_args,
+            "file_type": file_type,
+            "file_member": file_member,
+            "empty_database": empty_database,
+            "windows_dir": windows_dir,
+            "no_segmentation": no_segmentation,
+            "debug_flags": debug_flags,
         }
         entry = resolve_instance(path, **resolve_options)
         try:

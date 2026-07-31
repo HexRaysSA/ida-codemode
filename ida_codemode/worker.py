@@ -11,6 +11,29 @@ from .runtime import AnalysisState, IDARuntime, create_autoanalysis_hook
 from .server import DEFAULT_LEASE_GRACE_SECONDS, CodeModeHTTPServer
 
 
+def _parse_non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value, 0)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("value must be an integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must not be negative")
+    return parsed
+
+
+def _parse_image_base(value: str) -> int:
+    """Parse a byte-addressed image base for IDA's paragraph-based ``-b``."""
+
+    image_base = _parse_non_negative_int(value)
+    if image_base % 16:
+        raise argparse.ArgumentTypeError("image base must be 16-byte aligned")
+    return image_base
+
+
+def _image_base_to_paragraphs(image_base: int | None) -> int | None:
+    return image_base // 16 if image_base is not None else None
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ida-codemode-worker",
@@ -25,6 +48,16 @@ def _parser() -> argparse.ArgumentParser:
         help="Initialize idalib without opening a database, then exit",
     )
     parser.add_argument(
+        "--auto-analysis",
+        action="store_true",
+        help="Enable IDA autoanalysis while opening the database",
+    )
+    parser.add_argument(
+        "--image-base",
+        type=_parse_image_base,
+        help="Image base in bytes; must be 16-byte aligned (converted to IDA -b paragraphs)",
+    )
+    parser.add_argument(
         "--new-database",
         action="store_true",
         help="Discard an existing database and create a new one",
@@ -34,14 +67,46 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="Write a newly-created database to this path",
     )
+    parser.add_argument("--compiler", help="Compiler identifier (-C)")
+    parser.add_argument(
+        "--first-pass-directive",
+        action="append",
+        default=[],
+        help="First-pass IDA configuration directive (-d); repeatable",
+    )
+    parser.add_argument(
+        "--second-pass-directive",
+        action="append",
+        default=[],
+        help="Second-pass IDA configuration directive (-D); repeatable",
+    )
+    parser.add_argument("--disable-fpp", action="store_true")
+    parser.add_argument("--entry-point", type=_parse_non_negative_int)
+    parser.add_argument(
+        "--jit-debugger",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    parser.add_argument("--log-file", type=Path, help="IDA kernel log file")
+    parser.add_argument("--disable-mouse", action="store_true")
+    parser.add_argument("--plugin-options")
     parser.add_argument("--processor", help="IDA processor module name")
     parser.add_argument(
-        "--loading-address",
-        type=lambda value: int(value, 0),
-        help="IDA loader address (-b value)",
+        "--db-compression",
+        choices=("compress", "pack", "no_pack"),
     )
+    parser.add_argument("--run-debugger")
+    parser.add_argument("--load-resources", action="store_true")
+    parser.add_argument("--script-file", type=Path)
+    parser.add_argument("--script-arg", action="append", default=[])
     parser.add_argument("--file-type", help="IDA loader/file type (-T value)")
-    parser.add_argument("--log-file", type=Path, help="IDA kernel log file")
+    parser.add_argument("--file-member", help="Archive member for --file-type")
+    parser.add_argument("--empty-database", action="store_true")
+    parser.add_argument("--windows-dir", type=Path)
+    parser.add_argument("--no-segmentation", action="store_true")
+    debug_group = parser.add_mutually_exclusive_group()
+    debug_group.add_argument("--debug-mask", type=_parse_non_negative_int)
+    debug_group.add_argument("--debug-flag", action="append", default=[])
     parser.add_argument(
         "--managed",
         action="store_true",
@@ -79,9 +144,55 @@ def _redirect_output(record_id: str) -> Path:
     return path
 
 
+def _build_ida_options(args: argparse.Namespace, options_type: Any) -> Any:
+    """Translate byte-oriented worker arguments into ``IdaCommandOptions``."""
+
+    return options_type(
+        auto_analysis=args.auto_analysis,
+        loading_address=_image_base_to_paragraphs(args.image_base),
+        new_database=args.new_database,
+        compiler=args.compiler,
+        first_pass_directives=args.first_pass_directive,
+        second_pass_directives=args.second_pass_directive,
+        disable_fpp=args.disable_fpp,
+        entry_point=args.entry_point,
+        jit_debugger=args.jit_debugger,
+        log_file=(str(args.log_file.expanduser().resolve()) if args.log_file else None),
+        disable_mouse=args.disable_mouse,
+        plugin_options=args.plugin_options,
+        output_database=(
+            str(args.output_database.expanduser().resolve())
+            if args.output_database
+            else None
+        ),
+        processor=args.processor,
+        db_compression=args.db_compression,
+        run_debugger=args.run_debugger,
+        load_resources=args.load_resources,
+        script_file=(
+            str(args.script_file.expanduser().resolve()) if args.script_file else None
+        ),
+        script_args=args.script_arg,
+        file_type=args.file_type,
+        file_member=args.file_member,
+        empty_database=args.empty_database,
+        windows_dir=(
+            str(args.windows_dir.expanduser().resolve()) if args.windows_dir else None
+        ),
+        no_segmentation=args.no_segmentation,
+        debug_flags=(
+            args.debug_mask if args.debug_mask is not None else args.debug_flag
+        ),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.file_member and not args.file_type:
+        parser.error("--file-member requires --file-type")
+    if args.script_arg and not args.script_file:
+        parser.error("--script-arg requires --script-file")
     if args.probe:
         if args.input is not None:
             parser.error("input cannot be used with --probe")
@@ -146,21 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         previous_handlers[signum] = signal.signal(signum, request_stop)
 
     try:
-        options = IdaCommandOptions(
-            auto_analysis=False,
-            new_database=args.new_database,
-            output_database=(
-                str(args.output_database.expanduser().resolve())
-                if args.output_database
-                else None
-            ),
-            processor=args.processor,
-            loading_address=args.loading_address,
-            file_type=args.file_type,
-            log_file=(
-                str(args.log_file.expanduser().resolve()) if args.log_file else None
-            ),
-        )
+        options = _build_ida_options(args, IdaCommandOptions)
         database = Database.open(
             str(input_path),
             args=options,

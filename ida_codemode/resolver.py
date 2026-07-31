@@ -3,7 +3,7 @@ import subprocess
 import sys
 import sysconfig
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,18 +45,68 @@ class WorkerStartError(ResolveError):
 
 @dataclass(frozen=True)
 class WorkerLaunchOptions:
-    """Import options used only when a new idalib worker must be spawned."""
+    """IDA import options used only when a new idalib worker is spawned."""
 
-    processor: str | None = None
-    loading_address: int | None = None
-    file_type: str | None = None
+    auto_analysis: bool = False
+    image_base: int | None = None
     new_database: bool = False
+    compiler: str | None = None
+    first_pass_directives: tuple[str, ...] = ()
+    second_pass_directives: tuple[str, ...] = ()
+    disable_fpp: bool = False
+    entry_point: int | None = None
+    jit_debugger: bool | None = None
+    log_file: str | None = None
+    disable_mouse: bool = False
+    plugin_options: str | None = None
+    processor: str | None = None
+    db_compression: str | None = None
+    run_debugger: str | None = None
+    load_resources: bool = False
+    script_file: str | None = None
+    script_args: tuple[str, ...] = ()
+    file_type: str | None = None
+    file_member: str | None = None
+    empty_database: bool = False
+    windows_dir: str | None = None
+    no_segmentation: bool = False
+    debug_flags: int | tuple[str, ...] = 0
+
+    def __post_init__(self) -> None:
+        if self.image_base is not None:
+            if isinstance(self.image_base, bool) or self.image_base < 0:
+                raise ValueError("image_base must be a non-negative byte address")
+            if self.image_base % 16:
+                raise ValueError("image_base must be 16-byte aligned")
+        if self.entry_point is not None and (
+            isinstance(self.entry_point, bool) or self.entry_point < 0
+        ):
+            raise ValueError("entry_point must be a non-negative byte address")
+        if self.db_compression not in {None, "compress", "pack", "no_pack"}:
+            raise ValueError(
+                "db_compression must be 'compress', 'pack', 'no_pack', or None"
+            )
+        if self.file_member and not self.file_type:
+            raise ValueError("file_member requires file_type")
+        if self.script_args and not self.script_file:
+            raise ValueError("script_args require script_file")
+        if isinstance(self.debug_flags, bool):
+            raise TypeError("debug_flags must be an integer mask or flag names")
+        if isinstance(self.debug_flags, int):
+            if self.debug_flags < 0:
+                raise ValueError("debug_flags mask must not be negative")
+        elif any(not flag for flag in self.debug_flags):
+            raise ValueError("debug flag names must not be empty")
 
 
 WorkerSpawner = Callable[
     [str, str, float, WorkerLaunchOptions],
     tuple[subprocess.Popen[bytes], Path],
 ]
+
+
+def _string_tuple(values: Sequence[str]) -> tuple[str, ...]:
+    return (values,) if isinstance(values, str) else tuple(values)
 
 
 def expected_idb_path(path: str | os.PathLike[str]) -> str:
@@ -162,7 +212,9 @@ def spawn_worker(
     input_path = (
         source
         if options.new_database
-        else expected_idb if os.path.exists(expected_idb) else source
+        else expected_idb
+        if os.path.exists(expected_idb)
+        else source
     )
     worker = _find_console_script("ida-codemode-worker")
     if worker is None:
@@ -181,14 +233,62 @@ def spawn_worker(
     ]
     if input_path == source and source != expected_idb:
         command.extend(["--output-database", expected_idb])
-    if options.processor:
-        command.extend(["--processor", options.processor])
-    if options.loading_address is not None:
-        command.extend(["--loading-address", hex(options.loading_address)])
-    if options.file_type:
-        command.extend(["--file-type", options.file_type])
+    if options.auto_analysis:
+        command.append("--auto-analysis")
+    if options.image_base is not None:
+        command.extend(["--image-base", hex(options.image_base)])
     if options.new_database:
         command.append("--new-database")
+    if options.compiler:
+        command.append(f"--compiler={options.compiler}")
+    command.extend(
+        f"--first-pass-directive={directive}"
+        for directive in options.first_pass_directives
+    )
+    command.extend(
+        f"--second-pass-directive={directive}"
+        for directive in options.second_pass_directives
+    )
+    if options.disable_fpp:
+        command.append("--disable-fpp")
+    if options.entry_point is not None:
+        command.extend(["--entry-point", hex(options.entry_point)])
+    if options.jit_debugger is not None:
+        command.append(
+            "--jit-debugger" if options.jit_debugger else "--no-jit-debugger"
+        )
+    if options.log_file:
+        command.extend(["--log-file", options.log_file])
+    if options.disable_mouse:
+        command.append("--disable-mouse")
+    if options.plugin_options:
+        command.append(f"--plugin-options={options.plugin_options}")
+    if options.processor:
+        command.extend(["--processor", options.processor])
+    if options.db_compression:
+        command.extend(["--db-compression", options.db_compression])
+    if options.run_debugger:
+        command.append(f"--run-debugger={options.run_debugger}")
+    if options.load_resources:
+        command.append("--load-resources")
+    if options.script_file:
+        command.extend(["--script-file", options.script_file])
+    command.extend(f"--script-arg={argument}" for argument in options.script_args)
+    if options.file_type:
+        command.extend(["--file-type", options.file_type])
+    if options.file_member:
+        command.extend(["--file-member", options.file_member])
+    if options.empty_database:
+        command.append("--empty-database")
+    if options.windows_dir:
+        command.extend(["--windows-dir", options.windows_dir])
+    if options.no_segmentation:
+        command.append("--no-segmentation")
+    if isinstance(options.debug_flags, int):
+        if options.debug_flags:
+            command.extend(["--debug-mask", hex(options.debug_flags)])
+    else:
+        command.extend(f"--debug-flag={flag}" for flag in options.debug_flags)
 
     process: subprocess.Popen[bytes]
     if os.name == "nt":
@@ -332,12 +432,38 @@ def resolve_instance(
     spawn_dir: str | os.PathLike[str] = SPAWN_DIR,
     lease_grace: float = 20.0,
     output_database: str | os.PathLike[str] | None = None,
-    processor: str | None = None,
-    loading_address: int | None = None,
-    file_type: str | None = None,
+    auto_analysis: bool = False,
+    image_base: int | None = None,
     new_database: bool = False,
+    compiler: str | None = None,
+    first_pass_directives: Sequence[str] = (),
+    second_pass_directives: Sequence[str] = (),
+    disable_fpp: bool = False,
+    entry_point: int | None = None,
+    jit_debugger: bool | None = None,
+    log_file: str | os.PathLike[str] | None = None,
+    disable_mouse: bool = False,
+    plugin_options: str | None = None,
+    processor: str | None = None,
+    db_compression: str | None = None,
+    run_debugger: str | None = None,
+    load_resources: bool = False,
+    script_file: str | os.PathLike[str] | None = None,
+    script_args: Sequence[str] = (),
+    file_type: str | None = None,
+    file_member: str | None = None,
+    empty_database: bool = False,
+    windows_dir: str | os.PathLike[str] | None = None,
+    no_segmentation: bool = False,
+    debug_flags: int | Sequence[str] = 0,
     spawner: WorkerSpawner = spawn_worker,
 ) -> RegistryEntry:
+    """Resolve one database owner, applying IDA options only when spawning.
+
+    ``image_base`` uses byte units and must be 16-byte aligned. All remaining
+    launch controls map directly to ``ida_domain.database.IdaCommandOptions``.
+    """
+
     if timeout <= 0:
         raise ValueError("timeout must be positive")
     source = canonical_path(path)
@@ -347,10 +473,32 @@ def resolve_instance(
         else expected_idb_path(source)
     )
     launch_options = WorkerLaunchOptions(
-        processor=processor,
-        loading_address=loading_address,
-        file_type=file_type,
+        auto_analysis=auto_analysis,
+        image_base=image_base,
         new_database=new_database,
+        compiler=compiler,
+        first_pass_directives=_string_tuple(first_pass_directives),
+        second_pass_directives=_string_tuple(second_pass_directives),
+        disable_fpp=disable_fpp,
+        entry_point=entry_point,
+        jit_debugger=jit_debugger,
+        log_file=os.fspath(log_file) if log_file is not None else None,
+        disable_mouse=disable_mouse,
+        plugin_options=plugin_options,
+        processor=processor,
+        db_compression=db_compression,
+        run_debugger=run_debugger,
+        load_resources=load_resources,
+        script_file=os.fspath(script_file) if script_file is not None else None,
+        script_args=_string_tuple(script_args),
+        file_type=file_type,
+        file_member=file_member,
+        empty_database=empty_database,
+        windows_dir=os.fspath(windows_dir) if windows_dir is not None else None,
+        no_segmentation=no_segmentation,
+        debug_flags=(
+            debug_flags if isinstance(debug_flags, int) else _string_tuple(debug_flags)
+        ),
     )
     deadline = time.monotonic() + timeout
 

@@ -142,12 +142,20 @@ disk permanently to avoid split-inode locking races.
    PID is sufficient; on Windows the console launcher can hand off to a Python
    child, so the random record suffix is authoritative across both processes.
 
-The low-level handle/resolver also accepts an explicit output database,
-processor, loading address, file type, and fresh-database flag. An explicit
-output database resolves by that IDB identity rather than attaching to a GUI
-that merely has the same executable open. A fresh-database request never
-reuses a live owner. These import controls are currently low-level/worker APIs,
-not arguments of the six-tool MCP surface.
+The low-level handle/resolver exposes the complete `IdaCommandOptions` import
+surface to managed workers: analysis mode, image base, fresh/output database,
+compiler, first/second-pass directives, FPP handling, entry point, JIT setting,
+kernel log, mouse/plugin/processor options, database compression, debugger and
+resource settings, startup script and arguments, loader/member selection, empty
+database, Windows directory, segmentation, and debug flags. The worker requires
+a 16-byte-aligned byte image base and converts it transparently to IDA's
+paragraph-based `-b` value.
+
+An explicit output database resolves by that IDB identity rather than attaching
+to a GUI that merely has the same executable open. A fresh-database request
+never reuses a live owner. All launch options are spawn-only and cannot
+reconfigure a reused instance. These controls are currently low-level
+`DatabaseHandle`/resolver/worker APIs, not arguments of the six-tool MCP surface.
 
 The spawn lock is held until the child becomes ready or fails. Startup waiting
 checks `Popen.poll()` without mistaking a successful Windows launcher handoff
