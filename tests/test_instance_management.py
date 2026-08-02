@@ -1,11 +1,12 @@
 import argparse
 import json
+import subprocess
 import threading
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import ida_codemode.client as client_mod
 import ida_codemode.resolver as resolver_mod
@@ -121,7 +122,7 @@ def test_scan_blocks_an_unsupported_protocol_version(tmp_path: Path) -> None:
     )
 
 
-def test_scan_accepts_additive_protocol_fields(tmp_path: Path) -> None:
+def test_scan_accepts_additive_protocol_fields(tmp_path: Path, monkeypatch) -> None:
     registry_dir = tmp_path / "instances"
     server = CodeModeHTTPServer(
         StaticBackend(),
@@ -141,7 +142,7 @@ def test_scan_accepts_additive_protocol_fields(tmp_path: Path) -> None:
     def health_payload() -> dict[str, Any]:
         return {**original_health_payload(), "future_health_field": True}
 
-    server._health_payload = health_payload
+    monkeypatch.setattr(server, "_health_payload", health_payload)
 
     try:
         discovered = scan_instances(registry_dir)
@@ -997,7 +998,7 @@ def test_await_ready_accepts_console_launcher_child_pid(
         state=resolver_mod.InstanceState.READY,
         detail=None,
     )
-    process = SimpleNamespace(pid=111, poll=lambda: None)
+    process = cast(subprocess.Popen[bytes], SimpleNamespace(pid=111, poll=lambda: None))
     monkeypatch.setattr(
         resolver_mod, "scan_instances", lambda *args, **kwargs: [discovered]
     )

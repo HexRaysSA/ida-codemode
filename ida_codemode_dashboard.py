@@ -237,14 +237,57 @@ def _summary_agent_sessions(summary: SessionSummary) -> set[tuple[str, str]]:
     return set(summary.agent_sessions.items())
 
 
+def _windows_pid_alive(pid: int) -> bool:
+    """Check a PID without using ``os.kill(pid, 0)`` on Windows.
+
+    On Windows, signal 0 is ``CTRL_C_EVENT`` rather than a harmless existence
+    probe.  Calling ``os.kill(pid, 0)`` can therefore interrupt the process (or
+    the dashboard itself) and has also been observed to raise ``SystemError``.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    error_access_denied = 5
+    still_active = 259
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    open_process.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    get_exit_code = kernel32.GetExitCodeProcess
+    get_exit_code.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    get_exit_code.restype = wintypes.BOOL
+
+    handle = open_process(process_query_limited_information, False, pid)
+    if not handle:
+        # Protected system processes may deny access, which still proves that
+        # the PID exists.
+        return ctypes.get_last_error() == error_access_denied
+    try:
+        exit_code = wintypes.DWORD()
+        if not get_exit_code(handle, ctypes.byref(exit_code)):
+            return True
+        return exit_code.value == still_active
+    finally:
+        close_handle(handle)
+
+
 def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        return _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    except OSError:
+    except (OSError, OverflowError, SystemError):
         return False
     return True
 
@@ -364,9 +407,7 @@ def _session_route_name(path: Path) -> str:
         return path.name
 
 
-_UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-)
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
 def _is_benchmark_dir(directory: Path) -> bool:

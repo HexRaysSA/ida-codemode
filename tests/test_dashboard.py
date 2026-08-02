@@ -1,7 +1,9 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import ida_codemode_dashboard as dashboard
 
@@ -129,6 +131,36 @@ class TranscriptTests(unittest.TestCase):
 
 
 class SemanticSessionTests(unittest.TestCase):
+    def test_pid_liveness_uses_a_safe_windows_probe(self) -> None:
+        with (
+            mock.patch.object(dashboard.os, "name", "nt"),
+            mock.patch.object(
+                dashboard, "_windows_pid_alive", return_value=True
+            ) as windows_probe,
+            mock.patch.object(dashboard.os, "kill") as kill,
+        ):
+            self.assertTrue(dashboard._pid_alive(1234))
+
+        windows_probe.assert_called_once_with(1234)
+        kill.assert_not_called()
+        self.assertFalse(dashboard._pid_alive(0))
+
+        if os.name == "nt":
+            self.assertTrue(dashboard._windows_pid_alive(os.getpid()))
+
+    def test_pid_liveness_handles_a_broken_posix_probe(self) -> None:
+        with (
+            mock.patch.object(dashboard.os, "name", "posix"),
+            mock.patch.object(
+                dashboard.os,
+                "kill",
+                side_effect=SystemError(
+                    "<built-in function kill> returned a result with an exception set"
+                ),
+            ),
+        ):
+            self.assertFalse(dashboard._pid_alive(1234))
+
     def test_scan_hides_traces_without_tool_or_agent_activity(self) -> None:
         def write(path: Path, records: list[dict[str, object]]) -> None:
             path.write_text(
@@ -210,7 +242,6 @@ class SemanticSessionTests(unittest.TestCase):
             {"tool", "agent"},
         )
 
-
     def test_benchmark_autodetect_and_agent_resolution(self) -> None:
         def write(path: Path, records: list[dict[str, object]]) -> None:
             path.write_text(
@@ -237,7 +268,14 @@ class SemanticSessionTests(unittest.TestCase):
                 logs_dir / "session.jsonl",
                 [
                     {"type": "user", "message": {"role": "user", "content": "hi"}},
-                    {"type": "assistant", "message": {"role": "assistant", "model": "claude-opus-5", "content": [{"type": "text", "text": "hello"}]}},
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "role": "assistant",
+                            "model": "claude-opus-5",
+                            "content": [{"type": "text", "text": "hello"}],
+                        },
+                    },
                 ],
             )
 
@@ -267,11 +305,13 @@ class SemanticSessionTests(unittest.TestCase):
             try:
                 self.assertTrue(dashboard._is_benchmark_dir(sessions_dir))
                 summaries = dashboard._scan_sessions()
+                index = dashboard.render_index()
                 self.assertEqual(len(summaries), 1)
+                self.assertIn("bench-test", index)
                 summary = summaries[0]
                 self.assertEqual(summary.session_id, "bench-test")
                 resolved = summary.agent_sessions.get("claude")
-                self.assertIsNotNone(resolved)
+                assert resolved is not None
                 self.assertEqual(
                     Path(resolved),
                     logs_dir / "session.jsonl",

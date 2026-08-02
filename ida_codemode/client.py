@@ -108,7 +108,7 @@ class DatabaseHandle:
         no_segmentation: bool = False,
         debug_flags: int | Sequence[str] = 0,
         on_disconnect: Callable[["DatabaseHandle", str], None] | None = None,
-    ) -> "DatabaseHandle":
+    ) -> Self:
         """Attach to a shared instance, spawning a configured worker if needed.
 
         IDA command options are spawn-only: they configure a newly imported
@@ -117,38 +117,41 @@ class DatabaseHandle:
         IDA's paragraph-based ``-b`` value.
         """
 
-        resolve_options = {
-            "spawn": spawn,
-            "timeout": timeout,
-            "registry_dir": registry_dir,
-            "spawn_dir": spawn_dir,
-            "output_database": output_database,
-            "auto_analysis": auto_analysis,
-            "image_base": image_base,
-            "new_database": new_database,
-            "compiler": compiler,
-            "first_pass_directives": first_pass_directives,
-            "second_pass_directives": second_pass_directives,
-            "disable_fpp": disable_fpp,
-            "entry_point": entry_point,
-            "jit_debugger": jit_debugger,
-            "log_file": log_file,
-            "disable_mouse": disable_mouse,
-            "plugin_options": plugin_options,
-            "processor": processor,
-            "db_compression": db_compression,
-            "run_debugger": run_debugger,
-            "load_resources": load_resources,
-            "script_file": script_file,
-            "script_args": script_args,
-            "file_type": file_type,
-            "file_member": file_member,
-            "empty_database": empty_database,
-            "windows_dir": windows_dir,
-            "no_segmentation": no_segmentation,
-            "debug_flags": debug_flags,
-        }
-        entry = resolve_instance(path, **resolve_options)
+        def resolve() -> RegistryEntry:
+            return resolve_instance(
+                path,
+                spawn=spawn,
+                timeout=timeout,
+                registry_dir=registry_dir,
+                spawn_dir=spawn_dir,
+                output_database=output_database,
+                auto_analysis=auto_analysis,
+                image_base=image_base,
+                new_database=new_database,
+                compiler=compiler,
+                first_pass_directives=first_pass_directives,
+                second_pass_directives=second_pass_directives,
+                disable_fpp=disable_fpp,
+                entry_point=entry_point,
+                jit_debugger=jit_debugger,
+                log_file=log_file,
+                disable_mouse=disable_mouse,
+                plugin_options=plugin_options,
+                processor=processor,
+                db_compression=db_compression,
+                run_debugger=run_debugger,
+                load_resources=load_resources,
+                script_file=script_file,
+                script_args=script_args,
+                file_type=file_type,
+                file_member=file_member,
+                empty_database=empty_database,
+                windows_dir=windows_dir,
+                no_segmentation=no_segmentation,
+                debug_flags=debug_flags,
+            )
+
+        entry = resolve()
         try:
             return cls(path, entry, on_disconnect=on_disconnect)
         except ClientError:
@@ -156,7 +159,7 @@ class DatabaseHandle:
             # resolve and the SSE handshake. Resolve once more as promised by
             # the instance lifecycle contract.
             time.sleep(0.05)
-            replacement = resolve_instance(path, **resolve_options)
+            replacement = resolve()
             return cls(path, replacement, on_disconnect=on_disconnect)
 
     @property
