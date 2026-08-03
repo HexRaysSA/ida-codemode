@@ -220,7 +220,7 @@ def spawn_worker(
     if worker is None:
         raise ResolveError(
             "Could not find the 'ida-codemode-worker' console script for this "
-            "Python. Ensure the ida-codemode-mcp package is installed."
+            "Python. Ensure the ida-codemode package is installed."
         )
     command = [
         worker,

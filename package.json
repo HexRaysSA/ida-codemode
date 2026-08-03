@@ -1,5 +1,5 @@
 {
-  "name": "ida-codemode-mcp",
+  "name": "ida-codemode",
   "version": "0.2.0",
   "description": "IDA Code Mode MCP server and Pi extension",
   "license": "MIT",
@@ -10,7 +10,7 @@
     "reverse-engineering",
     "mcp"
   ],
-  "repository": "https://github.com/HexRaysSA/ida-codemode-mcp.git",
+  "repository": "https://github.com/HexRaysSA/ida-codemode.git",
   "files": [
     ".python-version",
     "ida-codemode.ts",

@@ -399,7 +399,7 @@ def execute_python(
 
 
 def _gui_plugin_installed() -> bool:
-    """Check whether the ida-codemode-mcp GUI plugin is installed."""
+    """Check whether the ida-codemode GUI plugin is installed."""
     plugin_dir = get_idausr_dir() / "plugins" / "ida-codemode"
     plugin_manifest = plugin_dir / "ida-plugin.json"
     plugin_entrypoint = plugin_dir / "ida_codemode_plugin.py"
@@ -416,7 +416,7 @@ def list_databases() -> ListDatabasesToolResult:
     result = ListDatabasesToolResult(**DATABASE_MANAGER.list_databases())
     if not _gui_plugin_installed():
         result["hint"] = (
-            "To enable GUI database discovery, install the ida-codemode plugin: hcli plugin install https://github.com/HexRaysSA/ida-codemode-mcp"
+            "To enable GUI database discovery, install the ida-codemode plugin: hcli plugin install https://github.com/HexRaysSA/ida-codemode"
         )
     return result
 

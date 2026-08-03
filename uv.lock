@@ -12,7 +12,7 @@ wheels = [
 ]
 
 [[package]]
-name = "ida-codemode-mcp"
+name = "ida-codemode"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [

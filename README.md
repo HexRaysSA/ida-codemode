@@ -1,4 +1,4 @@
-# ida-codemode-mcp
+# ida-codemode
 
 IDA Code Mode gives agents a compact Python execution surface over the
 [`ida-domain`](https://github.com/HexRaysSA/ida-domain) API. It will
@@ -29,28 +29,30 @@ lease disappears; GUI databases are never closed by MCP lifecycle management.
 
 ### Requirements
 
-- [uv](https://github.com/astral-sh/uv)
-- IDA 9.4 or higher (Python 3.11+) with [idalib](https://docs.hex-rays.com/core/idalib/overview) configured
-- MCP Client
+- Installed in your PATH
+  - [Git](https://git-scm.com/)
+  - [uv](https://github.com/astral-sh/uv)
+  - [hcli](https://hcli.docs.hex-rays.com/)
+- IDA 9.4 or higher with Python 3.11+
 
-### Claude Code
+### [Claude Code](https://claude.com/product/claude-code)
 
 ```bash
 claude plugin marketplace add HexRaysSA/claude-marketplace
-claude plugin install ida-codemode-mcp@HexRaysSA
+claude plugin install ida-mcp@HexRaysSA
 ```
 
-### Codex
+### [Codex CLI](https://learn.chatgpt.com/docs/codex/cli)
 
 ```bash
 codex plugin marketplace add HexRaysSA/codex-marketplace
-codex plugin add ida-codemode-mcp@HexRaysSA
+codex plugin add ida-mcp@HexRaysSA
 ```
 
-### Pi
+### [Pi](https://pi.dev/)
 
 ```bash
-pi install git:github.com/HexRaysSA/ida-codemode-mcp
+pi install git:github.com/HexRaysSA/ida-codemode
 ```
 
 ### IDA GUI
@@ -58,7 +60,7 @@ pi install git:github.com/HexRaysSA/ida-codemode-mcp
 To (optionally) support using IDA GUI instances from the MCP:
 
 ```bash
-hcli plugin install https://github.com/HexRaysSA/ida-codemode-mcp
+hcli plugin install https://github.com/HexRaysSA/ida-codemode/archive/refs/heads/main.zip
 ```
 
 ### Other agents
@@ -72,7 +74,7 @@ Configure a regular stdio MCP server in your `mcp.json`:
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/HexRaysSA/ida-codemode-mcp",
+        "git+https://github.com/HexRaysSA/ida-codemode",
         "ida-codemode-mcp",
         "--agent",
         "my-agent"
