@@ -19,10 +19,24 @@ import { Text } from "@earendil-works/pi-tui";
 
 const PACKAGE_ROOT = dirname(fileURLToPath(import.meta.url));
 const CALL_TIMEOUT_MS = 360_000;
+const STDERR_CAPTURE_MAX_CHARS = 1024 * 1024;
 
 type PiContent =
   | { type: "text"; text: string }
   | { type: "image"; data: string; mimeType: string };
+
+async function saveStartupLog(output: string): Promise<string | undefined> {
+  if (!output.trim()) return undefined;
+
+  try {
+    const dir = await mkdtemp(join(tmpdir(), "pi-ida-mcp-startup-"));
+    const path = join(dir, "stderr.log");
+    await writeFile(path, output, "utf8");
+    return path;
+  } catch {
+    return undefined;
+  }
+}
 
 function renderToolCall(
   toolName: string,
@@ -68,6 +82,8 @@ export default function idaCodemode(pi: ExtensionAPI) {
     if (client) return;
 
     const next = new Client({ name: "ida-codemode-pi", version: "0.2.0" });
+    let capturedStderr = "";
+    let captureStderr = true;
     const transport = new StdioClientTransport({
       command: "uv",
       args: [
@@ -80,6 +96,7 @@ export default function idaCodemode(pi: ExtensionAPI) {
         "--install-plugin",
       ],
       cwd: PACKAGE_ROOT,
+      stderr: "pipe",
       env: {
         ...(process.env.IDA_CODEMODE_ID
           ? { IDA_CODEMODE_ID: process.env.IDA_CODEMODE_ID }
@@ -89,6 +106,12 @@ export default function idaCodemode(pi: ExtensionAPI) {
           ? { IDA_CODEMODE_STATE_DIR: process.env.IDA_CODEMODE_STATE_DIR }
           : {}),
       },
+    });
+
+    transport.stderr?.on("data", (chunk: unknown) => {
+      if (!captureStderr) return;
+      const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      capturedStderr = (capturedStderr + text).slice(-STDERR_CAPTURE_MAX_CHARS);
     });
 
     try {
@@ -200,12 +223,16 @@ export default function idaCodemode(pi: ExtensionAPI) {
         });
       }
 
+      captureStderr = false;
+      capturedStderr = "";
       ctx.ui.notify(`IDA MCP connected (${tools.length} tools)`, "info");
     } catch (error) {
       client = undefined;
       await next.close().catch(() => undefined);
       const message = error instanceof Error ? error.message : String(error);
-      ctx.ui.notify(`IDA MCP failed to start: ${message}`, "error");
+      const logPath = await saveStartupLog(capturedStderr);
+      const log = logPath ? ` Log: ${logPath}` : "";
+      ctx.ui.notify(`IDA MCP failed to start: ${message}${log}`, "error");
     }
   });
 
