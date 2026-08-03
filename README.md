@@ -32,7 +32,6 @@ lease disappears; GUI databases are never closed by MCP lifecycle management.
 - Installed in your PATH
   - [Git](https://git-scm.com/)
   - [uv](https://github.com/astral-sh/uv)
-  - [hcli](https://hcli.docs.hex-rays.com/)
 - IDA 9.4 or higher with Python 3.11+
 
 ### [Claude Code](https://claude.com/product/claude-code)
@@ -57,11 +56,15 @@ pi install git:github.com/HexRaysSA/ida-codemode
 
 ### IDA GUI
 
-To (optionally) support using IDA GUI instances from the MCP:
+To (optionally) support using IDA GUI instances from the MCP, install
+[hcli](https://hcli.docs.hex-rays.com/) in your PATH and run:
 
 ```bash
 hcli plugin install https://github.com/HexRaysSA/ida-codemode/archive/refs/heads/main.zip
 ```
+
+Agent integrations attempt this plugin installation in the background after
+MCP starts. If it fails, the MCP remains available for idalib databases.
 
 ### Other agents
 

@@ -521,6 +521,114 @@ def test_mcp_plugin_install_uses_hcli_from_current_environment(
     ]
 
 
+def test_mcp_plugin_install_command_failure_does_not_raise(
+    tmp_path: Path, monkeypatch
+) -> None:
+    records: list[tuple[str, dict[str, object]]] = []
+    command = ["hcli", "plugin", "install", str(tmp_path)]
+
+    def failing_run(
+        actual_command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(
+            1,
+            actual_command,
+            output="partial output",
+            stderr="install failed",
+        )
+
+    monkeypatch.setattr(
+        mcp_app,
+        "TRACE",
+        SimpleNamespace(emit=lambda event, **fields: records.append((event, fields))),
+    )
+    monkeypatch.setattr(mcp_app, "_gui_plugin_installed", lambda: False)
+    monkeypatch.setattr(mcp_app, "find_console_script", lambda _name: "hcli")
+    monkeypatch.setattr(mcp_app, "get_idausr_dir", lambda: tmp_path / "idausr")
+    monkeypatch.setattr(mcp_app.subprocess, "run", failing_run)
+
+    mcp_app._install_gui_plugin(tmp_path)
+
+    assert [event for event, _fields in records] == [
+        "plugin_install_started",
+        "plugin_install_failed",
+    ]
+    failure = records[-1][1]
+    assert failure["command"] == command
+    assert failure["stdout"] == "partial output"
+    assert failure["stderr"] == "install failed"
+
+
+def test_mcp_plugin_install_uses_hcli_from_path(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    hcli = str(tmp_path / "external" / "hcli")
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        captured.update(command=command, **kwargs)
+        return subprocess.CompletedProcess(command, 0, "installed\n", "")
+
+    monkeypatch.setattr(mcp_app, "TRACE", SimpleNamespace(emit=lambda *_a, **_k: None))
+    monkeypatch.setattr(mcp_app, "_gui_plugin_installed", lambda: False)
+    monkeypatch.setattr(mcp_app, "find_console_script", lambda _name: None)
+    monkeypatch.setattr(mcp_app.shutil, "which", lambda name: hcli)
+    monkeypatch.setattr(mcp_app, "get_idausr_dir", lambda: tmp_path / "idausr")
+    monkeypatch.setattr(mcp_app.subprocess, "run", fake_run)
+
+    mcp_app._install_gui_plugin(tmp_path)
+
+    assert captured["command"] == [hcli, "plugin", "install", str(tmp_path)]
+
+
+def test_mcp_plugin_install_missing_hcli_does_not_raise(
+    tmp_path: Path, monkeypatch
+) -> None:
+    records: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        mcp_app,
+        "TRACE",
+        SimpleNamespace(emit=lambda event, **fields: records.append((event, fields))),
+    )
+    monkeypatch.setattr(mcp_app, "_gui_plugin_installed", lambda: False)
+    monkeypatch.setattr(mcp_app, "find_console_script", lambda _name: None)
+    monkeypatch.setattr(mcp_app.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(mcp_app, "get_idausr_dir", lambda: tmp_path / "idausr")
+    monkeypatch.setattr(
+        mcp_app.subprocess,
+        "run",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("unexpected install")),
+    )
+
+    mcp_app._install_gui_plugin(tmp_path)
+
+    assert [event for event, _fields in records] == ["plugin_install_failed"]
+    assert "Could not find hcli" in records[0][1]["error"]["message"]
+
+
+def test_mcp_plugin_install_thread_failure_does_not_raise(monkeypatch) -> None:
+    records: list[tuple[str, dict[str, object]]] = []
+
+    class UnstartableThread:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("threads unavailable")
+
+    monkeypatch.setattr(
+        mcp_app,
+        "TRACE",
+        SimpleNamespace(emit=lambda event, **fields: records.append((event, fields))),
+    )
+    monkeypatch.setattr(mcp_app, "_gui_plugin_installed", lambda: False)
+    monkeypatch.setattr(mcp_app.threading, "Thread", UnstartableThread)
+
+    assert mcp_app._schedule_gui_plugin_install() is None
+    assert [event for event, _fields in records] == ["plugin_install_failed"]
+    assert "threads unavailable" in records[0][1]["error"]["message"]
+
+
 def test_mcp_plugin_install_is_serialized_across_contenders(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1002,7 +1110,7 @@ def test_fresh_worker_opens_source_instead_of_existing_idb(
         captured.update(command=command, **kwargs)
         return SimpleNamespace(pid=123)
 
-    monkeypatch.setattr(resolver_mod, "_find_console_script", lambda name: "worker")
+    monkeypatch.setattr(resolver_mod, "find_console_script", lambda name: "worker")
     monkeypatch.setattr(resolver_mod.subprocess, "Popen", fake_popen)
     _process, _log = resolver_mod.spawn_worker(
         str(source),
@@ -1039,7 +1147,7 @@ def test_worker_launch_forwards_all_ida_command_options(
         captured.update(command=command, **kwargs)
         return SimpleNamespace(pid=456)
 
-    monkeypatch.setattr(resolver_mod, "_find_console_script", lambda name: "worker")
+    monkeypatch.setattr(resolver_mod, "find_console_script", lambda name: "worker")
     monkeypatch.setattr(resolver_mod.subprocess, "Popen", fake_popen)
     resolver_mod.spawn_worker(
         str(source),

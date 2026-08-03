@@ -15,6 +15,7 @@ import inspect
 import ipaddress
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -408,76 +409,94 @@ def _gui_plugin_installed() -> bool:
     return plugin_manifest.is_file() and plugin_entrypoint.is_file()
 
 
+def _emit_plugin_install_failure(project_dir: Path, error: Exception) -> None:
+    """Best-effort logging for an optional operation that must not stop MCP."""
+    try:
+        TRACE.emit(
+            "plugin_install_failed",
+            session=_session_fields(),
+            project_dir=str(project_dir),
+            error=_error_fields(error),
+        )
+    except Exception:  # noqa: BLE001 - optional logging must not affect MCP startup
+        return
+
+
 def _install_gui_plugin(project_dir: Path) -> None:
     """Install the GUI plugin from *project_dir* without raising to the caller."""
-    lock_path = get_idausr_dir() / "codemode" / "plugin-install.lock"
-    with FileLock(lock_path):
-        # Another MCP may have completed installation while this one waited.
-        if _gui_plugin_installed():
-            return
+    try:
+        lock_path = get_idausr_dir() / "codemode" / "plugin-install.lock"
+        with FileLock(lock_path):
+            # Another MCP may have completed installation while this one waited.
+            if _gui_plugin_installed():
+                return
 
-        hcli = find_console_script("hcli")
-        if hcli is None:
+            # Prefer the mandatory hcli dependency from this Python environment.
+            # The PATH fallback also supports manually packaged MCP launchers.
+            hcli = find_console_script("hcli") or shutil.which("hcli")
+            if hcli is None:
+                raise FileNotFoundError(
+                    "Could not find hcli; install it to enable the IDA GUI plugin"
+                )
+
+            command = [hcli, "plugin", "install", str(project_dir)]
             TRACE.emit(
-                "plugin_install_failed",
+                "plugin_install_started",
                 session=_session_fields(),
+                command=command,
                 project_dir=str(project_dir),
-                error={"message": "Could not find the hcli console script"},
             )
-            return
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=project_dir,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+            except (OSError, subprocess.CalledProcessError) as error:
+                fields: dict[str, Any] = {
+                    "session": _session_fields(),
+                    "command": command,
+                    "project_dir": str(project_dir),
+                    "error": _error_fields(error),
+                }
+                if isinstance(error, subprocess.CalledProcessError):
+                    fields.update(stdout=error.stdout, stderr=error.stderr)
+                TRACE.emit("plugin_install_failed", **fields)
+                return
 
-        command = [hcli, "plugin", "install", str(project_dir)]
-        TRACE.emit(
-            "plugin_install_started",
-            session=_session_fields(),
-            command=command,
-            project_dir=str(project_dir),
-        )
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=project_dir,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                check=True,
+            TRACE.emit(
+                "plugin_install_succeeded",
+                session=_session_fields(),
+                command=command,
+                project_dir=str(project_dir),
+                stdout=completed.stdout,
+                stderr=completed.stderr,
             )
-        except (OSError, subprocess.CalledProcessError) as error:
-            fields: dict[str, Any] = {
-                "session": _session_fields(),
-                "command": command,
-                "project_dir": str(project_dir),
-                "error": _error_fields(error),
-            }
-            if isinstance(error, subprocess.CalledProcessError):
-                fields.update(stdout=error.stdout, stderr=error.stderr)
-            TRACE.emit("plugin_install_failed", **fields)
-            return
-
-        TRACE.emit(
-            "plugin_install_succeeded",
-            session=_session_fields(),
-            command=command,
-            project_dir=str(project_dir),
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-        )
+    except Exception as error:  # noqa: BLE001 - plugin installation is optional
+        _emit_plugin_install_failure(project_dir, error)
 
 
 def _schedule_gui_plugin_install() -> threading.Thread | None:
     """Start eventual GUI plugin installation without delaying MCP startup."""
-    if _gui_plugin_installed():
-        return None
-
     project_dir = Path(__file__).resolve().parent
-    thread = threading.Thread(
-        target=_install_gui_plugin,
-        args=(project_dir,),
-        name="plugin-install",
-        daemon=True,
-    )
-    thread.start()
-    return thread
+    try:
+        if _gui_plugin_installed():
+            return None
+
+        thread = threading.Thread(
+            target=_install_gui_plugin,
+            args=(project_dir,),
+            name="plugin-install",
+            daemon=True,
+        )
+        thread.start()
+        return thread
+    except Exception as error:  # noqa: BLE001 - MCP must start without the plugin
+        _emit_plugin_install_failure(project_dir, error)
+        return None
 
 
 class ListDatabasesToolResult(ListDatabasesResult):
