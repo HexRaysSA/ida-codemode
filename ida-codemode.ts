@@ -13,6 +13,7 @@ import {
   keyHint,
   truncateHead,
   type ExtensionAPI,
+  type ExtensionContext,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -20,6 +21,8 @@ import { Text } from "@earendil-works/pi-tui";
 const PACKAGE_ROOT = dirname(fileURLToPath(import.meta.url));
 const CALL_TIMEOUT_MS = 360_000;
 const STDERR_CAPTURE_MAX_CHARS = 1024 * 1024;
+const STATUS_WIDGET_KEY = "ida-codemode:status-bar";
+const STATUS_HIDE_DELAY_MS = 4000;
 
 type PiContent =
   | { type: "text"; text: string }
@@ -77,11 +80,107 @@ function renderToolCall(
 
 export default function idaCodemode(pi: ExtensionAPI) {
   let client: Client | undefined;
+  let connectingClient: Client | undefined;
+  let startupPromise: Promise<void> | undefined;
+  let sessionRunning = false;
+  let statusHideTimer: NodeJS.Timeout | undefined;
+  let statusWidgetMounted = false;
+  let requestStatusRender: (() => void) | undefined;
+  let statusWidgetState:
+    | {
+        state: "starting" | "ready" | "error";
+        details: string[];
+      }
+    | undefined;
 
-  pi.on("session_start", async (_event, ctx) => {
-    if (client) return;
+  const clearStatusWidget = (ctx: ExtensionContext) => {
+    if (statusHideTimer) {
+      clearTimeout(statusHideTimer);
+      statusHideTimer = undefined;
+    }
+    statusWidgetState = undefined;
+    statusWidgetMounted = false;
+    requestStatusRender = undefined;
+    ctx.ui.setWidget(STATUS_WIDGET_KEY, undefined);
+  };
+
+  const showStatus = (
+    ctx: ExtensionContext,
+    state: "starting" | "ready" | "error",
+    detail?: string | string[],
+  ) => {
+    if (statusHideTimer) {
+      clearTimeout(statusHideTimer);
+      statusHideTimer = undefined;
+    }
+    statusWidgetState = {
+      state,
+      details: detail ? (Array.isArray(detail) ? detail : [detail]) : [],
+    };
+
+    // Pi currently removes and reinserts a widget every time setWidget() is
+    // called, which changes Map insertion order relative to other extensions.
+    // Mount once and mutate our component state so adjacent status widgets do
+    // not swap positions while their asynchronous connections settle.
+    if (!statusWidgetMounted) {
+      statusWidgetMounted = true;
+      ctx.ui.setWidget(
+        STATUS_WIDGET_KEY,
+        (tui, theme) => {
+          const requestRender = () => tui.requestRender();
+          requestStatusRender = requestRender;
+          return {
+            invalidate() {},
+            dispose() {
+              if (requestStatusRender === requestRender) {
+                requestStatusRender = undefined;
+              }
+            },
+            render(): string[] {
+              const current = statusWidgetState;
+              if (!current) return [];
+              const icon =
+                current.state === "ready"
+                  ? theme.fg("success", "●")
+                  : current.state === "error"
+                    ? theme.fg("error", "●")
+                    : theme.fg("warning", "○");
+              const label =
+                current.state === "starting"
+                  ? "starting…"
+                  : current.state === "ready"
+                    ? "ready"
+                    : "startup failed";
+              const header = [
+                `${icon} ${theme.fg("accent", theme.bold("IDA MCP"))}`,
+                theme.fg(
+                  current.state === "error" ? "error" : "muted",
+                  label,
+                ),
+              ].join(theme.fg("dim", "  ·  "));
+              const detailLines = current.details.map((line) =>
+                theme.fg("dim", `  ${line}`),
+              );
+              return [header, ...detailLines];
+            },
+          };
+        },
+        { placement: "belowEditor" },
+      );
+    } else {
+      requestStatusRender?.();
+    }
+
+    if (state === "ready") {
+      statusHideTimer = setTimeout(() => clearStatusWidget(ctx), STATUS_HIDE_DELAY_MS);
+    }
+  };
+
+  const startMcp = async (ctx: ExtensionContext): Promise<void> => {
+    if (client || connectingClient) return;
 
     const next = new Client({ name: "ida-codemode-pi", version: "0.2.0" });
+    connectingClient = next;
     let capturedStderr = "";
     let captureStderr = true;
     const transport = new StdioClientTransport({
@@ -116,9 +215,13 @@ export default function idaCodemode(pi: ExtensionAPI) {
 
     try {
       await next.connect(transport);
-      client = next;
-
       const { tools } = await next.listTools();
+      if (!sessionRunning || connectingClient !== next) {
+        await next.close().catch(() => undefined);
+        return;
+      }
+      client = next;
+      connectingClient = undefined;
       for (const tool of tools) {
         const piToolName = tool.name.startsWith("ida_")
           ? tool.name
@@ -225,20 +328,46 @@ export default function idaCodemode(pi: ExtensionAPI) {
 
       captureStderr = false;
       capturedStderr = "";
-      ctx.ui.notify(`IDA MCP connected (${tools.length} tools)`, "info");
+      showStatus(ctx, "ready");
     } catch (error) {
-      client = undefined;
+      if (connectingClient === next) connectingClient = undefined;
+      if (client === next) client = undefined;
       await next.close().catch(() => undefined);
+      if (!sessionRunning) return;
+
       const message = error instanceof Error ? error.message : String(error);
-      const logPath = await saveStartupLog(capturedStderr);
-      const log = logPath ? ` Log: ${logPath}` : "";
-      ctx.ui.notify(`IDA MCP failed to start: ${message}${log}`, "error");
+      const logContents = capturedStderr
+        ? `IDA MCP failed to start: ${message}\n\n${capturedStderr}`
+        : `IDA MCP failed to start: ${message}\n`;
+      const logPath = await saveStartupLog(logContents);
+      const details = [message, ...(logPath ? [`Log: ${logPath}`] : [])];
+      showStatus(ctx, "error", details);
     }
+  };
+
+  pi.on("session_start", (_event, ctx) => {
+    if (startupPromise) return;
+    sessionRunning = true;
+    showStatus(ctx, "starting");
+    startupPromise = startMcp(ctx);
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("input", async () => {
+    await startupPromise;
+    return { action: "continue" };
+  });
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    sessionRunning = false;
+    clearStatusWidget(ctx);
     const active = client;
+    const connecting = connectingClient;
     client = undefined;
-    await active?.close();
+    connectingClient = undefined;
+    startupPromise = undefined;
+    await Promise.all([
+      active?.close(),
+      connecting && connecting !== active ? connecting.close() : undefined,
+    ]);
   });
 }
