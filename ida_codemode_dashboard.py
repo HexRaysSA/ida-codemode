@@ -244,6 +244,10 @@ def _windows_pid_alive(pid: int) -> bool:
     probe.  Calling ``os.kill(pid, 0)`` can therefore interrupt the process (or
     the dashboard itself) and has also been observed to raise ``SystemError``.
     """
+
+    if os.name != "nt":
+        raise RuntimeError("This function is only supported on Windows.")
+
     import ctypes
     from ctypes import wintypes
 
