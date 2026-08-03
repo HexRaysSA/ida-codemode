@@ -433,6 +433,16 @@ class IDARuntime:
             details=details,
         ) from value
 
+    def cancel_active(self) -> None:
+        """Request cooperative cancellation of the current IDA operation."""
+
+        with self._active_lock:
+            cancel_event = self._active_cancel_event
+            if cancel_event is None:
+                return
+            cancel_event.set()
+            self.ida_kernwin.set_cancelled()
+
     def execute_python(
         self,
         code: str,

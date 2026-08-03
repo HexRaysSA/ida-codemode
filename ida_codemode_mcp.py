@@ -536,8 +536,8 @@ def close_database(
 ) -> CloseDatabaseResult:
     """Release this MCP server's handle without disrupting other clients.
 
-    If this is the final lease on a managed idalib worker, the worker saves and
-    exits after its lease grace period. GUI databases are never closed here.
+    If this is the final lease on a managed idalib worker, orphaned execution is
+    cancelled and the worker saves and exits. GUI databases are never closed here.
     """
 
     return DATABASE_MANAGER.close_database(instance_id)

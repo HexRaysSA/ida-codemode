@@ -1,6 +1,7 @@
 import gzip
 import json
 import socket
+import threading
 import time
 from http.client import HTTPConnection
 from pathlib import Path
@@ -307,6 +308,42 @@ def test_sse_health_holds_and_releases_a_client_lease(tmp_path: Path):
         while server._active_leases and time.monotonic() < deadline:
             time.sleep(0.01)
         assert server._active_leases == 0
+    finally:
+        connection.close()
+        server.stop()
+        server.release_registration()
+
+
+def test_disconnected_sse_skips_startup_grace(tmp_path: Path):
+    stopped = threading.Event()
+    analysis = AnalysisState()
+    backend = RecordingBackend(analysis)
+    server = CodeModeHTTPServer(
+        backend,
+        InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib", managed=True),
+        analysis,
+        tmp_path,
+        lease_grace=30,
+        heartbeat_interval=0.02,
+        on_shutdown=stopped.set,
+    )
+    server.start()
+    connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+    try:
+        connection.request(
+            "GET",
+            "/health?sse=1&lease_id=abandoned&keepalive=0",
+            headers={
+                "Authorization": f"Bearer {server.token}",
+                "Accept": "text/event-stream",
+            },
+        )
+        response = connection.getresponse()
+        assert response.status == 200
+        assert response.readline() == b"event: health\n"
+        response.close()
+        connection.close()
+        assert stopped.wait(1)
     finally:
         connection.close()
         server.stop()

@@ -5,6 +5,7 @@ Protocol adapters may subscribe to domain lifecycle events through ``on_event``;
 error presentation, request metadata, and tracing belong to those adapters.
 """
 
+import math
 import threading
 import uuid
 from collections.abc import Callable
@@ -12,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict
 
-from ida_codemode.client import ClientError, DatabaseHandle
+from ida_codemode.client import MAX_KEEPALIVE_SECONDS, ClientError, DatabaseHandle
 from ida_codemode.registry import (
     LOG_DIR,
     RegistryEntry,
@@ -124,12 +125,22 @@ class DatabaseManager:
         on_event: DatabaseEventCallback | None = None,
         open_timeout: float = DEFAULT_OPEN_TIMEOUT_SECONDS,
         execute_timeout: float = DEFAULT_EXECUTE_TIMEOUT_SECONDS,
+        keepalive: float = 0.0,
     ) -> None:
+        if (
+            not math.isfinite(keepalive)
+            or keepalive < 0
+            or keepalive > MAX_KEEPALIVE_SECONDS
+        ):
+            raise ValueError(
+                f"keepalive must be between 0 and {MAX_KEEPALIVE_SECONDS:g} seconds"
+            )
         self._on_event = on_event
         self.registry_dir = registry_dir
         self.spawn_dir = spawn_dir
         self._open_timeout = open_timeout
         self._execute_timeout = execute_timeout
+        self._keepalive = float(keepalive)
         self._instances: dict[str, _DatabaseSession] = {}
         self._disconnected_instances: dict[str, str] = {}
         self._disconnected_default: str | None = None
@@ -217,6 +228,7 @@ class DatabaseManager:
                     timeout=self._open_timeout,
                     registry_dir=self.registry_dir,
                     spawn_dir=self.spawn_dir,
+                    keepalive=self._keepalive,
                 )
                 if not handle.connected:
                     reason = handle.disconnect_reason or "database connection closed"
@@ -507,16 +519,17 @@ class DatabaseManager:
 
     def close_database(self, instance_id: str | None) -> CloseDatabaseResult:
         target_id, session = self._get_session(instance_id)
-        with session.operation_lock:
-            database = self._database_info(session)
-            with self._lock:
-                current_session = self._instances.get(target_id)
-                if current_session is not session:
-                    raise DatabaseError(f"unknown database instance: {target_id}")
-                self._instances.pop(target_id)
-                if self._current_instance_id == target_id:
-                    self._current_instance_id = next(iter(self._instances), None)
-            session.handle.close()
+        database = self._database_info(session)
+        with self._lock:
+            current_session = self._instances.get(target_id)
+            if current_session is not session:
+                raise DatabaseError(f"unknown database instance: {target_id}")
+            self._instances.pop(target_id)
+            if self._current_instance_id == target_id:
+                self._current_instance_id = next(iter(self._instances), None)
+        # Do not wait for an operation owned by this handle. Releasing its lease
+        # asks the worker to cancel orphaned execution before shutting down.
+        session.handle.close()
         self._emit(
             "database_released",
             instance_id=target_id,
@@ -536,8 +549,7 @@ class DatabaseManager:
             self._current_instance_id = None
         for session in sessions:
             try:
-                with session.operation_lock:
-                    session.handle.close()
+                session.handle.close()
             except Exception as error:  # noqa: BLE001 -- best-effort shutdown reporting
                 self._emit(
                     "database_release_error",

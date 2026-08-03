@@ -99,13 +99,13 @@ Registration order is an invariant:
 2. Bind and start the HTTP service on `127.0.0.1:0`.
 3. Atomically publish `instances/<record-id>.json`.
 
-Managed idle shutdown begins only after the grace period has elapsed with no
-leases or active API requests. The watchdog marks the service as draining,
-withdraws the JSON record, closes lease streams and the listener, and asks the
-idalib main loop to stop. The worker then saves/closes the IDB and releases the
-lifetime lock. A plugin unload or process signal also withdraws the record and
-stops the listener; its lifecycle owner still detaches/closes the database
-before releasing that lock.
+The fixed grace period protects only the interval between publication and the
+first lease. Afterward, a managed worker begins idle shutdown immediately when
+its final lease disappears, unless that lease requested a bounded keepalive.
+The watchdog marks the service as draining, withdraws the JSON record, closes
+lease streams and the listener, and asks the idalib main loop to stop. The
+worker then saves/closes the IDB and releases the lifetime lock. A plugin unload
+or process signal follows the same ownership ordering.
 
 The JSON file is discovery metadata; the kernel lock is the liveness authority.
 Conceptually, a scanner classifies a parseable record as:
@@ -179,16 +179,19 @@ Important routes are:
 | Route | Purpose |
 |---|---|
 | `GET /health` | Authenticated record identity and liveness probe. |
-| `GET /health?sse=1` | Persistent client lease with periodic heartbeat. |
+| `GET /health?sse=1` | Persistent client lease with periodic heartbeat and optional keepalive. |
+| `POST /release_lease` | Idempotently release one identified client lease. |
 | `POST /execute_python` | Execute Code Mode Python against the open database. |
 | `POST /save_database` | Explicitly save a GUI or idalib database. |
 | `GET /poll_autoanalysis` | Observe initial IDA autoanalysis. |
 | `GET` or `POST /wait_autoanalysis` | Wait for autoanalysis; POST accepts a timeout. |
 
-There is no remote database-close route. Closing a client handle releases only
-that client's lease. A handle uses a separate reusable HTTP/1.1 connection for
-RPCs and proactively replaces it before the server's idle timeout. A failed
-POST is never retried because its execution status may be ambiguous.
+There is no remote database-close route. Closing a client handle uses a
+separate control connection to release only its identified lease, then closes
+its local connections. Ordinary RPCs carry that lease identity so orphaned
+execution can be cancelled. The reusable HTTP/1.1 RPC connection is replaced
+before the server's idle timeout. A failed operation POST is never retried
+because its execution status may be ambiguous.
 
 These guarantees apply to the per-database API. The optional ZeroMCP HTTP
 transport and dashboard have no built-in authentication; both default to local
@@ -206,7 +209,7 @@ from poisoning the next operation.
 
 ## Protocol contract and versioning
 
-`PROTOCOL_VERSION` is currently `1`. It is an exact compatibility version for
+`PROTOCOL_VERSION` is currently `2`. It is an exact compatibility version for
 the private discovery registry and per-database HTTP API. There is no downgrade
 or highest-common-version negotiation: a scanner whose local version differs
 from a lock-held record marks that owner `BLOCKED` before probing HTTP. This is
@@ -247,9 +250,10 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 | Route | Request and response contract |
 |---|---|
 | `GET /health` | Raw health identity object described above. |
-| `GET /health?sse=1` | `text/event-stream`; one initial `health` event, heartbeat comments, and connection lifetime equal to lease lifetime. |
-| `POST /execute_python` | `{code, timeout?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. Execution does not implicitly wait for autoanalysis. |
-| `POST /save_database` | An object; success is `{"ok":true,"result":{"saved":true,"idb_path":...}}`. |
+| `GET /health?sse=1` | `text/event-stream`; accepts `lease_id` and bounded `keepalive` query values, emits one initial `health` event and heartbeat comments. |
+| `POST /release_lease` | `{lease_id}`; idempotently releases that lease after acknowledging the request. |
+| `POST /execute_python` | `{code, timeout?, lease_id?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. Execution does not implicitly wait for autoanalysis. |
+| `POST /save_database` | `{lease_id?}`; success is `{"ok":true,"result":{"saved":true,"idb_path":...}}`. |
 | `GET /poll_autoanalysis` | Raw `{status, complete}` analysis object. |
 | `GET` or `POST /wait_autoanalysis` | The same raw analysis object; POST accepts an optional positive finite timeout in seconds. |
 
@@ -257,8 +261,9 @@ Operation failures use a non-2xx status and, once application dispatch has
 begun, `{"ok":false,"error":{"code":...,"message":...}}`; additional error
 details are optional. Authentication, framing, and unknown-route failures may
 use simpler non-2xx JSON bodies, so clients must not assume a structured error
-for every rejection. There is no remote close operation, and clients must not
-retry a POST whose execution outcome is unknown.
+for every rejection. There is no remote database-close operation; lease release
+has only lease-scoped authority. Clients must not retry an operation POST whose
+execution outcome is unknown.
 
 The execution rules (`db`/`ida_domain`, trailing-expression results, optional
 entry functions, JSON-compatible result conversion, output capture, and
@@ -269,8 +274,8 @@ or `-inf` so the service never emits non-standard JSON numbers.
 
 ### When to bump the version
 
-Version 1 is intended to remain stable; it is not the package or release
-version. Readers and writers should preserve it for:
+The protocol version is not the package or release version. Readers and writers
+should preserve it for:
 
 - implementation, performance, timeout, or heartbeat changes that retain the
   behavior above;
@@ -280,8 +285,8 @@ version. Readers and writers should preserve it for:
   or agent integrations. The trace format has its own `schema` field, while MCP
   has its own protocol negotiation.
 
-Bump `PROTOCOL_VERSION` only when an existing version-1 peer could no longer
-interoperate safely—for example, when removing or changing the type or meaning
+Bump `PROTOCOL_VERSION` only when an existing peer could no longer interoperate
+safely—for example, when removing or changing the type or meaning
 of a required registry field; changing path identity, lock ownership, auth, or
 lease semantics; or incompatibly changing an existing route's method, request,
 response, error, execution, or save behavior. A feature that must be relied on
@@ -295,18 +300,19 @@ to its on-demand RPC connection. Multiple handles, MCP servers, and agents may
 share the same instance. Closing one handle closes only its own connections.
 
 The server emits heartbeat comments so crashed clients are detected when the
-next write fails. A short grace period protects the race between worker
-publication and the first lease and allows an orderly final client release.
+next write fails. A fixed startup grace protects the race between worker
+publication and its first lease. Established leases default to zero keepalive,
+so their explicit release or detected disappearance starts shutdown without an
+additional grace period. Low-level clients may request a bounded keepalive when
+opening a lease to retain an idle worker for repeated short-lived invocations.
 
-A managed idalib worker exits only when:
-
-- no SSE leases remain;
-- no operation is active; and
-- the zero-lease grace period has elapsed.
-
-A new lease cancels pending shutdown. The worker then withdraws its registry
-record, stops serving, returns to the idalib main thread, saves/closes the IDB,
-and exits. GUI instances are unmanaged and ignore a zero lease count.
+Each RPC carries its owning lease identity. Releasing a lease cancels its
+orphaned operation; cancellation is cooperative and the worker waits only for
+safe unwinding, not successful completion. Once no leases remain and the final
+lease's keepalive has expired, the worker withdraws its registry record, stops
+serving, returns to the idalib main thread, saves/closes the IDB, and exits. A
+new lease before expiration cancels pending shutdown. GUI instances are
+unmanaged and ignore zero leases.
 
 Worker lifetime follows the explicit SSE lease, not the incidental lifetime of
 a reusable RPC socket or a fragile client-maintained process refcount. Client

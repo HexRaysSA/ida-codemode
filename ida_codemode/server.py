@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from io import BufferedIOBase
 from pathlib import Path
 from typing import Any, Protocol
@@ -19,6 +20,13 @@ from .runtime import AnalysisState, APIError
 logger = logging.getLogger(__name__)
 DEFAULT_LEASE_GRACE_SECONDS = 20.0
 DEFAULT_SSE_HEARTBEAT_SECONDS = 5.0
+MAX_KEEPALIVE_SECONDS = 3600.0
+
+
+@dataclass
+class _Lease:
+    keepalive: float
+    stop: threading.Event
 
 
 class CodeModeBackend(Protocol):
@@ -70,7 +78,10 @@ class CodeModeHTTPServer:
         self._draining = False
         self._active_leases = 0
         self._active_requests = 0
-        self._zero_since = time.monotonic()
+        self._leases: dict[str, _Lease] = {}
+        self._shutdown_at: float | None = time.monotonic() + self.lease_grace
+        self._backend_lock = threading.Lock()
+        self._running_lease_id: str | None = None
         self._stream_stop = threading.Event()
 
     @property
@@ -91,6 +102,7 @@ class CodeModeHTTPServer:
                 return
             self._draining = False
             self._stream_stop.clear()
+            self._shutdown_at = time.monotonic() + self.lease_grace
             registration = InstanceRegistration(
                 self.registry_dir,
                 self.identity,
@@ -161,6 +173,8 @@ class CodeModeHTTPServer:
         self._stream_stop.set()
         with self._activity:
             self._draining = True
+            for lease in self._leases.values():
+                lease.stop.set()
             self._activity.notify_all()
         with self._lock:
             httpd = self._httpd
@@ -189,13 +203,14 @@ class CodeModeHTTPServer:
             with self._activity:
                 while not self._draining:
                     now = time.monotonic()
+                    shutdown_at = self._shutdown_at
                     eligible = (
                         self._active_leases == 0
                         and self._active_requests == 0
-                        and self._zero_since is not None
+                        and shutdown_at is not None
                     )
-                    if eligible:
-                        remaining = self.lease_grace - (now - self._zero_since)
+                    if eligible and shutdown_at is not None:
+                        remaining = shutdown_at - now
                         if remaining <= 0:
                             self._draining = True
                             break
@@ -218,37 +233,73 @@ class CodeModeHTTPServer:
                     logger.exception("Code Mode shutdown callback failed")
             return
 
-    def _lease_opened(self) -> bool:
+    def _lease_opened(self, lease_id: str, keepalive: float) -> _Lease | None:
         with self._activity:
-            if self._draining:
-                return False
-            self._active_leases += 1
-            self._zero_since = None
+            if self._draining or lease_id in self._leases:
+                return None
+            lease = _Lease(keepalive=keepalive, stop=threading.Event())
+            self._leases[lease_id] = lease
+            self._active_leases = len(self._leases)
+            self._shutdown_at = None
             self._activity.notify_all()
-            return True
+            return lease
 
-    def _lease_closed(self) -> None:
+    def _lease_closed(self, lease_id: str) -> None:
+        cancel_active = False
         with self._activity:
-            if self._active_leases > 0:
-                self._active_leases -= 1
+            lease = self._leases.pop(lease_id, None)
+            if lease is None:
+                return
+            lease.stop.set()
+            self._active_leases = len(self._leases)
+            if self._running_lease_id == lease_id:
+                cancel_active = True
             if self._active_leases == 0:
-                self._zero_since = time.monotonic()
+                self._shutdown_at = time.monotonic() + lease.keepalive
             self._activity.notify_all()
+        if cancel_active:
+            cancel = getattr(self.backend, "cancel_active", None)
+            if cancel is not None:
+                try:
+                    cancel()
+                except Exception:
+                    logger.exception("Code Mode operation cancellation failed")
 
-    def _request_started(self) -> bool:
+    def _request_started(self, lease_id: str | None) -> None:
         with self._activity:
             if self._draining:
-                return False
+                raise APIError(
+                    "instance_draining", "The instance is shutting down", status=503
+                )
+            if lease_id is not None and lease_id not in self._leases:
+                raise APIError(
+                    "lease_released", "The client lease is no longer active", status=409
+                )
             self._active_requests += 1
-            return True
 
     def _request_finished(self) -> None:
         with self._activity:
             if self._active_requests > 0:
                 self._active_requests -= 1
-            if self._active_leases == 0 and self._active_requests == 0:
-                self._zero_since = time.monotonic()
             self._activity.notify_all()
+
+    def _run_operation(self, lease_id: str | None, operation: Callable[[], Any]) -> Any:
+        with self._backend_lock:
+            with self._activity:
+                if lease_id is not None and lease_id not in self._leases:
+                    raise APIError(
+                        "lease_released",
+                        "The client lease is no longer active",
+                        status=409,
+                    )
+                self._running_lease_id = lease_id
+            try:
+                return operation()
+            finally:
+                with self._activity:
+                    if self._running_lease_id == lease_id:
+                        self._running_lease_id = None
+                    self._activity.notify_all()
 
     def _health_payload(self) -> dict[str, Any]:
         entry = self._entry
@@ -260,8 +311,35 @@ class CodeModeHTTPServer:
             )
         return {"status": "ok", **entry.health_identity()}
 
-    def _lease_response(self) -> HTTPResponse:
-        if not self._lease_opened():
+    @staticmethod
+    def _lease_parameters(parameters: dict[str, list[str]]) -> tuple[str, float]:
+        values = parameters.get("lease_id")
+        lease_id = values[0] if values and len(values) == 1 else uuid.uuid4().hex
+        if not lease_id or len(lease_id) > 128:
+            raise APIError("invalid_lease", "lease_id must be 1 to 128 characters")
+        keepalive_values = parameters.get("keepalive")
+        raw_keepalive = keepalive_values[0] if keepalive_values else "0"
+        try:
+            keepalive = float(raw_keepalive)
+        except (TypeError, ValueError) as exc:
+            raise APIError(
+                "invalid_keepalive", "keepalive must be a non-negative number"
+            ) from exc
+        if (
+            not math.isfinite(keepalive)
+            or keepalive < 0
+            or keepalive > MAX_KEEPALIVE_SECONDS
+        ):
+            raise APIError(
+                "invalid_keepalive",
+                f"keepalive must be between 0 and {MAX_KEEPALIVE_SECONDS:g} seconds",
+            )
+        return lease_id, keepalive
+
+    def _lease_response(self, parameters: dict[str, list[str]]) -> HTTPResponse:
+        lease_id, keepalive = self._lease_parameters(parameters)
+        lease = self._lease_opened(lease_id, keepalive)
+        if lease is None:
             return self._failure(
                 APIError(
                     "instance_draining", "The instance is shutting down", status=503
@@ -270,13 +348,15 @@ class CodeModeHTTPServer:
         try:
             payload = json.dumps(self._health_payload(), separators=(",", ":"))
         except Exception:
-            self._lease_closed()
+            self._lease_closed(lease_id)
             raise
 
         def stream(file: BufferedIOBase) -> None:
             file.write(f"event: health\ndata: {payload}\n\n".encode())
             file.flush()
-            while not self._stream_stop.wait(self.heartbeat_interval):
+            while not lease.stop.wait(self.heartbeat_interval):
+                if self._stream_stop.is_set():
+                    return
                 file.write(b": keepalive\n\n")
                 file.flush()
 
@@ -284,7 +364,7 @@ class CodeModeHTTPServer:
             status=200,
             content_type="text/event-stream",
             stream=stream,
-            after_send=self._lease_closed,
+            after_send=lambda: self._lease_closed(lease_id),
         )
 
     @staticmethod
@@ -298,6 +378,15 @@ class CodeModeHTTPServer:
         if not isinstance(payload, dict):
             raise APIError("invalid_request", "Request body must be a JSON object")
         return payload
+
+    @staticmethod
+    def _payload_lease_id(payload: dict[str, Any]) -> str | None:
+        lease_id = payload.get("lease_id")
+        if lease_id is None:
+            return None
+        if not isinstance(lease_id, str) or not lease_id or len(lease_id) > 128:
+            raise APIError("invalid_lease", "lease_id must be 1 to 128 characters")
+        return lease_id
 
     @staticmethod
     def _timeout(payload: dict[str, Any]) -> float | None:
@@ -340,37 +429,71 @@ class CodeModeHTTPServer:
             if method == "GET" and path == "/health":
                 parameters = parse_qs(query, keep_blank_values=True)
                 if parameters.get("sse") == ["1"]:
-                    return self._lease_response()
+                    return self._lease_response(parameters)
                 return json_response(200, self._health_payload())
 
-            if not self._request_started():
-                raise APIError(
-                    "instance_draining", "The instance is shutting down", status=503
+            if method == "POST" and path == "/release_lease":
+                payload = self._decode_object(body)
+                lease_id = self._payload_lease_id(payload)
+                if lease_id is None:
+                    raise APIError("invalid_lease", "lease_id is required")
+                release_id: str = lease_id
+
+                def release() -> None:
+                    self._lease_closed(release_id)
+
+                return json_response(
+                    200,
+                    {"ok": True, "result": {"released": True}},
+                    after_send=release,
                 )
+
+            payload = (
+                self._decode_object(body)
+                if method == "POST"
+                and path in {"/wait_autoanalysis", "/execute_python", "/save_database"}
+                else {}
+            )
+            lease_id = self._payload_lease_id(payload)
+            self._request_started(lease_id)
             try:
                 if method == "GET" and path == "/poll_autoanalysis":
                     return json_response(200, self.analysis_state.snapshot())
                 if method == "GET" and path == "/wait_autoanalysis":
-                    return json_response(200, self.backend.wait_autoanalysis(None))
-                if method == "POST" and path == "/wait_autoanalysis":
-                    payload = self._decode_object(body)
                     return json_response(
                         200,
-                        self.backend.wait_autoanalysis(self._timeout(payload)),
+                        self._run_operation(
+                            None, lambda: self.backend.wait_autoanalysis(None)
+                        ),
+                    )
+                if method == "POST" and path == "/wait_autoanalysis":
+                    return json_response(
+                        200,
+                        self._run_operation(
+                            lease_id,
+                            lambda: self.backend.wait_autoanalysis(
+                                self._timeout(payload)
+                            ),
+                        ),
                     )
                 if method == "POST" and path == "/execute_python":
-                    payload = self._decode_object(body)
                     code = payload.get("code")
                     if not isinstance(code, str) or not code.strip():
                         raise APIError(
                             "invalid_code", "code must be a non-empty string"
                         )
                     return self._success(
-                        self.backend.execute_python(code, self._timeout(payload))
+                        self._run_operation(
+                            lease_id,
+                            lambda: self.backend.execute_python(
+                                code, self._timeout(payload)
+                            ),
+                        )
                     )
                 if method == "POST" and path == "/save_database":
-                    self._decode_object(body)
-                    return self._success(self.backend.save_database())
+                    return self._success(
+                        self._run_operation(lease_id, self.backend.save_database)
+                    )
                 return json_response(404, {"ok": False, "error": "Not Found"})
             finally:
                 self._request_finished()

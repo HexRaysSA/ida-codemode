@@ -211,8 +211,8 @@ def test_database_handle_forwards_import_options(monkeypatch) -> None:
         return entry
 
     class CapturingHandle(DatabaseHandle):
-        def __init__(self, path, resolved_entry, on_disconnect=None):
-            self.opened = (path, resolved_entry, on_disconnect)
+        def __init__(self, path, resolved_entry, keepalive=0, on_disconnect=None):
+            self.opened = (path, resolved_entry, keepalive, on_disconnect)
 
     monkeypatch.setattr(client_mod, "resolve_instance", fake_resolve)
     handle = CapturingHandle.open(
@@ -584,7 +584,7 @@ def test_mcp_plugin_install_uses_hcli_from_path(tmp_path: Path, monkeypatch) -> 
 def test_mcp_plugin_install_missing_hcli_does_not_raise(
     tmp_path: Path, monkeypatch
 ) -> None:
-    records: list[tuple[str, dict[str, object]]] = []
+    records: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(
         mcp_app,
         "TRACE",
@@ -607,7 +607,7 @@ def test_mcp_plugin_install_missing_hcli_does_not_raise(
 
 
 def test_mcp_plugin_install_thread_failure_does_not_raise(monkeypatch) -> None:
-    records: list[tuple[str, dict[str, object]]] = []
+    records: list[tuple[str, dict[str, Any]]] = []
 
     class UnstartableThread:
         def __init__(self, **_kwargs: object) -> None:
@@ -1392,4 +1392,99 @@ def test_multiple_leases_share_one_managed_server(tmp_path: Path) -> None:
     finally:
         second.close()
     assert stopped.wait(2)
+    server.release_registration()
+
+
+def test_final_explicit_release_skips_startup_grace(tmp_path: Path) -> None:
+    stopped = threading.Event()
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
+        AnalysisState(),
+        tmp_path / "instances",
+        lease_grace=30,
+        heartbeat_interval=30,
+        on_shutdown=stopped.set,
+    )
+    server.start()
+    assert server.entry is not None
+    handle = DatabaseHandle("/tmp/test", server.entry)
+    handle.close()
+    assert stopped.wait(1)
+    server.release_registration()
+
+
+def test_handle_keepalive_retains_idle_managed_worker(tmp_path: Path) -> None:
+    stopped = threading.Event()
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
+        AnalysisState(),
+        tmp_path / "instances",
+        lease_grace=30,
+        heartbeat_interval=0.02,
+        on_shutdown=stopped.set,
+    )
+    server.start()
+    assert server.entry is not None
+    handle = DatabaseHandle("/tmp/test", server.entry, keepalive=0.25)
+    handle.close()
+    assert not stopped.wait(0.1)
+    assert server.entry is not None
+    replacement = DatabaseHandle("/tmp/test", server.entry, keepalive=0.1)
+    replacement.close()
+    assert not stopped.wait(0.05)
+    assert stopped.wait(1)
+    server.release_registration()
+
+
+def test_database_close_cancels_its_active_execution(tmp_path: Path) -> None:
+    class BlockingBackend(StaticBackend):
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.cancelled = threading.Event()
+
+        def execute_python(self, code: str, timeout: float | None):
+            self.started.set()
+            assert self.cancelled.wait(2)
+            raise RuntimeError("cancelled")
+
+        def cancel_active(self) -> None:
+            self.cancelled.set()
+
+    executable = tmp_path / "test.exe"
+    idb = tmp_path / "test.i64"
+    executable.write_bytes(b"binary")
+    idb.write_bytes(b"idb")
+    backend = BlockingBackend()
+    server = CodeModeHTTPServer(
+        backend,
+        InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
+        AnalysisState(),
+        tmp_path / "instances",
+        lease_grace=30,
+        on_shutdown=lambda: None,
+    )
+    server.start()
+    manager = DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+    opened = manager.open_database(str(idb), set_current=True)
+    failures: list[Exception] = []
+
+    def execute() -> None:
+        try:
+            manager.execute_python("while True: pass", opened["instance_id"])
+        except Exception as exc:  # noqa: BLE001 - asserted below
+            failures.append(exc)
+
+    thread = threading.Thread(target=execute)
+    thread.start()
+    assert backend.started.wait(1)
+    started = time.monotonic()
+    manager.close_database(opened["instance_id"])
+    assert time.monotonic() - started < 1
+    assert backend.cancelled.wait(1)
+    thread.join(2)
+    assert not thread.is_alive()
+    assert failures
+    server.stop()
     server.release_registration()

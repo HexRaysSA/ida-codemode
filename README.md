@@ -22,8 +22,10 @@ accepted, a single or trailing expression becomes the result, and
 available for function-style code.
 
 `close_database` is not a global shutdown operation. Other agents continue to
-use the same instance. A managed idalib worker saves and exits after its final
-lease disappears; GUI databases are never closed by MCP lifecycle management.
+use the same instance. A managed idalib worker cancels orphaned execution, saves,
+and exits after its final lease disappears; GUI databases are never closed by
+MCP lifecycle management. Low-level `DatabaseManager` users can set
+`keepalive=30` (or another bounded duration) to retain an idle worker for reuse.
 
 ## Installation
 

@@ -1,8 +1,10 @@
 import http.client
 import json
+import math
 import socket
 import threading
 import time
+import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import TracebackType
@@ -24,6 +26,7 @@ class InstanceDisconnectedError(ClientError):
 # proactively with headroom rather than discovering the close during a POST,
 # which cannot safely be retried after its execution status becomes ambiguous.
 RPC_CONNECTION_MAX_IDLE_SECONDS = 20.0
+MAX_KEEPALIVE_SECONDS = 3600.0
 
 
 class RemoteError(ClientError):
@@ -48,9 +51,16 @@ class DatabaseHandle:
         path: str,
         entry: RegistryEntry,
         *,
+        keepalive: float = 0.0,
         on_disconnect: Callable[["DatabaseHandle", str], None] | None = None,
     ) -> None:
+        if not math.isfinite(keepalive) or not 0 <= keepalive <= MAX_KEEPALIVE_SECONDS:
+            raise ValueError(
+                f"keepalive must be between 0 and {MAX_KEEPALIVE_SECONDS:g} seconds"
+            )
         self.path = path
+        self.keepalive = float(keepalive)
+        self._lease_id = uuid.uuid4().hex
         self._on_disconnect = on_disconnect
         self._lock = threading.Lock()
         self._request_lock = threading.Lock()
@@ -107,6 +117,7 @@ class DatabaseHandle:
         windows_dir: str | Path | None = None,
         no_segmentation: bool = False,
         debug_flags: int | Sequence[str] = 0,
+        keepalive: float = 0.0,
         on_disconnect: Callable[["DatabaseHandle", str], None] | None = None,
     ) -> Self:
         """Attach to a shared instance, spawning a configured worker if needed.
@@ -153,14 +164,24 @@ class DatabaseHandle:
 
         entry = resolve()
         try:
-            return cls(path, entry, on_disconnect=on_disconnect)
+            return cls(
+                path,
+                entry,
+                keepalive=keepalive,
+                on_disconnect=on_disconnect,
+            )
         except ClientError:
             # The worker may cross its zero-lease shutdown boundary between
             # resolve and the SSE handshake. Resolve once more as promised by
             # the instance lifecycle contract.
             time.sleep(0.05)
             replacement = resolve()
-            return cls(path, replacement, on_disconnect=on_disconnect)
+            return cls(
+                path,
+                replacement,
+                keepalive=keepalive,
+                on_disconnect=on_disconnect,
+            )
 
     @property
     def entry(self) -> RegistryEntry:
@@ -190,7 +211,7 @@ class DatabaseHandle:
         try:
             connection.request(
                 "GET",
-                "/health?sse=1",
+                f"/health?sse=1&lease_id={self._lease_id}&keepalive={self.keepalive:g}",
                 headers={
                     "Accept": "text/event-stream",
                     "Authorization": f"Bearer {entry.token}",
@@ -337,7 +358,7 @@ class DatabaseHandle:
         timeout: float | None = None,
         unwrap_result: bool = True,
     ) -> Any:
-        body = json.dumps(payload).encode("utf-8")
+        body = json.dumps({**payload, "lease_id": self._lease_id}).encode("utf-8")
         with self._request_lock:
             if self._closed.is_set():
                 raise ClientError("database handle is closed")
@@ -431,10 +452,39 @@ class DatabaseHandle:
             raise ClientError("save_database returned an invalid result")
         return result
 
+    def _release_remote_lease(self) -> None:
+        """Best-effort lease release over a connection independent of RPC work."""
+
+        entry = self.entry
+        connection = http.client.HTTPConnection(HOST, entry.port, timeout=2.0)
+        try:
+            body = json.dumps({"lease_id": self._lease_id}).encode("utf-8")
+            connection.request(
+                "POST",
+                "/release_lease",
+                body=body,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {entry.token}",
+                },
+            )
+            response = connection.getresponse()
+            try:
+                response.read()
+            finally:
+                response.close()
+        except (TimeoutError, OSError, http.client.HTTPException):
+            # Closing the SSE socket below remains the authoritative fallback.
+            pass
+        finally:
+            connection.close()
+
     def close(self) -> None:
         if self._closed.is_set():
             return
         self._closed.set()
+        self._release_remote_lease()
         with self._lock:
             response = self._lease_response
             connection = self._lease_connection

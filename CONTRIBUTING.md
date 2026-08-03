@@ -85,13 +85,15 @@ Each open MCP handle maintains an authenticated SSE lease. Multiple agents and
 MCP servers may open the same database and resolve to the same GUI or idalib
 instance.
 
-Closing a handle releases only that lease. Managed idalib workers wait through
-a short grace period after the final lease, stop accepting work, save and close
-the IDB on the idalib main thread, and exit. Crashed clients are detected by
-SSE heartbeats. Hard-killed workers are detected by lifetime file locks and
-reaped on the next scan.
+Closing a handle releases only that lease. After the final lease, managed
+idalib workers cancel orphaned work, save and close the IDB on the idalib main
+thread, and exit immediately unless that lease requested a bounded keepalive.
+The fixed grace period applies only before the first lease. Crashed clients are
+detected by SSE heartbeats. Hard-killed workers are detected by lifetime file
+locks and reaped on the next scan.
 
-There are no client process refcounts and no remote database-close endpoint.
+There are no client process refcounts and no remote database-close endpoint;
+the lease-scoped release route cannot close another client's lease.
 
 ## Local state
 
