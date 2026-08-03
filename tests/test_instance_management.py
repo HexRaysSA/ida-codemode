@@ -449,6 +449,156 @@ def test_mcp_unsets_empty_forwarded_environment_variables(monkeypatch) -> None:
     assert "IDA_CODEMODE_STATE_DIR" not in mcp_app.os.environ
 
 
+def test_mcp_schedules_plugin_install_in_background(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeThread:
+        def __init__(
+            self,
+            *,
+            target: object,
+            args: tuple[object, ...],
+            name: str,
+            daemon: bool,
+        ) -> None:
+            captured.update(target=target, args=args, name=name, daemon=daemon)
+
+        def start(self) -> None:
+            captured["started"] = True
+
+    monkeypatch.setattr(mcp_app, "_gui_plugin_installed", lambda: False)
+    monkeypatch.setattr(mcp_app.threading, "Thread", FakeThread)
+
+    thread = mcp_app._schedule_gui_plugin_install()
+
+    assert thread is not None
+    assert captured == {
+        "target": mcp_app._install_gui_plugin,
+        "args": (Path(mcp_app.__file__).resolve().parent,),
+        "name": "plugin-install",
+        "daemon": True,
+        "started": True,
+    }
+
+
+def test_mcp_plugin_install_uses_hcli_from_current_environment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class FakeTrace:
+        def __init__(self) -> None:
+            self.records: list[tuple[str, dict[str, object]]] = []
+
+        def emit(self, event: str, **fields: object) -> None:
+            self.records.append((event, fields))
+
+    trace = FakeTrace()
+    captured: dict[str, object] = {}
+    hcli = str(tmp_path / "bin" / "hcli")
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        captured.update(command=command, **kwargs)
+        return subprocess.CompletedProcess(command, 0, "installed\n", "")
+
+    monkeypatch.setattr(mcp_app, "TRACE", trace)
+    monkeypatch.setattr(mcp_app, "_gui_plugin_installed", lambda: False)
+    monkeypatch.setattr(mcp_app, "find_console_script", lambda name: hcli)
+    monkeypatch.setattr(mcp_app, "get_idausr_dir", lambda: tmp_path / "idausr")
+    monkeypatch.setattr(mcp_app.subprocess, "run", fake_run)
+
+    mcp_app._install_gui_plugin(tmp_path)
+
+    assert captured["command"] == [hcli, "plugin", "install", str(tmp_path)]
+    assert captured["cwd"] == tmp_path
+    assert captured["stdin"] is subprocess.DEVNULL
+    assert captured["capture_output"] is True
+    assert captured["text"] is True
+    assert captured["check"] is True
+    assert [event for event, _fields in trace.records] == [
+        "plugin_install_started",
+        "plugin_install_succeeded",
+    ]
+
+
+def test_mcp_plugin_install_is_serialized_across_contenders(
+    tmp_path: Path, monkeypatch
+) -> None:
+    install_started = threading.Event()
+    release_install = threading.Event()
+    installed = threading.Event()
+    run_count = 0
+    count_lock = threading.Lock()
+
+    def fake_run(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal run_count
+        with count_lock:
+            run_count += 1
+        install_started.set()
+        assert release_install.wait(2)
+        installed.set()
+        return subprocess.CompletedProcess(command, 0, "installed\n", "")
+
+    monkeypatch.setattr(mcp_app, "TRACE", SimpleNamespace(emit=lambda *_a, **_k: None))
+    monkeypatch.setattr(mcp_app, "_gui_plugin_installed", installed.is_set)
+    monkeypatch.setattr(mcp_app, "find_console_script", lambda _name: "hcli")
+    monkeypatch.setattr(mcp_app, "get_idausr_dir", lambda: tmp_path / "idausr")
+    monkeypatch.setattr(mcp_app.subprocess, "run", fake_run)
+
+    first = threading.Thread(target=mcp_app._install_gui_plugin, args=(tmp_path,))
+    second = threading.Thread(target=mcp_app._install_gui_plugin, args=(tmp_path,))
+    first.start()
+    assert install_started.wait(2)
+    second.start()
+    try:
+        time.sleep(0.1)
+        assert second.is_alive()
+    finally:
+        release_install.set()
+    first.join(2)
+    second.join(2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert run_count == 1
+    assert (tmp_path / "idausr" / "codemode" / "plugin-install.lock").is_file()
+
+
+def test_mcp_plugin_install_is_skipped_when_already_installed(monkeypatch) -> None:
+    monkeypatch.setattr(mcp_app, "_gui_plugin_installed", lambda: True)
+    monkeypatch.setattr(
+        mcp_app,
+        "find_console_script",
+        lambda _name: (_ for _ in ()).throw(AssertionError("unexpected hcli lookup")),
+    )
+
+    assert mcp_app._schedule_gui_plugin_install() is None
+
+
+def test_mcp_cli_passes_install_plugin_flag(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        mcp_app,
+        "_serve",
+        lambda transport, **kwargs: captured.update(transport=transport, **kwargs),
+    )
+    monkeypatch.setattr(
+        mcp_app.sys,
+        "argv",
+        ["ida-codemode-mcp", "--agent", "test", "--install-plugin"],
+    )
+
+    assert mcp_app.cli() == 0
+    assert captured == {
+        "transport": "stdio",
+        "database": None,
+        "agent": "test",
+        "install_plugin": True,
+    }
+
+
 def test_mcp_session_trace_metadata(tmp_path: Path, monkeypatch) -> None:
     class FakeTrace:
         path = tmp_path / "session.jsonl"

@@ -31,7 +31,9 @@ function renderToolCall(
   expanded: boolean,
 ): Text {
   let text = theme.fg("toolTitle", theme.bold(toolName));
-  const mcpToolName = toolName.startsWith("ida_") ? toolName.slice(4) : toolName;
+  const mcpToolName = toolName.startsWith("ida_")
+    ? toolName.slice(4)
+    : toolName;
 
   if (mcpToolName === "execute_python" && typeof args?.code === "string") {
     if (typeof args.instance_id === "string") {
@@ -68,7 +70,15 @@ export default function idaCodemode(pi: ExtensionAPI) {
     const next = new Client({ name: "ida-codemode-pi", version: "0.2.0" });
     const transport = new StdioClientTransport({
       command: "uv",
-      args: ["run", "--project", PACKAGE_ROOT, "ida-codemode-mcp", "--agent", "pi"],
+      args: [
+        "run",
+        "--project",
+        PACKAGE_ROOT,
+        "ida-codemode-mcp",
+        "--agent",
+        "pi",
+        "--install-plugin",
+      ],
       cwd: PACKAGE_ROOT,
       env: {
         ...(process.env.IDA_CODEMODE_ID
@@ -87,7 +97,9 @@ export default function idaCodemode(pi: ExtensionAPI) {
 
       const { tools } = await next.listTools();
       for (const tool of tools) {
-        const piToolName = tool.name.startsWith("ida_") ? tool.name : `ida_${tool.name}`;
+        const piToolName = tool.name.startsWith("ida_")
+          ? tool.name
+          : `ida_${tool.name}`;
         pi.registerTool({
           name: piToolName,
           label: tool.annotations?.title ?? `IDA ${tool.name}`,
@@ -123,7 +135,10 @@ export default function idaCodemode(pi: ExtensionAPI) {
                   const total = progress.total ? `/${progress.total}` : "";
                   onUpdate?.({
                     content: [
-                      { type: "text", text: `IDA MCP progress: ${progress.progress}${total}` },
+                      {
+                        type: "text",
+                        text: `IDA MCP progress: ${progress.progress}${total}`,
+                      },
                     ],
                     details: {},
                   });
@@ -133,7 +148,12 @@ export default function idaCodemode(pi: ExtensionAPI) {
 
             if (!Array.isArray(result.content)) {
               return {
-                content: [{ type: "text", text: JSON.stringify(result.toolResult ?? result, null, 2) }],
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify(result.toolResult ?? result, null, 2),
+                  },
+                ],
                 details: {},
               };
             }
@@ -143,7 +163,11 @@ export default function idaCodemode(pi: ExtensionAPI) {
             for (const item of result.content as Array<any>) {
               if (item.type === "text") textParts.push(item.text);
               else if (item.type === "image") {
-                images.push({ type: "image", data: item.data, mimeType: item.mimeType });
+                images.push({
+                  type: "image",
+                  data: item.data,
+                  mimeType: item.mimeType,
+                });
               } else textParts.push(JSON.stringify(item, null, 2));
             }
             if (textParts.length === 0 && result.structuredContent) {
@@ -166,7 +190,10 @@ export default function idaCodemode(pi: ExtensionAPI) {
 
             if (result.isError) throw new Error(text || `${tool.name} failed`);
             return {
-              content: [...(text ? [{ type: "text" as const, text }] : []), ...images],
+              content: [
+                ...(text ? [{ type: "text" as const, text }] : []),
+                ...images,
+              ],
               details: fullOutputPath ? { fullOutputPath } : {},
             };
           },

@@ -16,6 +16,7 @@ import ipaddress
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -55,12 +56,13 @@ from ida_codemode.database import (
     OpenDatabaseResult,
     SaveDatabaseResult,
 )
-from ida_codemode.paths import STATE_DIR, get_idausr_dir
+from ida_codemode.paths import STATE_DIR, find_console_script, get_idausr_dir
 from ida_codemode.reference import (
     find_ida_domain_package_path,
     get_ida_domain_version,
     render_reference,
 )
+from ida_codemode.registry import FileLock
 from ida_codemode.resolver import ResolveError
 from ida_codemode.runtime import PythonExecutionResult
 
@@ -406,6 +408,78 @@ def _gui_plugin_installed() -> bool:
     return plugin_manifest.is_file() and plugin_entrypoint.is_file()
 
 
+def _install_gui_plugin(project_dir: Path) -> None:
+    """Install the GUI plugin from *project_dir* without raising to the caller."""
+    lock_path = get_idausr_dir() / "codemode" / "plugin-install.lock"
+    with FileLock(lock_path):
+        # Another MCP may have completed installation while this one waited.
+        if _gui_plugin_installed():
+            return
+
+        hcli = find_console_script("hcli")
+        if hcli is None:
+            TRACE.emit(
+                "plugin_install_failed",
+                session=_session_fields(),
+                project_dir=str(project_dir),
+                error={"message": "Could not find the hcli console script"},
+            )
+            return
+
+        command = [hcli, "plugin", "install", str(project_dir)]
+        TRACE.emit(
+            "plugin_install_started",
+            session=_session_fields(),
+            command=command,
+            project_dir=str(project_dir),
+        )
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=project_dir,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            fields: dict[str, Any] = {
+                "session": _session_fields(),
+                "command": command,
+                "project_dir": str(project_dir),
+                "error": _error_fields(error),
+            }
+            if isinstance(error, subprocess.CalledProcessError):
+                fields.update(stdout=error.stdout, stderr=error.stderr)
+            TRACE.emit("plugin_install_failed", **fields)
+            return
+
+        TRACE.emit(
+            "plugin_install_succeeded",
+            session=_session_fields(),
+            command=command,
+            project_dir=str(project_dir),
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+
+
+def _schedule_gui_plugin_install() -> threading.Thread | None:
+    """Start eventual GUI plugin installation without delaying MCP startup."""
+    if _gui_plugin_installed():
+        return None
+
+    project_dir = Path(__file__).resolve().parent
+    thread = threading.Thread(
+        target=_install_gui_plugin,
+        args=(project_dir,),
+        name="plugin-install",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 class ListDatabasesToolResult(ListDatabasesResult):
     hint: NotRequired[str]
 
@@ -465,10 +539,14 @@ def _serve(
     transport: str,
     database: str | None = None,
     agent: str | None = None,
+    install_plugin: bool = False,
 ) -> None:
     _unset_empty_environment_variables()
     _install_server_shutdown_handlers()
     _start_mcp_trace(transport, agent)
+
+    if install_plugin:
+        _schedule_gui_plugin_install()
 
     if database:
         DATABASE_MANAGER.schedule_startup_open(database)
@@ -619,6 +697,11 @@ def cli() -> int:
         help="Agent name to record in the MCP session trace.",
     )
     parser.add_argument(
+        "--install-plugin",
+        action="store_true",
+        help="Install the IDA GUI plugin in the background if it is not installed.",
+    )
+    parser.add_argument(
         "--report-session",
         choices=["claude", "codex"],
         help=argparse.SUPPRESS,
@@ -629,7 +712,12 @@ def cli() -> int:
     if args.report_session is not None:
         return _report_session_main(args.report_session)
 
-    _serve(args.transport, database=args.database, agent=args.agent)
+    _serve(
+        args.transport,
+        database=args.database,
+        agent=args.agent,
+        install_plugin=args.install_plugin,
+    )
     return 0
 
 

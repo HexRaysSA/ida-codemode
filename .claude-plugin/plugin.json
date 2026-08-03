@@ -11,7 +11,8 @@
         "${CLAUDE_PLUGIN_ROOT}",
         "ida-codemode-mcp",
         "--agent",
-        "claude"
+        "claude",
+        "--install-plugin"
       ],
       "env": {
         "IDA_CODEMODE_ID": "${IDA_CODEMODE_ID:-}",

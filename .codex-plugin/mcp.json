@@ -5,7 +5,8 @@
       "run",
       "ida-codemode-mcp",
       "--agent",
-      "codex"
+      "codex",
+      "--install-plugin"
     ],
     "cwd": ".",
     "env_vars": ["IDA_CODEMODE_ID", "IDAUSR", "IDA_CODEMODE_STATE_DIR"]
