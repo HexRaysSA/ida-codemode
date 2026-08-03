@@ -398,6 +398,7 @@ def execute_python(
 ) -> PythonExecutionResult:
     """Execute Python and return its result plus captured stdout and stderr."""
 
+    DATABASE_MANAGER.ensure_autoanalysis(instance_id)
     return DATABASE_MANAGER.execute_python(code, instance_id)
 
 

@@ -248,7 +248,7 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 |---|---|
 | `GET /health` | Raw health identity object described above. |
 | `GET /health?sse=1` | `text/event-stream`; one initial `health` event, heartbeat comments, and connection lifetime equal to lease lifetime. |
-| `POST /execute_python` | `{code, timeout?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. |
+| `POST /execute_python` | `{code, timeout?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. Execution does not implicitly wait for autoanalysis. |
 | `POST /save_database` | An object; success is `{"ok":true,"result":{"saved":true,"idb_path":...}}`. |
 | `GET /poll_autoanalysis` | Raw `{status, complete}` analysis object. |
 | `GET` or `POST /wait_autoanalysis` | The same raw analysis object; POST accepts an optional positive finite timeout in seconds. |
@@ -330,7 +330,7 @@ Tools are:
 |---|---|
 | `reference(query)` | Search the installed ida-domain API reference. |
 | `open_database(path, set_current=True)` | Attach to a GUI or shared managed worker. |
-| `execute_python(code, instance_id=None)` | Execute Python against the selected handle. |
+| `execute_python(code, instance_id=None)` | Wait for initial autoanalysis once through a separate handle request, then execute Python against the selected handle. |
 | `list_databases()` | Discover registered instances and identify this MCP server's handles. |
 | `save_database(instance_id=None)` | Explicitly save the selected database. |
 | `close_database(instance_id=None)` | Release this MCP server's handle; it is not a global close. |
@@ -339,7 +339,9 @@ Tools are:
 initialization; an operation that needs the current target waits for that
 startup attempt. The server normally runs over stdio, with an opt-in ZeroMCP
 HTTP transport. The Pi extension is an MCP client adapter rather than a second
-implementation of these tools.
+implementation of these tools. The MCP adapter explicitly applies the initial
+analysis policy before calling the session manager's `execute_python`; the
+upstream route and handle execution method remain independent of analysis.
 
 On stdio EOF, SIGINT, SIGTERM, or normal interpreter exit, the MCP server
 releases all handles. Other agents continue uninterrupted. If the released

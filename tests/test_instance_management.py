@@ -707,6 +707,37 @@ def test_mcp_cli_passes_install_plugin_flag(monkeypatch) -> None:
     }
 
 
+def test_mcp_execute_owns_autoanalysis_policy(monkeypatch) -> None:
+    class FakeManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def ensure_autoanalysis(self, instance_id: str | None) -> None:
+            self.calls.append(("ensure_autoanalysis", instance_id))
+
+        def execute_python(self, code: str, instance_id: str | None):
+            self.calls.append(("execute_python", code, instance_id))
+            return {"result": 1, "stdout": "", "stderr": ""}
+
+    manager = FakeManager()
+    monkeypatch.setattr(mcp_app, "DATABASE_MANAGER", manager)
+    monkeypatch.setattr(
+        mcp_app,
+        "TRACE",
+        SimpleNamespace(emit=lambda *_args, **_kwargs: None),
+    )
+
+    assert mcp_app.execute_python("lambda: 1", "test-instance") == {
+        "result": 1,
+        "stdout": "",
+        "stderr": "",
+    }
+    assert manager.calls == [
+        ("ensure_autoanalysis", "test-instance"),
+        ("execute_python", "lambda: 1", "test-instance"),
+    ]
+
+
 def test_mcp_session_trace_metadata(tmp_path: Path, monkeypatch) -> None:
     class FakeTrace:
         path = tmp_path / "session.jsonl"
@@ -1005,6 +1036,65 @@ def test_get_session_raises_after_failed_startup_open(tmp_path: Path) -> None:
         assert "no open database instance" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected DatabaseError")
+
+
+def test_mcp_execution_waits_for_autoanalysis_once_per_database(
+    tmp_path: Path,
+) -> None:
+    class RecordingBackend(StaticBackend):
+        def __init__(self, analysis: AnalysisState) -> None:
+            self.analysis = analysis
+            self.calls: list[tuple[object, ...]] = []
+
+        def execute_python(self, code: str, timeout: float | None):
+            self.calls.append(("execute", code, timeout))
+            return super().execute_python(code, timeout)
+
+        def wait_autoanalysis(self, timeout: float | None):
+            self.calls.append(("wait", timeout))
+            self.analysis.mark_complete()
+            return self.analysis.snapshot()
+
+    executable = tmp_path / "sample.exe"
+    idb_path = tmp_path / "sample.i64"
+    executable.write_bytes(b"binary")
+    idb_path.write_bytes(b"idb")
+    analysis = AnalysisState()
+    backend = RecordingBackend(analysis)
+    server = CodeModeHTTPServer(
+        backend,
+        InstanceIdentity(str(idb_path), str(executable), "gui"),
+        analysis,
+        tmp_path / "instances",
+    )
+    server.start()
+    manager = DatabaseManager(
+        tmp_path / "instances",
+        tmp_path / "spawn",
+        execute_timeout=7,
+    )
+    try:
+        opened = manager.open_database(str(executable), set_current=True)
+
+        manager.ensure_autoanalysis(opened["instance_id"])
+        assert manager.execute_python("lambda: 1", opened["instance_id"]) == {
+            "code": "lambda: 1",
+            "timeout": 7.0,
+        }
+        manager.ensure_autoanalysis(opened["instance_id"])
+        assert manager.execute_python("lambda: 2", opened["instance_id"]) == {
+            "code": "lambda: 2",
+            "timeout": 7.0,
+        }
+        assert backend.calls == [
+            ("wait", None),
+            ("execute", "lambda: 1", 7.0),
+            ("execute", "lambda: 2", 7.0),
+        ]
+    finally:
+        manager.shutdown()
+        server.stop()
+        server.release_registration()
 
 
 def test_gui_disconnect_invalidates_mcp_instance_without_spawning(

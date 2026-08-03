@@ -108,6 +108,7 @@ class _DatabaseSession:
     instance_id: str
     requested_path: str
     handle: DatabaseHandle
+    autoanalysis_complete: bool = False
     operation_lock: threading.RLock = field(
         default_factory=threading.RLock,
         repr=False,
@@ -354,6 +355,18 @@ class DatabaseManager:
             raise DatabaseError(f"unknown database instance: {target_id}")
         return target_id, session
 
+    def ensure_autoanalysis(self, instance_id: str | None) -> None:
+        """Wait once for initial analysis without consuming execution timeout."""
+        target_id, session = self._get_session(instance_id)
+        with session.operation_lock:
+            if session.autoanalysis_complete:
+                return
+            result = self.wait_autoanalysis(target_id)
+            if not result["complete"]:
+                raise DatabaseError(
+                    "autoanalysis did not complete; Python was not executed"
+                )
+
     def execute_python(
         self,
         code: str,
@@ -388,9 +401,12 @@ class DatabaseManager:
                 if not session.handle.connected:
                     raise self._disconnected_error(target_id) from None
                 raise
+            complete = bool(result["complete"])
+            if complete:
+                session.autoanalysis_complete = True
             return WaitAutoanalysisResult(
                 status=str(result["status"]),
-                complete=bool(result["complete"]),
+                complete=complete,
             )
 
     def save_database(self, instance_id: str | None) -> SaveDatabaseResult:

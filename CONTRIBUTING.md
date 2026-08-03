@@ -74,7 +74,10 @@ def run(db):
     }
 ```
 
-Use `reference` before execution instead of guessing ida-domain API shapes.
+Use `reference` before execution instead of guessing ida-domain API shapes. The
+MCP execution first issues a separate initial-autoanalysis wait for each
+attached database. The upstream `/execute_python` route and client method do not
+wait implicitly, so the script retains its full execution timeout.
 
 ## Shared clients and lifecycle
 
