@@ -1,4 +1,3 @@
-import atexit
 import json
 import logging
 import math
@@ -57,10 +56,10 @@ class CodeModeHTTPServer:
         self.identity = identity
         self.analysis_state = analysis_state
         self.registry_dir = Path(registry_dir)
-        if lease_grace < 0:
-            raise ValueError("lease_grace must not be negative")
-        if heartbeat_interval <= 0:
-            raise ValueError("heartbeat_interval must be positive")
+        if not math.isfinite(lease_grace) or lease_grace < 0:
+            raise ValueError("lease_grace must be a finite non-negative number")
+        if not math.isfinite(heartbeat_interval) or heartbeat_interval <= 0:
+            raise ValueError("heartbeat_interval must be a positive finite number")
         self.token = token or str(uuid.uuid4())
         self.record_suffix = record_suffix
         self.lease_grace = lease_grace
@@ -74,7 +73,6 @@ class CodeModeHTTPServer:
         self._watchdog: threading.Thread | None = None
         self._registration: InstanceRegistration | None = None
         self._entry: RegistryEntry | None = None
-        self._atexit_registered = False
         self._draining = False
         self._active_leases = 0
         self._active_requests = 0
@@ -126,9 +124,6 @@ class CodeModeHTTPServer:
             if not serving.wait(timeout=2.0) or not thread.is_alive():
                 raise RuntimeError("HTTP server thread did not start")
             self._entry = registration.publish(httpd.port)
-            if not self._atexit_registered:
-                atexit.register(self._withdraw_registration)
-                self._atexit_registered = True
             if self.identity.managed:
                 watchdog = threading.Thread(
                     target=self._watch_leases,
@@ -149,27 +144,19 @@ class CodeModeHTTPServer:
         except Exception:
             logger.exception("Code Mode HTTP server stopped unexpectedly")
 
-    def _withdraw_registration(self) -> None:
-        registration = self._registration
-        if registration is not None:
-            registration.withdraw()
-
     def release_registration(self) -> None:
-        """Release the lifetime lock after the owning IDB has been closed."""
+        """Withdraw ownership after the owning IDB has detached or closed."""
 
         registration = self._registration
         self._registration = None
         self._entry = None
         if registration is not None:
             registration.release()
-        if self._atexit_registered:
-            atexit.unregister(self._withdraw_registration)
-            self._atexit_registered = False
 
     def stop(self) -> None:
-        # Withdrawal precedes listener shutdown; the lifetime lock remains held
-        # until release_registration() is called after the database closes.
-        self._withdraw_registration()
+        # Keep the registry record and lifetime lock together until the owning
+        # IDB has detached or closed. While the listener is stopped, discovery
+        # classifies this record as BLOCKED instead of spawning over it.
         self._stream_stop.set()
         with self._activity:
             self._draining = True
@@ -222,9 +209,8 @@ class CodeModeHTTPServer:
                 if not self._draining or self._stream_stop.is_set():
                     return
 
-            # No lease or operation can enter after _draining is set. Publish
-            # disappearance before stopping the listener.
-            self._withdraw_registration()
+            # No lease or operation can enter after _draining is set. Keep the
+            # ownership record published while the worker saves and closes.
             self.stop()
             if self.on_shutdown is not None:
                 try:
@@ -302,7 +288,12 @@ class CodeModeHTTPServer:
                     self._activity.notify_all()
 
     def _health_payload(self) -> dict[str, Any]:
-        entry = self._entry
+        with self._activity:
+            if self._draining:
+                raise APIError(
+                    "instance_draining", "The instance is shutting down", status=503
+                )
+            entry = self._entry
         if entry is None:
             raise APIError(
                 "instance_starting",

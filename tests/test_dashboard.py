@@ -1,7 +1,9 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
+from http.client import HTTPConnection
 from pathlib import Path
 from unittest import mock
 
@@ -131,6 +133,53 @@ class TranscriptTests(unittest.TestCase):
 
 
 class SemanticSessionTests(unittest.TestCase):
+    def test_dashboard_host_policy_blocks_loopback_dns_rebinding(self) -> None:
+        for host in ("localhost:8736", "127.0.0.1:8736", "[::1]:8736"):
+            self.assertTrue(dashboard._dashboard_host_allowed("127.0.0.1", host))
+        self.assertFalse(
+            dashboard._dashboard_host_allowed("127.0.0.1", "attacker.example:8736")
+        )
+        self.assertFalse(dashboard._dashboard_host_allowed("127.0.0.1", None))
+        self.assertFalse(
+            dashboard._dashboard_host_allowed("127.0.0.1", "localhost:not-a-port")
+        )
+        # Deliberately remote dashboard bindings retain their existing behavior.
+        self.assertTrue(
+            dashboard._dashboard_host_allowed("0.0.0.0", "dashboard.example:8736")
+        )
+
+    def test_dashboard_handler_enforces_host_policy(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        original_sessions_dir = dashboard.SESSIONS_DIR
+        dashboard.SESSIONS_DIR = Path(temporary.name)
+        server = dashboard.ThreadingHTTPServer(
+            ("127.0.0.1", 0), dashboard.DashboardHandler
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def status(host: str) -> int:
+            connection = HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+            try:
+                connection.putrequest("GET", "/", skip_host=True)
+                connection.putheader("Host", host)
+                connection.endheaders()
+                response = connection.getresponse()
+                response.read()
+                return response.status
+            finally:
+                connection.close()
+
+        try:
+            self.assertEqual(status(f"localhost:{server.server_port}"), 200)
+            self.assertEqual(status(f"attacker.example:{server.server_port}"), 403)
+        finally:
+            server.shutdown()
+            thread.join(2)
+            server.server_close()
+            dashboard.SESSIONS_DIR = original_sessions_dir
+            temporary.cleanup()
+
     def test_pid_liveness_uses_a_safe_windows_probe(self) -> None:
         with (
             mock.patch.object(dashboard.os, "name", "nt"),

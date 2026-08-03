@@ -60,6 +60,44 @@ def test_file_lock_excludes_other_open_descriptions(tmp_path: Path) -> None:
         first.close()
 
 
+def test_lifecycle_apis_reject_nonfinite_timeouts(tmp_path: Path) -> None:
+    for timeout in (float("nan"), float("inf")):
+        lock = FileLock(tmp_path / "invalid.lock")
+        try:
+            lock.acquire(timeout)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid lock timeout: {timeout}")
+
+        try:
+            resolve_instance(
+                tmp_path / "missing.exe",
+                timeout=timeout,
+                registry_dir=tmp_path / "instances",
+                spawn_dir=tmp_path / "spawn",
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid resolver timeout: {timeout}")
+
+        for name, parameters in (
+            ("open", {"open_timeout": timeout}),
+            ("execute", {"execute_timeout": timeout}),
+        ):
+            try:
+                DatabaseManager(
+                    tmp_path / "instances",
+                    tmp_path / "spawn",
+                    **parameters,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"accepted invalid {name} timeout: {timeout}")
+
+
 def test_find_gui_owner_checks_the_lifetime_lock(tmp_path: Path) -> None:
     registration = InstanceRegistration(
         tmp_path,
@@ -479,6 +517,13 @@ def test_mcp_schedules_plugin_install_in_background(monkeypatch) -> None:
         "daemon": True,
         "started": True,
     }
+
+
+def test_pi_package_includes_runtime_peers_and_gui_manifest() -> None:
+    root = Path(__file__).parents[1]
+    package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    assert package["peerDependencies"]["@earendil-works/pi-tui"] == "*"
+    assert "ida-plugin.json" in package["files"]
 
 
 def test_mcp_plugin_install_uses_hcli_from_current_environment(
@@ -1412,6 +1457,64 @@ def test_final_explicit_release_skips_startup_grace(tmp_path: Path) -> None:
     handle.close()
     assert stopped.wait(1)
     server.release_registration()
+
+
+def test_draining_owner_remains_discoverable_until_database_close(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "test.exe"
+    idb = tmp_path / "test.exe.i64"
+    executable.write_bytes(b"binary")
+    idb.write_bytes(b"database")
+    stopped = threading.Event()
+    registry_dir = tmp_path / "instances"
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
+        AnalysisState(),
+        registry_dir,
+        lease_grace=30,
+        heartbeat_interval=30,
+        on_shutdown=stopped.set,
+    )
+    server.start()
+    assert server.entry is not None
+    record_path = registry_dir / f"{server.entry.record_id}.json"
+    handle = DatabaseHandle(str(executable), server.entry)
+    handle.close()
+    assert stopped.wait(1)
+
+    discovered = scan_instances(registry_dir)
+    assert len(discovered) == 1
+    assert discovered[0].state is InstanceState.BLOCKED
+    assert record_path.is_file()
+    assert server._registration is not None
+    assert server._registration.lock._locked
+
+    spawned = False
+
+    def unexpected_spawner(*_args: Any):
+        nonlocal spawned
+        spawned = True
+        raise AssertionError("spawned over a draining IDB owner")
+
+    try:
+        resolve_instance(
+            executable,
+            timeout=1,
+            registry_dir=registry_dir,
+            spawn_dir=tmp_path / "spawn",
+            spawner=unexpected_spawner,
+        )
+    except resolver_mod.IdbBusy:
+        pass
+    else:
+        raise AssertionError("draining owner was not reported as busy")
+    assert not spawned
+
+    # The lifecycle owner calls this only after database.close()/unhook().
+    server.release_registration()
+    assert not record_path.exists()
 
 
 def test_handle_keepalive_retains_idle_managed_worker(tmp_path: Path) -> None:

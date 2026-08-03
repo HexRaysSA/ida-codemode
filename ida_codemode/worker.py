@@ -1,5 +1,6 @@
 import argparse
 import importlib
+import math
 import os
 import signal
 import sys
@@ -214,8 +215,11 @@ def main(argv: list[str] | None = None) -> int:
     record_id = f"{os.getpid()}-{suffix}"
     _redirect_output(record_id)
 
-    if args.lease_grace < 0:
-        print("[ida-codemode] lease grace must not be negative", file=sys.stderr)
+    if not math.isfinite(args.lease_grace) or args.lease_grace < 0:
+        print(
+            "[ida-codemode] lease grace must be a finite non-negative number",
+            file=sys.stderr,
+        )
         return 2
     try:
         input_path = args.input.expanduser().resolve(strict=True)

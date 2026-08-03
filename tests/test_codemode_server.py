@@ -93,6 +93,29 @@ def make_server(tmp_path: Path, *, gui: bool = False):
     return server, backend
 
 
+def test_server_rejects_nonfinite_lifecycle_intervals(tmp_path: Path):
+    analysis = AnalysisState()
+    identity = InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib")
+    for parameters in (
+        {"lease_grace": float("nan")},
+        {"lease_grace": float("inf")},
+        {"heartbeat_interval": float("nan")},
+        {"heartbeat_interval": float("inf")},
+    ):
+        try:
+            CodeModeHTTPServer(
+                RecordingBackend(analysis),
+                identity,
+                analysis,
+                tmp_path,
+                **parameters,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid intervals: {parameters}")
+
+
 def test_result_conversion_emits_standard_json_for_nonfinite_floats():
     converted = to_jsonable(
         {"nan": float("nan"), "positive": float("inf"), "negative": -float("inf")}

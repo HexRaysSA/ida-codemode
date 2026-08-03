@@ -384,10 +384,10 @@ def _translate_legacy(
     migrated: dict[str, list[dict[str, Any]]] = {}
     for key, sequenced in buckets.items():
         sequenced.sort(key=lambda item: _iso_sort_key(item[1], item[0]))
-        records = [record for _sequence, record in sequenced]
+        translated_records = [record for _sequence, record in sequenced]
         sources = bucket_sources[key]
         if sources and all(source_closed.get(source, False) for source in sources):
-            last = records[-1]
+            last = translated_records[-1]
             last_session = last.get("session")
             session: dict[str, Any] = (
                 {str(name): value for name, value in last_session.items()}
@@ -395,7 +395,7 @@ def _translate_legacy(
                 else {}
             )
             last_pid = last.get("pid")
-            records.append(
+            translated_records.append(
                 _base_record(
                     ts=last.get("ts"),
                     server_id=_session_id(key),
@@ -404,7 +404,7 @@ def _translate_legacy(
                     session=session,
                 )
             )
-        migrated[_session_id(key)] = records
+        migrated[_session_id(key)] = translated_records
     for path, count in sorted(discarded_output.items()):
         report.append(
             f"DISCARDED {path}: {count} operational bridge_output records "

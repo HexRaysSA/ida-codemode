@@ -102,10 +102,12 @@ Registration order is an invariant:
 The fixed grace period protects only the interval between publication and the
 first lease. Afterward, a managed worker begins idle shutdown immediately when
 its final lease disappears, unless that lease requested a bounded keepalive.
-The watchdog marks the service as draining, withdraws the JSON record, closes
-lease streams and the listener, and asks the idalib main loop to stop. The
-worker then saves/closes the IDB and releases the lifetime lock. A plugin unload
-or process signal follows the same ownership ordering.
+The watchdog marks the service as draining, closes lease streams and the
+listener, and asks the idalib main loop to stop. The registry record and its
+lifetime lock remain together while the worker saves/closes the IDB, so a
+scanner classifies the stopped owner as `BLOCKED` rather than spawning over it.
+Only after the IDB closes does the worker withdraw the record and release the
+lock. A plugin unload or process signal follows the same ownership ordering.
 
 The JSON file is discovery metadata; the kernel lock is the liveness authority.
 Conceptually, a scanner classifies a parseable record as:
@@ -216,7 +218,7 @@ from a lock-held record marks that owner `BLOCKED` before probing HTTP. This is
 deliberate—starting a replacement could corrupt an IDB already owned by a peer
 that the scanner does not understand.
 
-Protocol version 1 consists of the following interoperable contracts.
+Protocol version 2 consists of the following interoperable contracts.
 
 ### Discovery contract
 
@@ -291,7 +293,7 @@ of a required registry field; changing path identity, lock ownership, auth, or
 lease semantics; or incompatibly changing an existing route's method, request,
 response, error, execution, or save behavior. A feature that must be relied on
 across mixed installations needs either an optional capability probe or a
-protocol bump; it must not silently reinterpret a version-1 field.
+protocol bump; it must not silently reinterpret an existing field.
 
 ## Shared leases and managed shutdown
 
@@ -309,9 +311,9 @@ opening a lease to retain an idle worker for repeated short-lived invocations.
 Each RPC carries its owning lease identity. Releasing a lease cancels its
 orphaned operation; cancellation is cooperative and the worker waits only for
 safe unwinding, not successful completion. Once no leases remain and the final
-lease's keepalive has expired, the worker withdraws its registry record, stops
-serving, returns to the idalib main thread, saves/closes the IDB, and exits. A
-new lease before expiration cancels pending shutdown. GUI instances are
+lease's keepalive has expired, the worker stops serving, returns to the idalib
+main thread, saves/closes the IDB, then withdraws its registry record and exits.
+A new lease before shutdown begins cancels pending shutdown. GUI instances are
 unmanaged and ignore zero leases.
 
 Worker lifetime follows the explicit SSE lease, not the incidental lifetime of

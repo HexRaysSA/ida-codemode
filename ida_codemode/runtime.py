@@ -249,6 +249,9 @@ class IDARuntime:
         if version < (9, 4):
             raise RuntimeError("IDA Code Mode requires IDA 9.4 or newer")
 
+        if not math.isfinite(default_timeout) or default_timeout <= 0:
+            raise ValueError("default_timeout must be a positive finite number")
+
         self.backend = backend
         self.database = database
         self.analysis_state = analysis_state
@@ -276,6 +279,11 @@ class IDARuntime:
         capture_output: bool = False,
     ) -> Any:
         effective_timeout = self.default_timeout if timeout is None else timeout
+        if not math.isfinite(effective_timeout) or effective_timeout <= 0:
+            raise APIError(
+                "invalid_timeout",
+                "timeout must be a positive finite number",
+            )
         results: queue.Queue[tuple[bool, Any, str | None, str, str]] = queue.Queue(
             maxsize=1
         )

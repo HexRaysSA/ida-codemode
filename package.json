@@ -14,6 +14,7 @@
   "files": [
     ".python-version",
     "ida-codemode.ts",
+    "ida-plugin.json",
     "ida_codemode/*.py",
     "ida_codemode_dashboard.py",
     "ida_codemode_mcp.py",
@@ -34,10 +35,14 @@
     "@hono/node-server": "2.0.11"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
       "optional": true
     }
   },

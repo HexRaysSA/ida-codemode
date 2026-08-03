@@ -125,6 +125,8 @@ class FileLock:
         return True
 
     def acquire(self, timeout: float | None = None) -> None:
+        if timeout is not None and (not math.isfinite(timeout) or timeout < 0):
+            raise ValueError("lock timeout must be a finite non-negative number")
         deadline = None if timeout is None else time.monotonic() + timeout
         while not self.try_acquire():
             if deadline is not None and time.monotonic() >= deadline:

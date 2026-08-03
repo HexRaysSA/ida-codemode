@@ -127,6 +127,10 @@ class DatabaseManager:
         execute_timeout: float = DEFAULT_EXECUTE_TIMEOUT_SECONDS,
         keepalive: float = 0.0,
     ) -> None:
+        if not math.isfinite(open_timeout) or open_timeout <= 0:
+            raise ValueError("open_timeout must be a positive finite number")
+        if not math.isfinite(execute_timeout) or execute_timeout <= 0:
+            raise ValueError("execute_timeout must be a positive finite number")
         if (
             not math.isfinite(keepalive)
             or keepalive < 0

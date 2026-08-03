@@ -767,18 +767,6 @@ def _status_badge(summary: SessionSummary) -> str:
 # --------------------------------------------------------------------------
 
 
-_STATUS_CSS = {"running": "open", "closed": "closed", "killed": "killed"}
-
-
-def _status_badge_value(status: str) -> str:
-    css = _STATUS_CSS.get(status, "closed")
-    return f'<span class="badge {css}">{_e(status)}</span>'
-
-
-def _status_badge(summary: SessionSummary) -> str:
-    return _status_badge_value(summary.status)
-
-
 def _session_model_names(summary: SessionSummary) -> list[str]:
     models: list[str] = []
     for _kind, session_path in sorted(_summary_agent_sessions(summary)):
@@ -1611,7 +1599,11 @@ def _pi_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, str]
                     tool_name = str(part.get("name", "tool"))
                     body_parts = [_tool_input_html(tool_name, part.get("arguments"))]
                     tool_call_id = part.get("id")
-                    result = tool_results.get(tool_call_id)
+                    result = (
+                        tool_results.get(tool_call_id)
+                        if isinstance(tool_call_id, str)
+                        else None
+                    )
                     if result is not None:
                         result_text = _tool_result_text(result.get("content"))
                         if result_text.strip():
@@ -1907,6 +1899,37 @@ def render_agent_session(session_path: str) -> str | None:
 # --------------------------------------------------------------------------
 
 
+def _is_loopback_host(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.casefold() == "localhost"
+
+
+def _dashboard_host_allowed(bound_host: str, host_header: str | None) -> bool:
+    """Reject DNS-rebinding Host values when the dashboard is loopback-bound."""
+
+    if host_header is None:
+        return False
+    try:
+        parsed = urlparse(f"//{host_header}")
+        # Accessing port validates malformed or out-of-range port values.
+        if parsed.port == 0:
+            return False
+    except ValueError:
+        return False
+    if (
+        parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    return not _is_loopback_host(bound_host) or _is_loopback_host(parsed.hostname)
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "ida-codemode-dashboard"
 
@@ -1936,7 +1959,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             status=404,
         )
 
+    def _check_host(self) -> bool:
+        hosts = self.headers.get_all("Host", [])
+        server_address = getattr(self.server, "server_address", ("", 0))
+        bound_host = str(server_address[0]) if isinstance(server_address, tuple) else ""
+        if len(hosts) == 1 and _dashboard_host_allowed(bound_host, hosts[0]):
+            return True
+        self.close_connection = True
+        self._send_html(
+            _page("forbidden — ida-codemode", '<div class="empty">Forbidden.</div>'),
+            status=403,
+        )
+        return False
+
     def do_GET(self) -> None:
+        if not self._check_host():
+            return
         url = urlparse(self.path)
         route = url.path
 
@@ -1973,11 +2011,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 
 def serve(host: str, port: int, open_browser: bool = False) -> None:
-    try:
-        loopback = ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        loopback = host.casefold() == "localhost"
-    if not loopback:
+    if not _is_loopback_host(host):
         print(
             "WARNING: dashboard is bound to a non-loopback host without built-in "
             "authentication; session traces may be reachable over the network."

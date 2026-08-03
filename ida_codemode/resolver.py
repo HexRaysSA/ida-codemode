@@ -1,3 +1,4 @@
+import math
 import os
 import subprocess
 import time
@@ -176,6 +177,8 @@ def spawn_worker(
     lease_grace: float,
     options: WorkerLaunchOptions | None = None,
 ) -> tuple[subprocess.Popen[bytes], Path]:
+    if not math.isfinite(lease_grace) or lease_grace < 0:
+        raise ValueError("lease_grace must be a finite non-negative number")
     options = options or WorkerLaunchOptions()
     suffix = os.urandom(3).hex()
     # A fresh database must be created from the original input, never by
@@ -435,8 +438,10 @@ def resolve_instance(
     launch controls map directly to ``ida_domain.database.IdaCommandOptions``.
     """
 
-    if timeout <= 0:
-        raise ValueError("timeout must be positive")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be a positive finite number")
+    if not math.isfinite(lease_grace) or lease_grace < 0:
+        raise ValueError("lease_grace must be a finite non-negative number")
     source = canonical_path(path)
     expected_idb = (
         canonical_path(output_database)
