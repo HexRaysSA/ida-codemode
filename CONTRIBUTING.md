@@ -1,5 +1,27 @@
 # Contributing
 
+## MCP tools
+
+- `reference(query)` - search the installed ida-domain API reference.
+- `open_database(path, set_current=True)` - attach to a GUI database or shared idalib worker.
+- `execute_python(code, instance_id=None)` - wait for initial autoanalysis on the first execution for an attached database, then run Python with the IDA runtime preloaded and return its result, stdout, and stderr.
+- `list_databases()` - discover all registered GUI and idalib instances and identify this MCP server's active handles.
+- `save_database(instance_id=None)` - explicitly save a database.
+- `close_database(instance_id=None)` - release this MCP server's handle and lease.
+
+The intended flow is `open_database` → `reference` → `execute_python`.
+Inside `execute_python`, `db` is the current `ida-domain` `Database`; both
+`db` and `ida_domain` are available globally. Ordinary Python statements are
+accepted, a single or trailing expression becomes the result, and
+`def run(db): ...` remains
+available for function-style code.
+
+`close_database` is not a global shutdown operation. Other agents continue to
+use the same instance. A managed idalib worker cancels orphaned execution, saves,
+and exits after its final lease disappears; GUI databases are never closed by
+MCP lifecycle management. Low-level `DatabaseManager` users can set
+`keepalive=30` (or another bounded duration) to retain an idle worker for reuse.
+
 ## Development checkout
 
 ```bash

@@ -6,7 +6,7 @@ import time
 from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, TypedDict, cast
+from typing import Any, cast
 
 import ida_codemode.client as client_mod
 import ida_codemode.resolver as resolver_mod
@@ -36,11 +36,6 @@ from ida_codemode.worker import (
 from ida_codemode.worker import (
     _parser as worker_parser,
 )
-
-
-class _ManagerTimeoutParameters(TypedDict, total=False):
-    open_timeout: float
-    execute_timeout: float
 
 
 class StaticBackend:
@@ -87,16 +82,17 @@ def test_lifecycle_apis_reject_nonfinite_timeouts(tmp_path: Path) -> None:
         else:
             raise AssertionError(f"accepted invalid resolver timeout: {timeout}")
 
-        parameter_sets: tuple[tuple[str, _ManagerTimeoutParameters], ...] = (
-            ("open", {"open_timeout": timeout}),
-            ("execute", {"execute_timeout": timeout}),
+        parameter_sets = (
+            ("open", timeout, 1.0),
+            ("execute", 1.0, timeout),
         )
-        for name, parameters in parameter_sets:
+        for name, open_timeout, execute_timeout in parameter_sets:
             try:
                 DatabaseManager(
                     tmp_path / "instances",
                     tmp_path / "spawn",
-                    **parameters,
+                    open_timeout=open_timeout,
+                    execute_timeout=execute_timeout,
                 )
             except ValueError:
                 pass
@@ -330,14 +326,20 @@ def test_resolver_builds_worker_import_options(tmp_path: Path, monkeypatch) -> N
     captured = {}
     entry = SimpleNamespace(record_id="worker")
 
-    def fake_spawner(source_path, expected_idb, lease_grace, options):
+    def fake_spawner(
+        source_path: str,
+        expected_idb: str,
+        lease_grace: float,
+        options: resolver_mod.WorkerLaunchOptions,
+    ) -> tuple[subprocess.Popen[bytes], Path]:
         captured.update(
             source=source_path,
             expected_idb=expected_idb,
             lease_grace=lease_grace,
             options=options,
         )
-        return SimpleNamespace(pid=1), tmp_path / "worker.log"
+        process = cast(subprocess.Popen[bytes], SimpleNamespace(pid=1))
+        return process, tmp_path / "worker.log"
 
     monkeypatch.setattr(resolver_mod, "_scan_until", lambda *args, **kwargs: [])
     monkeypatch.setattr(
@@ -1269,8 +1271,10 @@ def test_fresh_worker_opens_source_instead_of_existing_idb(
     assert command[command.index("--image-base") + 1] == "0x8000"
     assert "--new-database" in command
     if resolver_mod.os.name == "nt":
-        assert captured["creationflags"] & resolver_mod.subprocess.CREATE_NO_WINDOW
-        assert not captured["creationflags"] & resolver_mod.subprocess.DETACHED_PROCESS
+        create_no_window = getattr(resolver_mod.subprocess, "CREATE_NO_WINDOW")
+        detached_process = getattr(resolver_mod.subprocess, "DETACHED_PROCESS")
+        assert captured["creationflags"] & create_no_window
+        assert not captured["creationflags"] & detached_process
 
 
 def test_worker_launch_forwards_all_ida_command_options(

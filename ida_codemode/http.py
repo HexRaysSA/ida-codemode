@@ -42,7 +42,7 @@ def json_response(
 class RequestHandler(BaseHTTPRequestHandler):
     """Authenticated HTTP/1.1 handler with bounded request decoding."""
 
-    server: "LocalHTTPServer"
+    server: "LocalHTTPServer"  # pyright: ignore[reportIncompatibleVariableOverride]
     server_version = "ida-codemode/0.2.0"
     sys_version = ""
     protocol_version = "HTTP/1.1"

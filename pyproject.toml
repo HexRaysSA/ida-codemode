@@ -39,6 +39,10 @@ only-include = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.pyright]
+# IDAPython modules provide type information but are importable only inside IDA.
+reportMissingModuleSource = "none"
+
 [tool.uv.sources]
 ida-domain = { git = "https://github.com/HexRaysSA/ida-domain", branch = "main" }
 ida-hcli = { git = "https://github.com/HexRaysSA/ida-hcli", branch = "plugin-status-headless" }

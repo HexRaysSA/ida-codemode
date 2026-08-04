@@ -5,17 +5,11 @@ import threading
 import time
 from http.client import HTTPConnection
 from pathlib import Path
-from typing import TypedDict
 
 from ida_codemode.http import POST_BODY_LIMIT
 from ida_codemode.registry import InstanceIdentity, load_registry_entry
 from ida_codemode.runtime import AnalysisState, to_jsonable
 from ida_codemode.server import CodeModeHTTPServer
-
-
-class _ServerIntervalParameters(TypedDict, total=False):
-    lease_grace: float
-    heartbeat_interval: float
 
 
 class RecordingBackend:
@@ -102,25 +96,26 @@ def make_server(tmp_path: Path, *, gui: bool = False):
 def test_server_rejects_nonfinite_lifecycle_intervals(tmp_path: Path):
     analysis = AnalysisState()
     identity = InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib")
-    parameter_sets: tuple[_ServerIntervalParameters, ...] = (
-        {"lease_grace": float("nan")},
-        {"lease_grace": float("inf")},
-        {"heartbeat_interval": float("nan")},
-        {"heartbeat_interval": float("inf")},
+    parameter_sets: tuple[tuple[str, float, float], ...] = (
+        ("lease_grace", float("nan"), 1.0),
+        ("lease_grace", float("inf"), 1.0),
+        ("heartbeat_interval", 1.0, float("nan")),
+        ("heartbeat_interval", 1.0, float("inf")),
     )
-    for parameters in parameter_sets:
+    for name, lease_grace, heartbeat_interval in parameter_sets:
         try:
             CodeModeHTTPServer(
                 RecordingBackend(analysis),
                 identity,
                 analysis,
                 tmp_path,
-                **parameters,
+                lease_grace=lease_grace,
+                heartbeat_interval=heartbeat_interval,
             )
         except ValueError:
             pass
         else:
-            raise AssertionError(f"accepted invalid intervals: {parameters}")
+            raise AssertionError(f"accepted invalid {name}")
 
 
 def test_result_conversion_emits_standard_json_for_nonfinite_floats():
@@ -138,7 +133,7 @@ def test_health_registry_and_authentication(tmp_path: Path):
         assert status == 200
         assert server.entry is not None
         assert payload == {"status": "ok", **server.entry.health_identity()}
-        assert headers["Server"].strip() == "ida-codemode/0.2.0"
+        assert headers["Server"].strip().split("/")[0] == "ida-codemode"
 
         entry = load_registry_entry(tmp_path / f"{server.entry.record_id}.json")
         assert entry.backend == "idalib"

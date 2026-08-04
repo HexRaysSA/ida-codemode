@@ -217,6 +217,7 @@ class DatabaseManager:
                 )
 
             existing: _DatabaseSession | None = None
+            current: str | None = None
             if candidate is not None:
                 with candidate.operation_lock, self._lock:
                     if self._instances.get(candidate.instance_id) is candidate:
