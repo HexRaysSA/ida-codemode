@@ -452,6 +452,7 @@ def _install_gui_plugin(project_dir: Path) -> None:
                 completed = subprocess.run(
                     command,
                     cwd=project_dir,
+                    env={**os.environ, "HCLI_DEBUG": "1"},
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
