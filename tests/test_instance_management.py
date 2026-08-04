@@ -6,7 +6,7 @@ import time
 from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 import ida_codemode.client as client_mod
 import ida_codemode.resolver as resolver_mod
@@ -36,6 +36,11 @@ from ida_codemode.worker import (
 from ida_codemode.worker import (
     _parser as worker_parser,
 )
+
+
+class _ManagerTimeoutParameters(TypedDict, total=False):
+    open_timeout: float
+    execute_timeout: float
 
 
 class StaticBackend:
@@ -82,10 +87,11 @@ def test_lifecycle_apis_reject_nonfinite_timeouts(tmp_path: Path) -> None:
         else:
             raise AssertionError(f"accepted invalid resolver timeout: {timeout}")
 
-        for name, parameters in (
+        parameter_sets: tuple[tuple[str, _ManagerTimeoutParameters], ...] = (
             ("open", {"open_timeout": timeout}),
             ("execute", {"execute_timeout": timeout}),
-        ):
+        )
+        for name, parameters in parameter_sets:
             try:
                 DatabaseManager(
                     tmp_path / "instances",

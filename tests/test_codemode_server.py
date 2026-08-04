@@ -5,11 +5,17 @@ import threading
 import time
 from http.client import HTTPConnection
 from pathlib import Path
+from typing import TypedDict
 
 from ida_codemode.http import POST_BODY_LIMIT
 from ida_codemode.registry import InstanceIdentity, load_registry_entry
 from ida_codemode.runtime import AnalysisState, to_jsonable
 from ida_codemode.server import CodeModeHTTPServer
+
+
+class _ServerIntervalParameters(TypedDict, total=False):
+    lease_grace: float
+    heartbeat_interval: float
 
 
 class RecordingBackend:
@@ -96,12 +102,13 @@ def make_server(tmp_path: Path, *, gui: bool = False):
 def test_server_rejects_nonfinite_lifecycle_intervals(tmp_path: Path):
     analysis = AnalysisState()
     identity = InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib")
-    for parameters in (
+    parameter_sets: tuple[_ServerIntervalParameters, ...] = (
         {"lease_grace": float("nan")},
         {"lease_grace": float("inf")},
         {"heartbeat_interval": float("nan")},
         {"heartbeat_interval": float("inf")},
-    ):
+    )
+    for parameters in parameter_sets:
         try:
             CodeModeHTTPServer(
                 RecordingBackend(analysis),
