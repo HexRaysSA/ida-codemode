@@ -91,10 +91,6 @@ class CodeModePlugin(idaapi.plugin_t):
         # server.start() publishes synchronously, so the next plugin sees it.
         # A second owner would make the resolver raise AmbiguousInstance.
         if idb_path and find_gui_owner(idb_path) is not None:
-            ida_kernwin.msg(
-                "[ida-codemode] GUI database already registered; "
-                "not starting a second server\n"
-            )
             return
 
         from ida_domain import Database
@@ -125,7 +121,6 @@ class CodeModePlugin(idaapi.plugin_t):
             raise
         self._runtime = runtime
         self._server = server
-        ida_kernwin.msg(f"[ida-codemode] {server.url}\n")
 
     def run(self, arg: int) -> None:
         if self._server is not None:
