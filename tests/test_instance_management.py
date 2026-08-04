@@ -1,6 +1,8 @@
 import argparse
 import json
+import os
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import asdict, replace
@@ -10,6 +12,7 @@ from typing import Any, cast
 
 import ida_codemode.client as client_mod
 import ida_codemode.resolver as resolver_mod
+import ida_codemode.worker as worker_mod
 import ida_codemode_mcp as mcp_app
 from ida_codemode.client import DatabaseHandle
 from ida_codemode.database import DatabaseError, DatabaseManager
@@ -32,6 +35,7 @@ from ida_codemode.worker import (
     _build_ida_options,
     _image_base_to_paragraphs,
     _parse_image_base,
+    _work_around_idapro_idausr_path_list,
 )
 from ida_codemode.worker import (
     _parser as worker_parser,
@@ -1217,6 +1221,116 @@ def test_windows_console_launcher_can_exit_before_worker_child() -> None:
     assert resolver_mod._launcher_exit_is_fatal(0, "nt") is False
     assert resolver_mod._launcher_exit_is_fatal(1, "nt") is True
     assert resolver_mod._launcher_exit_is_fatal(0, "posix") is True
+
+
+def test_worker_uses_primary_idausr_entry_for_idapro(
+    tmp_path: Path, monkeypatch
+) -> None:
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    monkeypatch.setenv("IDAUSR", f"{primary}{os.pathsep}{secondary}")
+
+    _work_around_idapro_idausr_path_list()
+
+    assert os.environ["IDAUSR"] == str(primary)
+
+
+def test_worker_hook_lifetime_surrounds_database_lifetime(
+    tmp_path: Path, monkeypatch
+) -> None:
+    events: list[str] = []
+    input_path = tmp_path / "input.bin"
+    input_path.write_bytes(b"binary")
+    monkeypatch.delenv("IDAUSR", raising=False)
+    monkeypatch.setattr(worker_mod, "_redirect_output", lambda _record_id: tmp_path)
+    monkeypatch.setattr(worker_mod, "probe", lambda: None)
+    monkeypatch.setattr(worker_mod.signal, "signal", lambda _signum, _handler: None)
+
+    class FakeHook:
+        def hook(self) -> None:
+            events.append("hook")
+
+        def unhook(self) -> None:
+            events.append("unhook")
+
+    class FakeDatabaseHandle:
+        def close(self, save: bool) -> None:
+            assert save is True
+            events.append("close")
+
+    database_handle = FakeDatabaseHandle()
+
+    class FakeDatabase:
+        @classmethod
+        def open(cls, path: str, *, args, save_on_close: bool):
+            assert path == str(input_path)
+            assert save_on_close is True
+            events.append("open")
+            return database_handle
+
+    class FakeOptions:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    class FakeRuntime:
+        def __init__(self, *, backend: str, database, analysis_state) -> None:
+            assert backend == "idalib"
+            self.database = database
+
+    class FakeServer:
+        url = "http://127.0.0.1:1"
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            events.append("server-start")
+
+        def stop(self) -> None:
+            events.append("server-stop")
+
+        def release_registration(self) -> None:
+            events.append("release")
+
+    fake_kernwin = SimpleNamespace(
+        serve=lambda: events.append("serve"),
+        stop_serving=lambda: None,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_auto",
+        SimpleNamespace(auto_is_ok=lambda: True),
+    )
+    monkeypatch.setitem(sys.modules, "ida_kernwin", fake_kernwin)
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_loader",
+        SimpleNamespace(
+            PATH_TYPE_IDB=1, get_path=lambda _kind: str(tmp_path / "x.i64")
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_nalt",
+        SimpleNamespace(get_input_file_path=lambda: str(input_path)),
+    )
+    monkeypatch.setitem(
+        sys.modules, "ida_domain", SimpleNamespace(Database=FakeDatabase)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_domain.database",
+        SimpleNamespace(IdaCommandOptions=FakeOptions),
+    )
+    monkeypatch.setattr(
+        worker_mod, "create_autoanalysis_hook", lambda _state: FakeHook()
+    )
+    monkeypatch.setattr(worker_mod, "IDARuntime", FakeRuntime)
+    monkeypatch.setattr(worker_mod, "CodeModeHTTPServer", FakeServer)
+
+    assert worker_mod.main([str(input_path)]) == 0
+    assert events.index("open") < events.index("hook")
+    assert events.index("unhook") < events.index("close")
 
 
 def test_image_base_uses_byte_units_and_requires_paragraph_alignment() -> None:

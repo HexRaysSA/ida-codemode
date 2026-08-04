@@ -131,6 +131,21 @@ def probe() -> None:
     importlib.import_module("ida_domain")
 
 
+def _work_around_idapro_idausr_path_list() -> None:
+    """Restrict IDAUSR to its primary directory for the worker process.
+
+    Shipped idapro versions treat the entire IDAUSR search path as one directory
+    when locating ida-config.json. IDA defines the first entry as its writable
+    user directory, so use that entry until fixed idapro releases are ubiquitous.
+    """
+    idausr = os.environ.get("IDAUSR")
+    if not idausr:
+        return
+    primary = idausr.split(os.pathsep, 1)[0]
+    if primary:
+        os.environ["IDAUSR"] = primary
+
+
 def _redirect_output(record_id: str) -> Path:
     directory = ensure_private_directory(LOG_DIR)
     path = directory / f"{record_id}.log"
@@ -188,6 +203,10 @@ def _build_ida_options(args: argparse.Namespace, options_type: Any) -> Any:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # This must happen before probe() imports idapro and reads ida-config.json.
+    # It is process-local; the MCP server and its parent retain the full path.
+    _work_around_idapro_idausr_path_list()
+
     parser = _parser()
     args = parser.parse_args(argv)
     if args.file_member and not args.file_type:
@@ -244,8 +263,7 @@ def main(argv: list[str] | None = None) -> int:
     kernwin: Any = ida_kernwin
 
     analysis_state = AnalysisState()
-    analysis_hook: Any = create_autoanalysis_hook(analysis_state)
-    analysis_hook.hook()
+    analysis_hook: Any | None = None
     database: Any | None = None
     runtime: IDARuntime | None = None
     server: CodeModeHTTPServer | None = None
@@ -267,6 +285,10 @@ def main(argv: list[str] | None = None) -> int:
             args=options,
             save_on_close=True,
         )
+        # Non-empty IDA command options make idalib reinitialize its kernel.
+        # Create and install Python hooks only after that cycle has completed.
+        analysis_hook = create_autoanalysis_hook(analysis_state)
+        analysis_hook.hook()
         if ida_auto.auto_is_ok():
             analysis_state.mark_complete()
 
@@ -310,6 +332,17 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if server is not None:
             server.stop()
+        # IDAPython TESTABLE_BUILD requires user hooks to be gone before kernel
+        # or database teardown. In release builds this also avoids relying on
+        # IDAPython's forced stale-hook cleanup.
+        if analysis_hook is not None:
+            try:
+                analysis_hook.unhook()
+            except Exception as exc:  # noqa: BLE001 -- best-effort SWIG hook cleanup
+                print(
+                    f"[ida-codemode] failed to remove analysis hook: {exc}",
+                    file=sys.stderr,
+                )
         if (
             database is not None
             and runtime is not None
@@ -335,12 +368,6 @@ def main(argv: list[str] | None = None) -> int:
         # The lifetime lock is deliberately released only after the IDB close.
         if server is not None:
             server.release_registration()
-        try:
-            analysis_hook.unhook()
-        except Exception as exc:  # noqa: BLE001 -- best-effort SWIG hook cleanup
-            print(
-                f"[ida-codemode] failed to remove analysis hook: {exc}", file=sys.stderr
-            )
         for signum, previous in previous_handlers.items():
             signal.signal(signum, previous)
 
