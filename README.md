@@ -46,8 +46,9 @@ Configure a regular stdio MCP server in your `mcp.json`:
     "ida": {
       "command": "uvx",
       "args": [
+        "--prerelease=allow",
         "--from",
-        "git+https://github.com/HexRaysSA/ida-codemode",
+        "ida-codemode@latest",
         "ida-codemode-mcp",
         "--agent",
         "my-agent",
@@ -57,3 +58,8 @@ Configure a regular stdio MCP server in your `mcp.json`:
   }
 }
 ```
+
+`uvx` resolves the latest stable `ida-codemode` release from PyPI, so this
+configuration does not need to be updated for each release. Pre-release
+dependency resolution is currently required because `ida-domain` is published
+as a development release.
