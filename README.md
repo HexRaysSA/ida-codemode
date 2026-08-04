@@ -36,18 +36,6 @@ codex plugin add ida-mcp@HexRaysSA
 pi install git:github.com/HexRaysSA/ida-codemode
 ```
 
-### IDA GUI
-
-To (optionally) support using IDA GUI instances from the MCP, install
-[hcli](https://hcli.docs.hex-rays.com/) in your PATH and run:
-
-```bash
-hcli plugin install https://github.com/HexRaysSA/ida-codemode/archive/refs/heads/main.zip
-```
-
-Agent integrations attempt this plugin installation in the background after
-MCP starts. If it fails, the MCP remains available for idalib databases.
-
 ### Other agents
 
 Configure a regular stdio MCP server in your `mcp.json`:

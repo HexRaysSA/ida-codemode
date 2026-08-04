@@ -1,0 +1,134 @@
+name: Release
+
+run-name: ${{ github.event.inputs.release_type == 'dev' && 'Pre-Release Version Bump' || github.event.inputs.release_type == 'release-current' && 'Release Current Version' || format('Release Version Bump ({0})', github.event.inputs.release_type) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: Select release type
+        required: true
+        type: choice
+        options:
+          - release-current
+          - dev
+          - release-patch
+          - release-minor
+          # Major releases require deliberate coordination.
+          # - release-major
+        default: dev
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  UV_PYTHON: "3.13"
+  # Keep this aligned with ida-hcli's release workflow.
+  UV_VERSION: "0.10.6"
+
+jobs:
+  publish:
+    name: Publish PyPI package and GitHub release
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python with uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python
+        run: uv python install "$UV_PYTHON"
+
+      - name: Bump every package and plugin version
+        id: version
+        run: |
+          if [[ "$RELEASE_TYPE" == "release-current" ]]; then
+            VERSION=$(uv run --no-project python scripts/bump_version.py --check)
+          else
+            VERSION=$(uv run --no-project python scripts/bump_version.py "$RELEASE_TYPE")
+            uv run --no-project python scripts/bump_version.py --check
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$RELEASE_TYPE" == "dev" ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Created version: $VERSION"
+        env:
+          RELEASE_TYPE: ${{ github.event.inputs.release_type }}
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Build IDA plugin archive
+        run: |
+          mkdir -p release-assets
+          uv run --no-project python -m zipfile -c \
+            "release-assets/ida-codemode-plugin-$VERSION.zip" \
+            ida-plugin.json ida_codemode_plugin.py ida_codemode README.md
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+
+      - name: Commit and tag version
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            package.json package-lock.json pyproject.toml uv.lock \
+            ida-plugin.json ida_codemode/http.py \
+            .claude-plugin/plugin.json .codex-plugin/plugin.json
+          git diff --cached --check
+          if [[ "$RELEASE_TYPE" == "release-current" ]]; then
+            if ! git diff --cached --quiet; then
+              echo "release-current unexpectedly changed managed files" >&2
+              git diff --cached --stat >&2
+              exit 1
+            fi
+            echo "Tagging the current commit without a version-bump commit"
+          else
+            if git diff --cached --quiet; then
+              echo "Expected a version change for $RELEASE_TYPE" >&2
+              exit 1
+            fi
+            git commit -m "$VERSION"
+          fi
+          git tag "$TAG"
+          gh auth setup-git
+          git push --atomic origin "HEAD:$GITHUB_REF_NAME" "refs/tags/$TAG"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TYPE: ${{ github.event.inputs.release_type }}
+
+      - name: Publish to PyPI
+        run: uv publish
+
+      - name: Create GitHub release
+        run: |
+          args=("$TAG" dist/* release-assets/* --verify-tag --generate-notes --title "$TAG")
+          if [[ "$PRERELEASE" == "true" ]]; then
+            args+=(--prerelease)
+          else
+            args+=(--latest)
+          fi
+          gh release create "${args[@]}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}

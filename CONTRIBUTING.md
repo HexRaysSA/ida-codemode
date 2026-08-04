@@ -1,5 +1,9 @@
 # Contributing
 
+⚠️ **We do not accept pull requests at this time.** ⚠️
+
+If you run into problems with the installation, feel free to open an issue!
+
 ## MCP tools
 
 - `reference(query)` - search the installed ida-domain API reference.
@@ -28,6 +32,25 @@ MCP lifecycle management. Low-level `DatabaseManager` users can set
 uv sync
 uv run ida-codemode-mcp
 ```
+
+## Releases
+
+The manually dispatched `.github/workflows/release.yml` workflow bumps, commits,
+tags, publishes to PyPI, and creates a GitHub release. For the initial release,
+`release-current` publishes and tags the version already in the manifests without
+bumping it. All Python, Node, IDA, Claude, and Codex version declarations are
+managed together by one script:
+
+```bash
+python scripts/bump_version.py --check
+python scripts/bump_version.py dev
+python scripts/bump_version.py release-patch
+python scripts/bump_version.py release-minor
+```
+
+An exact version is also accepted. The `--check` command verifies that every
+managed file has the same version. Each GitHub release also includes one
+`ida-codemode-plugin-<version>.zip` asset for direct installation with HCLI.
 
 The MCP server uses stdio by default. A local HTTP transport is also available:
 
