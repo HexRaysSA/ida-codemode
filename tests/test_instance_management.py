@@ -499,6 +499,48 @@ def test_mcp_unsets_empty_forwarded_environment_variables(monkeypatch) -> None:
     assert "IDA_CODEMODE_STATE_DIR" not in mcp_app.os.environ
 
 
+def test_mcp_gui_plugin_requires_current_or_newer_version(
+    tmp_path: Path, monkeypatch
+) -> None:
+    plugin_dir = tmp_path / "plugins" / "ida-codemode"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "ida_codemode_plugin.py").touch()
+    manifest = plugin_dir / "ida-plugin.json"
+
+    monkeypatch.setattr(mcp_app, "get_idausr_dir", lambda: tmp_path)
+    monkeypatch.setattr(mcp_app, "PACKAGE_VERSION", "1.2.3.dev2")
+
+    cases = {
+        "1.2.2": False,
+        "1.2.3-dev.1": False,
+        "1.2.3-dev.2": True,
+        "1.2.3": True,
+        "1.3.0": True,
+    }
+    for plugin_version, expected in cases.items():
+        manifest.write_text(
+            json.dumps({"plugin": {"version": plugin_version}}), encoding="utf-8"
+        )
+        assert mcp_app._gui_plugin_installed() is expected
+
+
+def test_mcp_gui_plugin_rejects_missing_or_invalid_version(
+    tmp_path: Path, monkeypatch
+) -> None:
+    plugin_dir = tmp_path / "plugins" / "ida-codemode"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "ida_codemode_plugin.py").touch()
+    manifest = plugin_dir / "ida-plugin.json"
+
+    monkeypatch.setattr(mcp_app, "get_idausr_dir", lambda: tmp_path)
+    monkeypatch.setattr(mcp_app, "PACKAGE_VERSION", "1.2.3")
+
+    assert mcp_app._gui_plugin_installed() is False
+    for contents in ("not json", "{}", '{"plugin":{"version":"invalid"}}'):
+        manifest.write_text(contents, encoding="utf-8")
+        assert mcp_app._gui_plugin_installed() is False
+
+
 def test_mcp_schedules_plugin_install_in_background(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

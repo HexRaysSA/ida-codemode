@@ -33,6 +33,8 @@ from pathlib import Path
 from typing import Annotated, Any, NotRequired, ParamSpec, TypeVar
 from urllib.parse import urlparse
 
+from packaging.version import InvalidVersion, Version
+
 MCP_ENVIRONMENT_VARIABLES = (
     "IDA_CODEMODE_ID",
     "IDAUSR",
@@ -72,7 +74,8 @@ SESSIONS_DIR = STATE_DIR / "sessions"
 OPEN_TIMEOUT_SECONDS = 300
 EXECUTE_TIMEOUT_SECONDS = 300
 
-mcp = McpServer("ida", version=version("ida-codemode"))
+PACKAGE_VERSION = version("ida-codemode")
+mcp = McpServer("ida", version=PACKAGE_VERSION)
 
 
 def _trace_jsonable(value: Any) -> Any:
@@ -404,11 +407,28 @@ def execute_python(
 
 
 def _gui_plugin_installed() -> bool:
-    """Check whether the ida-codemode GUI plugin is installed."""
+    """Check whether a compatible ida-codemode GUI plugin is installed."""
     plugin_dir = get_idausr_dir() / "plugins" / "ida-codemode"
     plugin_manifest = plugin_dir / "ida-plugin.json"
     plugin_entrypoint = plugin_dir / "ida_codemode_plugin.py"
-    return plugin_manifest.is_file() and plugin_entrypoint.is_file()
+    if not plugin_entrypoint.is_file():
+        return False
+
+    try:
+        document = json.loads(plugin_manifest.read_text(encoding="utf-8"))
+        plugin_version = document["plugin"]["version"]
+        if not isinstance(plugin_version, str):
+            return False
+        return Version(plugin_version) >= Version(PACKAGE_VERSION)
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        InvalidVersion,
+    ):
+        return False
 
 
 def _emit_plugin_install_failure(project_dir: Path, error: Exception) -> None:

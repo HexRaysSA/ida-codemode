@@ -99,6 +99,7 @@ dependencies = [
     { name = "ida-domain" },
     { name = "ida-hcli" },
     { name = "idapro" },
+    { name = "packaging" },
     { name = "zeromcp" },
 ]
 
@@ -113,6 +114,7 @@ requires-dist = [
     { name = "ida-domain", specifier = ">=0.5.1.dev2" },
     { name = "ida-hcli", git = "https://github.com/HexRaysSA/ida-hcli?branch=plugin-status-headless" },
     { name = "idapro" },
+    { name = "packaging" },
     { name = "zeromcp", specifier = ">=1.5.0" },
 ]
 
