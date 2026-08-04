@@ -1,4 +1,5 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +20,9 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 
 const PACKAGE_ROOT = dirname(fileURLToPath(import.meta.url));
+const PACKAGE_VERSION = (
+  createRequire(import.meta.url)("./package.json") as { version: string }
+).version;
 const CALL_TIMEOUT_MS = 360_000;
 const STDERR_CAPTURE_MAX_CHARS = 1024 * 1024;
 const STATUS_WIDGET_KEY = "ida-codemode:status-bar";
@@ -153,10 +157,7 @@ export default function idaCodemode(pi: ExtensionAPI) {
                     : "startup failed";
               const header = [
                 `${icon} ${theme.fg("accent", theme.bold("IDA MCP"))}`,
-                theme.fg(
-                  current.state === "error" ? "error" : "muted",
-                  label,
-                ),
+                theme.fg(current.state === "error" ? "error" : "muted", label),
               ].join(theme.fg("dim", "  ·  "));
               const detailLines = current.details.map((line) =>
                 theme.fg("dim", `  ${line}`),
@@ -172,14 +173,17 @@ export default function idaCodemode(pi: ExtensionAPI) {
     }
 
     if (state === "ready") {
-      statusHideTimer = setTimeout(() => clearStatusWidget(ctx), STATUS_HIDE_DELAY_MS);
+      statusHideTimer = setTimeout(
+        () => clearStatusWidget(ctx),
+        STATUS_HIDE_DELAY_MS,
+      );
     }
   };
 
   const startMcp = async (ctx: ExtensionContext): Promise<void> => {
     if (client || connectingClient) return;
 
-    const next = new Client({ name: "ida-codemode-pi", version: "0.2.0" });
+    const next = new Client({ name: "ida", version: PACKAGE_VERSION });
     connectingClient = next;
     let capturedStderr = "";
     let captureStderr = true;
@@ -209,7 +213,9 @@ export default function idaCodemode(pi: ExtensionAPI) {
 
     transport.stderr?.on("data", (chunk: unknown) => {
       if (!captureStderr) return;
-      const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      const text = Buffer.isBuffer(chunk)
+        ? chunk.toString("utf8")
+        : String(chunk);
       capturedStderr = (capturedStderr + text).slice(-STDERR_CAPTURE_MAX_CHARS);
     });
 

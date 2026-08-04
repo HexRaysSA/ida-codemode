@@ -1271,8 +1271,8 @@ def test_fresh_worker_opens_source_instead_of_existing_idb(
     assert command[command.index("--image-base") + 1] == "0x8000"
     assert "--new-database" in command
     if resolver_mod.os.name == "nt":
-        create_no_window = getattr(resolver_mod.subprocess, "CREATE_NO_WINDOW")
-        detached_process = getattr(resolver_mod.subprocess, "DETACHED_PROCESS")
+        create_no_window = resolver_mod.subprocess.CREATE_NO_WINDOW
+        detached_process = resolver_mod.subprocess.DETACHED_PROCESS
         assert captured["creationflags"] & create_no_window
         assert not captured["creationflags"] & detached_process
 

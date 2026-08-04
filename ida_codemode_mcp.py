@@ -28,6 +28,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from functools import wraps
+from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated, Any, NotRequired, ParamSpec, TypeVar
 from urllib.parse import urlparse
@@ -71,7 +72,7 @@ SESSIONS_DIR = STATE_DIR / "sessions"
 OPEN_TIMEOUT_SECONDS = 300
 EXECUTE_TIMEOUT_SECONDS = 300
 
-mcp = McpServer("ida", version="0.2.0")
+mcp = McpServer("ida", version=version("ida-codemode"))
 
 
 def _trace_jsonable(value: Any) -> Any:

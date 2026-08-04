@@ -5,7 +5,7 @@ description = "Code Mode MCP server for the ida-domain API"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "ida-domain>=0.5.0",
+    "ida-domain>=0.5.1.dev2",
     "zeromcp>=1.5.0",
     "ida-hcli",
     "idapro",
@@ -44,5 +44,4 @@ testpaths = ["tests"]
 reportMissingModuleSource = "none"
 
 [tool.uv.sources]
-ida-domain = { git = "https://github.com/HexRaysSA/ida-domain", branch = "main" }
 ida-hcli = { git = "https://github.com/HexRaysSA/ida-hcli", branch = "plugin-status-headless" }
