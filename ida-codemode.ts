@@ -23,7 +23,10 @@ const PACKAGE_ROOT = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_VERSION = (
   createRequire(import.meta.url)("./package.json") as { version: string }
 ).version;
-const CALL_TIMEOUT_MS = 360_000;
+// The MCP SDK requires a request timer. Use Node's largest reliable delay so
+// Pi does not impose a meaningful operation cutoff; backends enforce their own
+// operation-specific timeouts.
+const CALL_TIMEOUT_MS = 2_147_483_647;
 const STDERR_CAPTURE_MAX_CHARS = 1024 * 1024;
 const STATUS_WIDGET_KEY = "ida-codemode:status-bar";
 const STATUS_HIDE_DELAY_MS = 4000;

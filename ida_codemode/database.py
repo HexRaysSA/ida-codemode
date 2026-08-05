@@ -27,7 +27,7 @@ from ida_codemode.resolver import expected_idb_path
 from ida_codemode.runtime import PythonExecutionResult
 
 DEFAULT_OPEN_TIMEOUT_SECONDS = 300.0
-DEFAULT_EXECUTE_TIMEOUT_SECONDS = 300.0
+DEFAULT_EXECUTE_TIMEOUT_SECONDS = 360.0
 
 
 class DatabaseError(Exception):
@@ -388,7 +388,16 @@ class DatabaseManager:
         self,
         code: str,
         instance_id: str | None,
+        timeout: float | None = None,
     ) -> PythonExecutionResult:
+        effective_timeout = self._execute_timeout if timeout is None else timeout
+        if (
+            isinstance(effective_timeout, bool)
+            or not isinstance(effective_timeout, (int, float))
+            or not math.isfinite(effective_timeout)
+            or effective_timeout <= 0
+        ):
+            raise ValueError("timeout must be a positive finite number")
         target_id, session = self._get_session(instance_id)
         with session.operation_lock:
             if not session.handle.connected:
@@ -396,7 +405,7 @@ class DatabaseManager:
             try:
                 return session.handle.execute_python(
                     code,
-                    timeout=self._execute_timeout,
+                    timeout=float(effective_timeout),
                 )
             except ClientError:
                 if not session.handle.connected:

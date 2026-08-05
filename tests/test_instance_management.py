@@ -814,8 +814,13 @@ def test_mcp_execute_owns_autoanalysis_policy(monkeypatch) -> None:
         def ensure_autoanalysis(self, instance_id: str | None) -> None:
             self.calls.append(("ensure_autoanalysis", instance_id))
 
-        def execute_python(self, code: str, instance_id: str | None):
-            self.calls.append(("execute_python", code, instance_id))
+        def execute_python(
+            self,
+            code: str,
+            instance_id: str | None,
+            timeout: float | None = None,
+        ):
+            self.calls.append(("execute_python", code, instance_id, timeout))
             return {"result": 1, "stdout": "", "stderr": ""}
 
     manager = FakeManager()
@@ -833,8 +838,23 @@ def test_mcp_execute_owns_autoanalysis_policy(monkeypatch) -> None:
     }
     assert manager.calls == [
         ("ensure_autoanalysis", "test-instance"),
-        ("execute_python", "lambda: 1", "test-instance"),
+        ("execute_python", "lambda: 1", "test-instance", 360),
     ]
+
+
+def test_mcp_execute_schema_exposes_numeric_timeout_default() -> None:
+    tools = mcp_app.mcp.registry.methods["tools/list"]()["tools"]
+    execute_tool = next(tool for tool in tools if tool["name"] == "execute_python")
+    timeout_schema = execute_tool["inputSchema"]["properties"]["timeout"]
+
+    assert timeout_schema == {
+        "type": "number",
+        "description": (
+            "Python execution timeout in seconds. This does not include the separate "
+            "initial autoanalysis wait."
+        ),
+        "default": 360,
+    }
 
 
 def test_mcp_session_trace_metadata(tmp_path: Path, monkeypatch) -> None:
@@ -1181,14 +1201,14 @@ def test_mcp_execution_waits_for_autoanalysis_once_per_database(
             "timeout": 7.0,
         }
         manager.ensure_autoanalysis(opened["instance_id"])
-        assert manager.execute_python("lambda: 2", opened["instance_id"]) == {
+        assert manager.execute_python("lambda: 2", opened["instance_id"], 9) == {
             "code": "lambda: 2",
-            "timeout": 7.0,
+            "timeout": 9.0,
         }
         assert backend.calls == [
             ("wait", None),
             ("execute", "lambda: 1", 7.0),
-            ("execute", "lambda: 2", 7.0),
+            ("execute", "lambda: 2", 9.0),
         ]
     finally:
         manager.shutdown()

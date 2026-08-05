@@ -257,7 +257,7 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 | `POST /execute_python` | `{code, timeout?, lease_id?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. Execution does not implicitly wait for autoanalysis. |
 | `POST /save_database` | `{lease_id?}`; success is `{"ok":true,"result":{"saved":true,"idb_path":...}}`. |
 | `GET /poll_autoanalysis` | Raw `{status, complete}` analysis object. |
-| `GET` or `POST /wait_autoanalysis` | The same raw analysis object; POST accepts an optional positive finite timeout in seconds. |
+| `GET` or `POST /wait_autoanalysis` | The same raw analysis object; POST accepts an optional positive finite timeout in seconds. An omitted timeout waits without a deadline. |
 
 Operation failures use a non-2xx status and, once application dispatch has
 begun, `{"ok":false,"error":{"code":...,"message":...}}`; additional error
@@ -338,7 +338,7 @@ Tools are:
 |---|---|
 | `reference(query)` | Search the installed ida-domain API reference. |
 | `open_database(path, set_current=True)` | Attach to a GUI or shared managed worker. |
-| `execute_python(code, instance_id=None)` | Wait for initial autoanalysis once through a separate handle request, then execute Python against the selected handle. |
+| `execute_python(code, instance_id=None, timeout=360)` | Wait without a deadline for initial autoanalysis once through a separate handle request, then execute Python against the selected handle with the numeric execution-only timeout. |
 | `list_databases()` | Discover registered instances and identify this MCP server's handles. |
 | `save_database(instance_id=None)` | Explicitly save the selected database. |
 | `close_database(instance_id=None)` | Release this MCP server's handle; it is not a global close. |
@@ -349,7 +349,9 @@ startup attempt. The server normally runs over stdio, with an opt-in ZeroMCP
 HTTP transport. The Pi extension is an MCP client adapter rather than a second
 implementation of these tools. The MCP adapter explicitly applies the initial
 analysis policy before calling the session manager's `execute_python`; the
-upstream route and handle execution method remain independent of analysis.
+upstream route and handle execution method remain independent of analysis. The
+initial analysis wait is unbounded and does not consume the MCP tool's separate
+execution timeout.
 
 On stdio EOF, SIGINT, SIGTERM, or normal interpreter exit, the MCP server
 releases all handles. Other agents continue uninterrupted. If the released

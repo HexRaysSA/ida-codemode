@@ -8,7 +8,7 @@ If you run into problems with the installation, feel free to open an issue!
 
 - `reference(query)` - search the installed ida-domain API reference.
 - `open_database(path, set_current=True)` - attach to a GUI database or shared idalib worker.
-- `execute_python(code, instance_id=None)` - wait for initial autoanalysis on the first execution for an attached database, then run Python with the IDA runtime preloaded and return its result, stdout, and stderr.
+- `execute_python(code, instance_id=None, timeout=360)` - wait without a deadline for initial autoanalysis on the first execution for an attached database, then run Python with the requested execution timeout and return its result, stdout, and stderr.
 - `list_databases()` - discover all registered GUI and idalib instances and identify this MCP server's active handles.
 - `save_database(instance_id=None)` - explicitly save a database.
 - `close_database(instance_id=None)` - release this MCP server's handle and lease.
@@ -120,9 +120,11 @@ def run(db):
 ```
 
 Use `reference` before execution instead of guessing ida-domain API shapes. The
-MCP execution first issues a separate initial-autoanalysis wait for each
-attached database. The upstream `/execute_python` route and client method do not
-wait implicitly, so the script retains its full execution timeout.
+MCP execution first issues a separate, unbounded initial-autoanalysis wait for
+each attached database. The upstream `/execute_python` route and client method
+do not wait implicitly, so the script retains its full execution timeout. The
+MCP tool defaults that execution-only timeout to 360 seconds and exposes it as
+a numeric argument.
 
 ## Shared clients and lifecycle
 

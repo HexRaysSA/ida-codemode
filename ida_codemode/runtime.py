@@ -278,8 +278,10 @@ class IDARuntime:
         batch: bool = True,
         capture_output: bool = False,
     ) -> Any:
-        effective_timeout = self.default_timeout if timeout is None else timeout
-        if not math.isfinite(effective_timeout) or effective_timeout <= 0:
+        effective_timeout = timeout
+        if effective_timeout is not None and (
+            not math.isfinite(effective_timeout) or effective_timeout <= 0
+        ):
             raise APIError(
                 "invalid_timeout",
                 "timeout must be a positive finite number",
@@ -302,7 +304,7 @@ class IDARuntime:
                 timer: threading.Timer | None = None
                 deadline = (
                     time.monotonic() + effective_timeout
-                    if effective_timeout > 0
+                    if effective_timeout is not None
                     else None
                 )
                 self.ida_kernwin.clr_cancelled()
@@ -340,6 +342,7 @@ class IDARuntime:
                             status=409,
                         )
                     if deadline is not None and time.monotonic() >= deadline:
+                        assert effective_timeout is not None
                         raise APIError(
                             "operation_timeout",
                             f"{kind} timed out after {effective_timeout:.2f}s",
@@ -351,10 +354,11 @@ class IDARuntime:
                     if batch:
                         old_batch = self.idc.batch(1)
                     if deadline is not None:
+                        assert effective_timeout is not None
                         timer = threading.Timer(effective_timeout, fire_native_cancel)
                         timer.daemon = True
                         timer.start()
-                        sys.settrace(timeout_trace)
+                    sys.settrace(timeout_trace)
                     if capture_output:
                         with (
                             redirect_stdout(stdout_capture),
@@ -472,7 +476,7 @@ class IDARuntime:
         return self._run_sync(
             execute,
             kind="execute",
-            timeout=timeout,
+            timeout=self.default_timeout if timeout is None else timeout,
             capture_output=True,
         )
 

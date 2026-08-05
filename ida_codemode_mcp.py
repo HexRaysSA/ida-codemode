@@ -72,7 +72,7 @@ from ida_codemode.runtime import PythonExecutionResult
 
 SESSIONS_DIR = STATE_DIR / "sessions"
 OPEN_TIMEOUT_SECONDS = 300
-EXECUTE_TIMEOUT_SECONDS = 300
+EXECUTE_TIMEOUT_SECONDS = 360
 
 PACKAGE_VERSION = version("ida-codemode")
 mcp = McpServer("ida", version=PACKAGE_VERSION)
@@ -399,11 +399,18 @@ def execute_python(
         str | None,
         "Optional database instance id. If omitted, use the current target.",
     ] = None,
+    timeout: Annotated[
+        float,
+        (
+            "Python execution timeout in seconds. This does not include the separate "
+            "initial autoanalysis wait."
+        ),
+    ] = EXECUTE_TIMEOUT_SECONDS,
 ) -> PythonExecutionResult:
     """Execute Python and return its result plus captured stdout and stderr."""
 
     DATABASE_MANAGER.ensure_autoanalysis(instance_id)
-    return DATABASE_MANAGER.execute_python(code, instance_id)
+    return DATABASE_MANAGER.execute_python(code, instance_id, timeout=timeout)
 
 
 def _gui_plugin_installed() -> bool:
