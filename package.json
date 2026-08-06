@@ -19,7 +19,7 @@
     "ida_codemode_dashboard.py",
     "ida_codemode_mcp.py",
     "ida_codemode_plugin.py",
-    "migrate_logs.py",
+    "scripts/migrate_logs.py",
     "pyproject.toml",
     "uv.lock"
   ],

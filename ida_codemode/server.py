@@ -80,6 +80,9 @@ class CodeModeHTTPServer:
         self._shutdown_at: float | None = time.monotonic() + self.lease_grace
         self._backend_lock = threading.Lock()
         self._running_lease_id: str | None = None
+        self._running_operation_id: str | None = None
+        self._pending_operations: set[tuple[str | None, str]] = set()
+        self._cancelled_operations: set[tuple[str | None, str]] = set()
         self._stream_stop = threading.Event()
 
     @property
@@ -231,7 +234,6 @@ class CodeModeHTTPServer:
             return lease
 
     def _lease_closed(self, lease_id: str) -> None:
-        cancel_active = False
         with self._activity:
             lease = self._leases.pop(lease_id, None)
             if lease is None:
@@ -239,17 +241,18 @@ class CodeModeHTTPServer:
             lease.stop.set()
             self._active_leases = len(self._leases)
             if self._running_lease_id == lease_id:
-                cancel_active = True
+                # Keep operation handoff blocked until cancellation reaches the
+                # backend; otherwise a successor can become active and receive
+                # cancellation intended for the released lease.
+                cancel = getattr(self.backend, "cancel_active", None)
+                if cancel is not None:
+                    try:
+                        cancel()
+                    except Exception:
+                        logger.exception("Code Mode operation cancellation failed")
             if self._active_leases == 0:
                 self._shutdown_at = time.monotonic() + lease.keepalive
             self._activity.notify_all()
-        if cancel_active:
-            cancel = getattr(self.backend, "cancel_active", None)
-            if cancel is not None:
-                try:
-                    cancel()
-                except Exception:
-                    logger.exception("Code Mode operation cancellation failed")
 
     def _request_started(self, lease_id: str | None) -> None:
         with self._activity:
@@ -269,23 +272,92 @@ class CodeModeHTTPServer:
                 self._active_requests -= 1
             self._activity.notify_all()
 
-    def _run_operation(self, lease_id: str | None, operation: Callable[[], Any]) -> Any:
-        with self._backend_lock:
+    def _run_operation(
+        self,
+        lease_id: str | None,
+        operation: Callable[[], Any],
+        operation_id: str | None = None,
+    ) -> Any:
+        operation_key = (lease_id, operation_id) if operation_id is not None else None
+        if operation_key is not None:
             with self._activity:
-                if lease_id is not None and lease_id not in self._leases:
+                if operation_key in self._pending_operations:
                     raise APIError(
-                        "lease_released",
-                        "The client lease is no longer active",
+                        "duplicate_operation",
+                        "The operation id is already active",
                         status=409,
                     )
-                self._running_lease_id = lease_id
+                self._pending_operations.add(operation_key)
+        try:
+            if operation_key is None:
+                self._backend_lock.acquire()
+            else:
+                while not self._backend_lock.acquire(timeout=0.05):
+                    with self._activity:
+                        if operation_key in self._cancelled_operations:
+                            raise APIError(
+                                "operation_cancelled",
+                                "The operation was cancelled",
+                                status=409,
+                            )
             try:
-                return operation()
-            finally:
                 with self._activity:
-                    if self._running_lease_id == lease_id:
-                        self._running_lease_id = None
+                    if lease_id is not None and lease_id not in self._leases:
+                        raise APIError(
+                            "lease_released",
+                            "The client lease is no longer active",
+                            status=409,
+                        )
+                    if (
+                        operation_key is not None
+                        and operation_key in self._cancelled_operations
+                    ):
+                        raise APIError(
+                            "operation_cancelled",
+                            "The operation was cancelled",
+                            status=409,
+                        )
+                    self._running_lease_id = lease_id
+                    self._running_operation_id = operation_id
+                try:
+                    return operation()
+                finally:
+                    with self._activity:
+                        if (
+                            self._running_lease_id == lease_id
+                            and self._running_operation_id == operation_id
+                        ):
+                            self._running_lease_id = None
+                            self._running_operation_id = None
+                        self._activity.notify_all()
+            finally:
+                self._backend_lock.release()
+        finally:
+            if operation_key is not None:
+                with self._activity:
+                    self._pending_operations.discard(operation_key)
+                    self._cancelled_operations.discard(operation_key)
                     self._activity.notify_all()
+
+    def _cancel_operation(self, lease_id: str | None, operation_id: str) -> bool:
+        if lease_id is None:
+            raise APIError("invalid_lease", "lease_id is required")
+        operation_key = (lease_id, operation_id)
+        with self._activity:
+            if operation_key not in self._pending_operations:
+                return False
+            self._cancelled_operations.add(operation_key)
+            if (
+                self._running_lease_id == lease_id
+                and self._running_operation_id == operation_id
+            ):
+                # Serialize cancellation with the running-operation fields so a
+                # finishing operation cannot hand the backend to a successor
+                # before cancel_active() observes the intended generation.
+                cancel = getattr(self.backend, "cancel_active", None)
+                if cancel is not None:
+                    cancel()
+            return True
 
     def _health_payload(self) -> dict[str, Any]:
         with self._activity:
@@ -380,6 +452,22 @@ class CodeModeHTTPServer:
         return lease_id
 
     @staticmethod
+    def _operation_id(payload: dict[str, Any]) -> str | None:
+        operation_id = payload.get("operation_id")
+        if operation_id is None:
+            return None
+        if (
+            not isinstance(operation_id, str)
+            or not operation_id
+            or len(operation_id) > 128
+        ):
+            raise APIError(
+                "invalid_operation",
+                "operation_id must be 1 to 128 characters",
+            )
+        return operation_id
+
+    @staticmethod
     def _timeout(payload: dict[str, Any]) -> float | None:
         timeout = payload.get("timeout")
         if timeout is None:
@@ -442,7 +530,13 @@ class CodeModeHTTPServer:
             payload = (
                 self._decode_object(body)
                 if method == "POST"
-                and path in {"/wait_autoanalysis", "/execute_python", "/save_database"}
+                and path
+                in {
+                    "/wait_autoanalysis",
+                    "/execute_python",
+                    "/cancel_operation",
+                    "/save_database",
+                }
                 else {}
             )
             lease_id = self._payload_lease_id(payload)
@@ -465,6 +559,7 @@ class CodeModeHTTPServer:
                             lambda: self.backend.wait_autoanalysis(
                                 self._timeout(payload)
                             ),
+                            self._operation_id(payload),
                         ),
                     )
                 if method == "POST" and path == "/execute_python":
@@ -479,7 +574,23 @@ class CodeModeHTTPServer:
                             lambda: self.backend.execute_python(
                                 code, self._timeout(payload)
                             ),
+                            self._operation_id(payload),
                         )
+                    )
+                if method == "POST" and path == "/cancel_operation":
+                    operation_id = self._operation_id(payload)
+                    if operation_id is None:
+                        raise APIError(
+                            "invalid_operation",
+                            "operation_id is required",
+                        )
+                    return self._success(
+                        {
+                            "cancelled": self._cancel_operation(
+                                lease_id,
+                                operation_id,
+                            )
+                        }
                     )
                 if method == "POST" and path == "/save_database":
                     return self._success(

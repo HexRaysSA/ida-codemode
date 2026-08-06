@@ -372,13 +372,25 @@ class DatabaseManager:
             raise DatabaseError(f"unknown database instance: {target_id}")
         return target_id, session
 
-    def ensure_autoanalysis(self, instance_id: str | None) -> None:
+    def resolve_instance_id(self, instance_id: str | None) -> str:
+        """Resolve and pin an optional current target to one attached instance."""
+        target_id, session = self._get_session(instance_id)
+        if not session.handle.connected:
+            raise self._disconnected_error(target_id)
+        return target_id
+
+    def ensure_autoanalysis(
+        self,
+        instance_id: str | None,
+        *,
+        operation_id: str | None = None,
+    ) -> None:
         """Wait once for initial analysis without consuming execution timeout."""
         target_id, session = self._get_session(instance_id)
         with session.operation_lock:
             if session.autoanalysis_complete:
                 return
-            result = self.wait_autoanalysis(target_id)
+            result = self.wait_autoanalysis(target_id, operation_id=operation_id)
             if not result["complete"]:
                 raise DatabaseError(
                     "autoanalysis did not complete; Python was not executed"
@@ -389,6 +401,8 @@ class DatabaseManager:
         code: str,
         instance_id: str | None,
         timeout: float | None = None,
+        *,
+        operation_id: str | None = None,
     ) -> PythonExecutionResult:
         effective_timeout = self._execute_timeout if timeout is None else timeout
         if (
@@ -406,23 +420,43 @@ class DatabaseManager:
                 return session.handle.execute_python(
                     code,
                     timeout=float(effective_timeout),
+                    operation_id=operation_id,
                 )
             except ClientError:
                 if not session.handle.connected:
                     raise self._disconnected_error(target_id) from None
                 raise
 
+    def cancel_operation(self, instance_id: str, operation_id: str) -> bool:
+        """Cancel one request-owned operation without releasing its lease."""
+        target_id, session = self._get_session(instance_id)
+        if not session.handle.connected:
+            raise self._disconnected_error(target_id)
+        return session.handle.cancel_operation(operation_id)
+
+    def cancel_active(self, instance_id: str | None) -> bool:
+        """Cancel the selected handle's operation without releasing its lease."""
+        target_id, session = self._get_session(instance_id)
+        if not session.handle.connected:
+            raise self._disconnected_error(target_id)
+        return session.handle.cancel_active()
+
     def wait_autoanalysis(
         self,
         instance_id: str | None,
         timeout: float | None = None,
+        *,
+        operation_id: str | None = None,
     ) -> WaitAutoanalysisResult:
         target_id, session = self._get_session(instance_id)
         with session.operation_lock:
             if not session.handle.connected:
                 raise self._disconnected_error(target_id)
             try:
-                result = session.handle.wait_autoanalysis(timeout)
+                result = session.handle.wait_autoanalysis(
+                    timeout,
+                    operation_id=operation_id,
+                )
             except ClientError:
                 if not session.handle.connected:
                     raise self._disconnected_error(target_id) from None

@@ -10,6 +10,7 @@ This server exposes a compact Code Mode surface for the ida-domain API:
 """
 
 import argparse
+import asyncio
 import atexit
 import inspect
 import ipaddress
@@ -24,13 +25,14 @@ import time
 import traceback
 import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from functools import wraps
 from importlib.metadata import version
 from pathlib import Path
-from typing import Annotated, Any, NotRequired, ParamSpec, TypeVar
+from typing import Annotated, Any, BinaryIO, NoReturn, NotRequired, ParamSpec, TypeVar
 from urllib.parse import urlparse
 
 from packaging.version import InvalidVersion, Version
@@ -294,8 +296,10 @@ def tool(func: Callable[P, R]) -> Callable[P, R]:
     """Register an MCP tool and trace each invocation."""
     signature = inspect.signature(func)
 
-    @wraps(func)
-    def traced(*args: P.args, **kwargs: P.kwargs) -> R:
+    def start_trace(
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[str, str, dict[str, Any], float]:
         name = getattr(func, "__name__", "<unnamed>")
         arguments = signature.bind(*args, **kwargs)
         arguments.apply_defaults()
@@ -308,22 +312,35 @@ def tool(func: Callable[P, R]) -> Callable[P, R]:
             session=session,
             input=dict(arguments.arguments),
         )
-        started = time.monotonic()
-        try:
-            result = func(*args, **kwargs)
-        except Exception as error:
-            TRACE.emit(
-                "tool_error",
-                call_id=call_id,
-                tool=name,
-                session=session,
-                duration_ms=round((time.monotonic() - started) * 1000, 3),
-                error=_error_fields(error),
-            )
-            tool_error = _as_tool_error(error)
-            if tool_error is error:
-                raise
-            raise tool_error from error
+        return name, call_id, session, time.monotonic()
+
+    def trace_error(
+        error: Exception,
+        name: str,
+        call_id: str,
+        session: dict[str, Any],
+        started: float,
+    ) -> NoReturn:
+        TRACE.emit(
+            "tool_error",
+            call_id=call_id,
+            tool=name,
+            session=session,
+            duration_ms=round((time.monotonic() - started) * 1000, 3),
+            error=_error_fields(error),
+        )
+        tool_error = _as_tool_error(error)
+        if tool_error is error:
+            raise error
+        raise tool_error from error
+
+    def trace_result(
+        result: Any,
+        name: str,
+        call_id: str,
+        session: dict[str, Any],
+        started: float,
+    ) -> None:
         TRACE.emit(
             "tool_result",
             call_id=call_id,
@@ -332,6 +349,38 @@ def tool(func: Callable[P, R]) -> Callable[P, R]:
             duration_ms=round((time.monotonic() - started) * 1000, 3),
             output=result,
         )
+
+    if inspect.iscoroutinefunction(func):
+
+        @wraps(func)
+        async def traced_async(*args: P.args, **kwargs: P.kwargs) -> Any:
+            name, call_id, session, started = start_trace(args, kwargs)
+            try:
+                result = await func(*args, **kwargs)
+            except asyncio.CancelledError:
+                TRACE.emit(
+                    "tool_cancelled",
+                    call_id=call_id,
+                    tool=name,
+                    session=session,
+                    duration_ms=round((time.monotonic() - started) * 1000, 3),
+                )
+                raise
+            except Exception as error:  # noqa: BLE001 - traced tool boundary
+                trace_error(error, name, call_id, session, started)
+            trace_result(result, name, call_id, session, started)
+            return result
+
+        return mcp.tool(traced_async)  # type: ignore[return-value]
+
+    @wraps(func)
+    def traced(*args: P.args, **kwargs: P.kwargs) -> R:
+        name, call_id, session, started = start_trace(args, kwargs)
+        try:
+            result = func(*args, **kwargs)
+        except Exception as error:  # noqa: BLE001 - traced tool boundary
+            trace_error(error, name, call_id, session, started)
+        trace_result(result, name, call_id, session, started)
         return result
 
     return mcp.tool(traced)
@@ -383,7 +432,7 @@ def open_database(
 
 
 @tool
-def execute_python(
+async def execute_python(
     code: Annotated[
         str,
         (
@@ -409,8 +458,54 @@ def execute_python(
 ) -> PythonExecutionResult:
     """Execute Python and return its result plus captured stdout and stderr."""
 
-    DATABASE_MANAGER.ensure_autoanalysis(instance_id)
-    return DATABASE_MANAGER.execute_python(code, instance_id, timeout=timeout)
+    # Resolve an omitted current target once so concurrent open_database calls
+    # cannot redirect cancellation to another database mid-request.
+    target_id = await asyncio.to_thread(
+        DATABASE_MANAGER.resolve_instance_id,
+        instance_id,
+    )
+    operation_id = uuid.uuid4().hex
+    cancel_requested = threading.Event()
+
+    def execute() -> PythonExecutionResult:
+        DATABASE_MANAGER.ensure_autoanalysis(
+            target_id,
+            operation_id=operation_id,
+        )
+        # Analysis and execution are separate HTTP operations. Cancellation may
+        # race successful analysis completion, so do not start user code after
+        # the encompassing MCP request has been cancelled.
+        if cancel_requested.is_set():
+            raise DatabaseError("operation cancelled")
+        return DATABASE_MANAGER.execute_python(
+            code,
+            target_id,
+            timeout=timeout,
+            operation_id=operation_id,
+        )
+
+    operation = asyncio.create_task(asyncio.to_thread(execute))
+    try:
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError:
+        cancel_requested.set()
+        try:
+            # Keep cancelling by request-owned id until the composite analysis
+            # plus execution task has unwound. A positive acknowledgement may
+            # refer to analysis just as execution is about to begin.
+            while not operation.done():
+                with suppress(Exception):
+                    await asyncio.to_thread(
+                        DATABASE_MANAGER.cancel_operation,
+                        target_id,
+                        operation_id,
+                    )
+                if not operation.done():
+                    await asyncio.sleep(0.01)
+        finally:
+            with suppress(Exception):
+                await asyncio.shield(operation)
+        raise
 
 
 def _gui_plugin_installed() -> bool:
@@ -584,6 +679,26 @@ def _install_server_shutdown_handlers() -> None:
     signal.signal(signal.SIGTERM, cleanup_and_exit)
 
 
+class _ShutdownOnEOFInput:
+    """Trigger lease cleanup as soon as the stdio peer closes its input."""
+
+    def __init__(self, stream: BinaryIO, on_eof: Callable[[], None]) -> None:
+        self._stream = stream
+        self._on_eof = on_eof
+        self._eof_seen = False
+        self._lock = threading.Lock()
+
+    def readline(self) -> bytes:
+        data = self._stream.readline()
+        if data:
+            return data
+        with self._lock:
+            if not self._eof_seen:
+                self._eof_seen = True
+                self._on_eof()
+        return data
+
+
 def _serve(
     transport: str,
     database: str | None = None,
@@ -601,8 +716,9 @@ def _serve(
         DATABASE_MANAGER.schedule_startup_open(database)
 
     if transport == "stdio":
+        stdin = _ShutdownOnEOFInput(sys.stdin.buffer, _shutdown_server_state)
         try:
-            mcp.stdio()
+            asyncio.run(mcp.stdio_async(stdin=stdin))
         finally:
             _shutdown_server_state()
         return

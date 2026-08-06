@@ -6,8 +6,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "ida-domain>=0.5.1.dev2",
-    "zeromcp>=1.5.0",
-    "ida-hcli",
+    "zeromcp>=1.6.0",
+    "ida-hcli>=0.19.0",
     "idapro",
     "packaging",
 ]
@@ -33,7 +33,6 @@ only-include = [
     "ida_codemode_mcp.py",
     "ida_codemode_dashboard.py",
     "ida_codemode_plugin.py",
-    "migrate_logs.py",
     "ida_codemode",
 ]
 
@@ -43,6 +42,3 @@ testpaths = ["tests"]
 [tool.pyright]
 # IDAPython modules provide type information but are importable only inside IDA.
 reportMissingModuleSource = "none"
-
-[tool.uv.sources]
-ida-hcli = { git = "https://github.com/HexRaysSA/ida-hcli", branch = "plugin-status-headless" }

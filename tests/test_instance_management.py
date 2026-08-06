@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import json
 import os
 import subprocess
@@ -6,6 +7,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, replace
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -811,16 +813,30 @@ def test_mcp_execute_owns_autoanalysis_policy(monkeypatch) -> None:
         def __init__(self) -> None:
             self.calls: list[tuple[object, ...]] = []
 
-        def ensure_autoanalysis(self, instance_id: str | None) -> None:
-            self.calls.append(("ensure_autoanalysis", instance_id))
+        def resolve_instance_id(self, instance_id: str | None) -> str:
+            self.calls.append(("resolve_instance_id", instance_id))
+            assert instance_id is not None
+            return instance_id
+
+        def ensure_autoanalysis(
+            self,
+            instance_id: str | None,
+            *,
+            operation_id: str | None = None,
+        ) -> None:
+            self.calls.append(("ensure_autoanalysis", instance_id, operation_id))
 
         def execute_python(
             self,
             code: str,
             instance_id: str | None,
             timeout: float | None = None,
+            *,
+            operation_id: str | None = None,
         ):
-            self.calls.append(("execute_python", code, instance_id, timeout))
+            self.calls.append(
+                ("execute_python", code, instance_id, timeout, operation_id)
+            )
             return {"result": 1, "stdout": "", "stderr": ""}
 
     manager = FakeManager()
@@ -831,15 +847,235 @@ def test_mcp_execute_owns_autoanalysis_policy(monkeypatch) -> None:
         SimpleNamespace(emit=lambda *_args, **_kwargs: None),
     )
 
-    assert mcp_app.execute_python("lambda: 1", "test-instance") == {
+    result = asyncio.run(mcp_app.execute_python("lambda: 1", "test-instance"))
+    assert result == {
         "result": 1,
         "stdout": "",
         "stderr": "",
     }
-    assert manager.calls == [
-        ("ensure_autoanalysis", "test-instance"),
-        ("execute_python", "lambda: 1", "test-instance", 360),
+    assert manager.calls[0] == ("resolve_instance_id", "test-instance")
+    operation_id = manager.calls[1][2]
+    assert isinstance(operation_id, str) and len(operation_id) == 32
+    assert manager.calls[1:] == [
+        ("ensure_autoanalysis", "test-instance", operation_id),
+        ("execute_python", "lambda: 1", "test-instance", 360, operation_id),
     ]
+
+
+def test_mcp_execute_honors_cancellation_notification(monkeypatch) -> None:
+    class BlockingManager:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.executed = threading.Event()
+            self.cancel_calls: list[tuple[str, str]] = []
+
+        @staticmethod
+        def resolve_instance_id(instance_id: str | None) -> str:
+            assert instance_id is not None
+            return instance_id
+
+        def ensure_autoanalysis(
+            self,
+            _instance_id: str | None,
+            *,
+            operation_id: str | None = None,
+        ) -> None:
+            assert operation_id is not None
+            self.started.set()
+            assert self.release.wait(2)
+            # Successful completion races with the accepted cancellation. User
+            # code must still not start after the MCP request was cancelled.
+
+        def execute_python(self, *_args, **_kwargs):
+            self.executed.set()
+            raise AssertionError("execution should not follow cancelled analysis")
+
+        def cancel_operation(self, instance_id: str, operation_id: str) -> bool:
+            self.cancel_calls.append((instance_id, operation_id))
+            self.release.set()
+            return True
+
+    manager = BlockingManager()
+    monkeypatch.setattr(mcp_app, "DATABASE_MANAGER", manager)
+    monkeypatch.setattr(
+        mcp_app,
+        "TRACE",
+        SimpleNamespace(emit=lambda *_args, **_kwargs: None),
+    )
+    result: dict[str, object] = {}
+
+    def call() -> None:
+        result["response"] = mcp_app.mcp._dispatch_mcp(
+            {
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": "execute_python",
+                    "arguments": {
+                        "code": "1",
+                        "instance_id": "test-instance",
+                    },
+                },
+                "id": "cancel-me",
+            }
+        )
+
+    thread = threading.Thread(target=call, daemon=True)
+    thread.start()
+    assert manager.started.wait(1)
+    mcp_app.mcp._dispatch_mcp(
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": "cancel-me", "reason": "client timeout"},
+        }
+    )
+    thread.join(2)
+
+    assert not thread.is_alive()
+    assert result["response"] is None
+    assert not manager.executed.is_set()
+    assert manager.cancel_calls
+    assert {instance for instance, _operation in manager.cancel_calls} == {
+        "test-instance"
+    }
+    assert len({operation for _instance, operation in manager.cancel_calls}) == 1
+
+
+def test_cancelling_queued_mcp_execution_does_not_cancel_running_request(
+    monkeypatch,
+) -> None:
+    class QueuedManager:
+        def __init__(self) -> None:
+            self.operation_lock = threading.Lock()
+            self.state_lock = threading.Lock()
+            self.active: tuple[str, str] | None = None
+            self.operation_ids: dict[str, str] = {}
+            self.first_started = threading.Event()
+            self.first_release = threading.Event()
+            self.second_waiting = threading.Event()
+            self.second_started = threading.Event()
+            self.second_release = threading.Event()
+            self.cancel_attempted = threading.Event()
+            self.cancel_calls: list[str] = []
+
+        @staticmethod
+        def resolve_instance_id(instance_id: str | None) -> str:
+            assert instance_id is not None
+            return instance_id
+
+        @staticmethod
+        def ensure_autoanalysis(
+            _instance_id: str,
+            *,
+            operation_id: str | None = None,
+        ) -> None:
+            assert operation_id is not None
+
+        def execute_python(
+            self,
+            code: str,
+            _instance_id: str,
+            timeout: float | None = None,
+            *,
+            operation_id: str | None = None,
+        ) -> dict[str, object]:
+            assert timeout == 360
+            assert operation_id is not None
+            self.operation_ids[code] = operation_id
+            if code == "second":
+                self.second_waiting.set()
+            with self.operation_lock:
+                with self.state_lock:
+                    self.active = (code, operation_id)
+                if code == "first":
+                    self.first_started.set()
+                    assert self.first_release.wait(2)
+                else:
+                    self.second_started.set()
+                    assert self.second_release.wait(2)
+                with self.state_lock:
+                    self.active = None
+            if code == "second":
+                raise RuntimeError("second operation cancelled")
+            return {"result": code, "stdout": "", "stderr": ""}
+
+        def cancel_operation(self, _instance_id: str, operation_id: str) -> bool:
+            self.cancel_calls.append(operation_id)
+            self.cancel_attempted.set()
+            with self.state_lock:
+                active = self.active
+            if active is None or active[1] != operation_id:
+                return False
+            if active[0] == "first":
+                self.first_release.set()
+            else:
+                self.second_release.set()
+            return True
+
+    manager = QueuedManager()
+    monkeypatch.setattr(mcp_app, "DATABASE_MANAGER", manager)
+    monkeypatch.setattr(
+        mcp_app,
+        "TRACE",
+        SimpleNamespace(emit=lambda *_args, **_kwargs: None),
+    )
+    results: dict[str, object] = {}
+
+    def call(code: str, request_id: str) -> None:
+        results[request_id] = mcp_app.mcp._dispatch_mcp(
+            {
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": "execute_python",
+                    "arguments": {"code": code, "instance_id": "test-instance"},
+                },
+                "id": request_id,
+            }
+        )
+
+    first = threading.Thread(target=call, args=("first", "first-request"))
+    second = threading.Thread(target=call, args=("second", "second-request"))
+    first.start()
+    assert manager.first_started.wait(1)
+    second.start()
+    assert manager.second_waiting.wait(1)
+
+    mcp_app.mcp._dispatch_mcp(
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": "second-request", "reason": "client timeout"},
+        }
+    )
+    assert manager.cancel_attempted.wait(1)
+    manager.first_release.set()
+    assert manager.second_started.wait(1)
+    first.join(2)
+    second.join(2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert results["first-request"] is not None
+    assert results["second-request"] is None
+    assert manager.operation_ids["first"] != manager.operation_ids["second"]
+    assert set(manager.cancel_calls) == {manager.operation_ids["second"]}
+
+
+def test_stdio_eof_starts_shutdown_once() -> None:
+    shutdown_calls: list[None] = []
+    stdin = mcp_app._ShutdownOnEOFInput(
+        BytesIO(b'{"jsonrpc":"2.0"}\n'),
+        lambda: shutdown_calls.append(None),
+    )
+
+    assert stdin.readline() == b'{"jsonrpc":"2.0"}\n'
+    assert shutdown_calls == []
+    assert stdin.readline() == b""
+    assert stdin.readline() == b""
+    assert shutdown_calls == [None]
 
 
 def test_mcp_execute_schema_exposes_numeric_timeout_default() -> None:
@@ -1724,6 +1960,136 @@ def test_handle_keepalive_retains_idle_managed_worker(tmp_path: Path) -> None:
     replacement.close()
     assert not stopped.wait(0.05)
     assert stopped.wait(1)
+    server.release_registration()
+
+
+def test_operation_cancellation_cannot_reach_successor(tmp_path: Path) -> None:
+    class HandoffBackend(StaticBackend):
+        def __init__(self) -> None:
+            self.current: str | None = None
+            self.first_started = threading.Event()
+            self.first_release = threading.Event()
+            self.second_started = threading.Event()
+            self.second_release = threading.Event()
+            self.cancel_entered = threading.Event()
+            self.cancel_release = threading.Event()
+            self.cancelled_target: str | None = None
+
+        def cancel_active(self) -> None:
+            self.cancel_entered.set()
+            assert self.cancel_release.wait(2)
+            self.cancelled_target = self.current
+
+    backend = HandoffBackend()
+    server = CodeModeHTTPServer(
+        backend,
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
+        AnalysisState(),
+        tmp_path / "instances",
+    )
+    assert server._lease_opened("test-lease", 0) is not None
+    failures: list[BaseException] = []
+
+    def run(operation_id: str, operation) -> None:
+        try:
+            server._run_operation("test-lease", operation, operation_id)
+        except BaseException as error:  # noqa: BLE001 - collected for the assertion
+            failures.append(error)
+
+    def first_operation() -> None:
+        backend.current = "first"
+        backend.first_started.set()
+        assert backend.first_release.wait(2)
+        backend.current = None
+
+    def second_operation() -> None:
+        backend.current = "second"
+        backend.second_started.set()
+        assert backend.second_release.wait(2)
+        backend.current = None
+
+    first = threading.Thread(target=run, args=("first", first_operation))
+    second = threading.Thread(target=run, args=("second", second_operation))
+    cancel = threading.Thread(
+        target=lambda: server._cancel_operation("test-lease", "first")
+    )
+    first.start()
+    assert backend.first_started.wait(1)
+    second.start()
+    cancel.start()
+    assert backend.cancel_entered.wait(1)
+
+    backend.first_release.set()
+    # cancel_active() still owns the handoff barrier, so the successor cannot
+    # become the backend's active generation until cancellation returns.
+    assert not backend.second_started.wait(0.1)
+    backend.cancel_release.set()
+    assert backend.second_started.wait(1)
+    backend.second_release.set()
+
+    first.join(2)
+    second.join(2)
+    cancel.join(2)
+    assert not first.is_alive() and not second.is_alive() and not cancel.is_alive()
+    assert failures == []
+    assert backend.cancelled_target != "second"
+    server._lease_closed("test-lease")
+
+
+def test_cancel_active_preserves_database_handle(tmp_path: Path) -> None:
+    class CancellableBackend(StaticBackend):
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.cancelled = threading.Event()
+
+        def execute_python(self, code: str, timeout: float | None):
+            if code == "second":
+                return super().execute_python(code, timeout)
+            self.started.set()
+            assert self.cancelled.wait(2)
+            raise RuntimeError("cancelled")
+
+        def cancel_active(self) -> None:
+            self.cancelled.set()
+
+    executable = tmp_path / "test.exe"
+    idb = tmp_path / "test.i64"
+    executable.write_bytes(b"binary")
+    idb.write_bytes(b"idb")
+    backend = CancellableBackend()
+    server = CodeModeHTTPServer(
+        backend,
+        InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
+        AnalysisState(),
+        tmp_path / "instances",
+        lease_grace=30,
+        on_shutdown=lambda: None,
+    )
+    server.start()
+    manager = DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+    opened = manager.open_database(str(idb), set_current=True)
+    failures: list[Exception] = []
+
+    def execute() -> None:
+        try:
+            manager.execute_python("first", opened["instance_id"])
+        except Exception as exc:  # noqa: BLE001 - asserted below
+            failures.append(exc)
+
+    thread = threading.Thread(target=execute)
+    thread.start()
+    assert backend.started.wait(1)
+    assert manager.cancel_active(opened["instance_id"]) is True
+    thread.join(2)
+
+    assert not thread.is_alive()
+    assert failures
+    assert manager.execute_python("second", opened["instance_id"], 1) == {
+        "code": "second",
+        "timeout": 1.0,
+    }
+    manager.shutdown()
+    server.stop()
     server.release_registration()
 
 

@@ -41,7 +41,7 @@ connection expresses one client's interest in an already-running database.
 | `ida_codemode_mcp.py` | ZeroMCP tools/transports, error mapping, startup attachment, agent metadata, and semantic session tracing. |
 | `ida-codemode.ts` | Pi extension that starts the stdio MCP child, mirrors its tools with `ida_` names, attaches Pi transcript metadata, and applies Pi output truncation. |
 | `ida_codemode_dashboard.py` | Renders semantic session traces and linked Claude, Codex, or Pi transcripts. |
-| `migrate_logs.py` | One-shot conversion of pre-0.2 operational/bridge logs into schema-1 semantic sessions. |
+| `scripts/migrate_logs.py` | One-shot conversion of pre-0.2 operational/bridge logs into schema-1 semantic sessions. |
 
 ## State layout
 
@@ -184,6 +184,7 @@ Important routes are:
 | `GET /health?sse=1` | Persistent client lease with periodic heartbeat and optional keepalive. |
 | `POST /release_lease` | Idempotently release one identified client lease. |
 | `POST /execute_python` | Execute Code Mode Python against the open database. |
+| `POST /cancel_operation` | Cooperatively cancel one lease-owned operation without releasing the database handle. |
 | `POST /save_database` | Explicitly save a GUI or idalib database. |
 | `GET /poll_autoanalysis` | Observe initial IDA autoanalysis. |
 | `GET` or `POST /wait_autoanalysis` | Wait for autoanalysis; POST accepts a timeout. |
@@ -254,10 +255,15 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 | `GET /health` | Raw health identity object described above. |
 | `GET /health?sse=1` | `text/event-stream`; accepts `lease_id` and bounded `keepalive` query values, emits one initial `health` event and heartbeat comments. |
 | `POST /release_lease` | `{lease_id}`; idempotently releases that lease after acknowledging the request. |
-| `POST /execute_python` | `{code, timeout?, lease_id?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. Execution does not implicitly wait for autoanalysis. |
+| `POST /execute_python` | `{code, timeout?, lease_id?, operation_id?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. Execution does not implicitly wait for autoanalysis. |
+| `POST /cancel_operation` | `{lease_id, operation_id}`; success is `{"ok":true,"result":{"cancelled":bool}}`. Cancellation is lease-scoped and preserves the handle. |
 | `POST /save_database` | `{lease_id?}`; success is `{"ok":true,"result":{"saved":true,"idb_path":...}}`. |
 | `GET /poll_autoanalysis` | Raw `{status, complete}` analysis object. |
-| `GET` or `POST /wait_autoanalysis` | The same raw analysis object; POST accepts an optional positive finite timeout in seconds. An omitted timeout waits without a deadline. |
+| `GET` or `POST /wait_autoanalysis` | The same raw analysis object; POST accepts optional `timeout`, `lease_id`, and `operation_id` fields. An omitted timeout waits without a deadline. |
+
+Request-owned cancellation requires registry protocol version 3. This prevents a
+new MCP client from silently attaching to a version 2 GUI plugin or worker that
+cannot service `/cancel_operation`.
 
 Operation failures use a non-2xx status and, once application dispatch has
 begun, `{"ok":false,"error":{"code":...,"message":...}}`; additional error
@@ -351,7 +357,10 @@ implementation of these tools. The MCP adapter explicitly applies the initial
 analysis policy before calling the session manager's `execute_python`; the
 upstream route and handle execution method remain independent of analysis. The
 initial analysis wait is unbounded and does not consume the MCP tool's separate
-execution timeout.
+execution timeout. Stdio uses ZeroMCP's concurrent async dispatcher so MCP
+`notifications/cancelled` can arrive during analysis or execution. The async
+tool sends a separate operation-id-scoped cancellation request and waits for
+IDA to unwind safely before abandoning the MCP request without a response.
 
 On stdio EOF, SIGINT, SIGTERM, or normal interpreter exit, the MCP server
 releases all handles. Other agents continue uninterrupted. If the released
@@ -394,7 +403,7 @@ paths referenced by discoverable semantic sessions.
 
 ## Legacy migration
 
-`migrate_logs.py` reads transitional schema-1 traces from `logs/mcp/` and older
+`scripts/migrate_logs.py` reads transitional schema-1 traces from `logs/mcp/` and older
 bridge JSONL files from `logs/`, then writes normalized session files under
 `sessions/`. It never modifies source logs, sanitizes destination names, and
 reports malformed, unknown, or unattributable records instead of silently
