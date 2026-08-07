@@ -96,6 +96,7 @@ name = "ida-codemode"
 version = "0.3.0"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "ida-domain" },
     { name = "ida-hcli" },
     { name = "idapro" },
@@ -111,6 +112,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = "<1" },
     { name = "ida-domain", specifier = ">=0.5.1.dev2" },
     { name = "ida-hcli", specifier = ">=0.19.0" },
     { name = "idapro" },
