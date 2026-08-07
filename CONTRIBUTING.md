@@ -124,7 +124,9 @@ MCP execution first issues a separate, unbounded initial-autoanalysis wait for
 each attached database. The upstream `/execute_python` route and client method
 do not wait implicitly, so the script retains its full execution timeout. The
 MCP tool defaults that execution-only timeout to 360 seconds and exposes it as
-a numeric argument.
+a numeric argument. MCP cancellation is handled concurrently: the tool sends a
+lease- and operation-scoped `/cancel_operation` control request, waits for IDA
+to unwind, and preserves the attached database handle.
 
 ## Shared clients and lifecycle
 
@@ -218,13 +220,13 @@ Only transcript paths referenced by semantic sessions may be served.
 
 ## Migrating pre-0.2 logs
 
-The one-shot migration utility intentionally remains a project-root Python
-script rather than an installed command:
+The one-shot migration utility intentionally remains a project script rather
+than an installed command:
 
 ```bash
-uv run python migrate_logs.py --dry-run
-uv run python migrate_logs.py --dry-run --verbose  # print every discarded record
-uv run python migrate_logs.py
+uv run python scripts/migrate_logs.py --dry-run
+uv run python scripts/migrate_logs.py --dry-run --verbose  # print every discarded record
+uv run python scripts/migrate_logs.py
 ```
 
 It reads legacy logs from `<IDAUSR>/codemode/logs`, reconstructs sessions using

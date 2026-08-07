@@ -70,6 +70,7 @@ class DatabaseHandle:
         self._entry = entry
         self._rpc_connection: http.client.HTTPConnection | None = None
         self._rpc_last_used: float | None = None
+        self._active_operation_id: str | None = None
         self._lease_connection: http.client.HTTPConnection | None = None
         self._lease_response: http.client.HTTPResponse | None = None
         self._lease_socket: socket.socket | None = None
@@ -357,8 +358,12 @@ class DatabaseHandle:
         *,
         timeout: float | None = None,
         unwrap_result: bool = True,
+        operation_id: str | None = None,
     ) -> Any:
-        body = json.dumps({**payload, "lease_id": self._lease_id}).encode("utf-8")
+        request_payload = {**payload, "lease_id": self._lease_id}
+        if operation_id is not None:
+            request_payload["operation_id"] = operation_id
+        body = json.dumps(request_payload).encode("utf-8")
         with self._request_lock:
             if self._closed.is_set():
                 raise ClientError("database handle is closed")
@@ -368,6 +373,9 @@ class DatabaseHandle:
                 )
             entry = self.entry
             connection = self._rpc_connection_for(entry, timeout)
+            if operation_id is not None:
+                with self._lock:
+                    self._active_operation_id = operation_id
             try:
                 connection.request(
                     "POST",
@@ -390,6 +398,11 @@ class DatabaseHandle:
                 # the connection failed. The next operation gets a fresh socket.
                 self._discard_rpc_connection(connection)
                 raise ClientError(f"Code Mode request failed: {exc}") from exc
+            finally:
+                if operation_id is not None:
+                    with self._lock:
+                        if self._active_operation_id == operation_id:
+                            self._active_operation_id = None
             with self._lock:
                 if self._rpc_connection is connection:
                     self._rpc_last_used = time.monotonic()
@@ -421,16 +434,32 @@ class DatabaseHandle:
             raise ClientError(f"Code Mode request failed with HTTP {status}")
         return response_payload.get("result") if unwrap_result else response_payload
 
-    def execute_python(self, code: str, timeout: float | None = None) -> Any:
+    def execute_python(
+        self,
+        code: str,
+        timeout: float | None = None,
+        *,
+        operation_id: str | None = None,
+    ) -> Any:
         payload: dict[str, Any] = {"code": code}
         if timeout is not None:
             payload["timeout"] = timeout
         # Leave enough HTTP time for the server to return its structured
         # operation-timeout response.
         http_timeout = None if timeout is None else timeout + 5.0
-        return self._request("/execute_python", payload, timeout=http_timeout)
+        return self._request(
+            "/execute_python",
+            payload,
+            timeout=http_timeout,
+            operation_id=operation_id or uuid.uuid4().hex,
+        )
 
-    def wait_autoanalysis(self, timeout: float | None = None) -> dict[str, Any]:
+    def wait_autoanalysis(
+        self,
+        timeout: float | None = None,
+        *,
+        operation_id: str | None = None,
+    ) -> dict[str, Any]:
         """Wait for initial autoanalysis through the public Code Mode route."""
         payload: dict[str, Any] = {}
         if timeout is not None:
@@ -441,10 +470,76 @@ class DatabaseHandle:
             payload,
             timeout=http_timeout,
             unwrap_result=False,
+            operation_id=operation_id or uuid.uuid4().hex,
         )
         if not isinstance(result, dict) or not isinstance(result.get("complete"), bool):
             raise ClientError("wait_autoanalysis returned an invalid result")
         return result
+
+    def cancel_operation(self, operation_id: str) -> bool:
+        """Cancel one identified in-flight operation over a control connection."""
+        with self._lock:
+            if self._active_operation_id != operation_id:
+                return False
+            entry = self._entry
+
+        connection = http.client.HTTPConnection(HOST, entry.port, timeout=2.0)
+        try:
+            body = json.dumps(
+                {
+                    "lease_id": self._lease_id,
+                    "operation_id": operation_id,
+                }
+            ).encode("utf-8")
+            connection.request(
+                "POST",
+                "/cancel_operation",
+                body=body,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {entry.token}",
+                },
+            )
+            response = connection.getresponse()
+            try:
+                payload = json.loads(response.read())
+                return bool(
+                    response.status == 200
+                    and isinstance(payload, dict)
+                    and isinstance(payload.get("result"), dict)
+                    and payload["result"].get("cancelled") is True
+                )
+            finally:
+                response.close()
+        except (
+            TimeoutError,
+            OSError,
+            http.client.HTTPException,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ):
+            return False
+        finally:
+            connection.close()
+
+    def cancel_active(self, timeout: float = 2.0) -> bool:
+        """Cancel this handle's in-flight operation over a control connection."""
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            operation_id = self._active_operation_id
+        if operation_id is None:
+            return False
+
+        while True:
+            if self.cancel_operation(operation_id):
+                return True
+            with self._lock:
+                if self._active_operation_id != operation_id:
+                    return False
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
 
     def save_database(self) -> dict[str, Any]:
         result = self._request("/save_database", {}, timeout=305.0)
