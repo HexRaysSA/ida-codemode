@@ -252,8 +252,8 @@ The dashboard provides:
 - model-facing MCP error payloads separated from clearly marked internal
   diagnostic metadata;
 - logged reference output and structured errors;
-- interleaved Claude, Codex, or Pi transcript activity with visibility
-  checkboxes for the transcript and unsupported events;
+- interleaved Claude, Codex, Pi, or oh-my-pi transcript activity with
+  visibility checkboxes for the transcript and unsupported events;
 - timestamped unsupported agent records as collapsed raw-JSON events rather
   than silently dropping them;
 - token and estimated cost summaries, including separate cache-read and

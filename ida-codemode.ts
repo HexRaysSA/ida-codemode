@@ -86,6 +86,8 @@ function renderToolCall(
 }
 
 export default function idaCodemode(pi: ExtensionAPI) {
+  const agentKind = "arktype" in pi && "zod" in pi ? "omp" : "pi";
+  const sessionPathField = `${agentKind}_session_path`;
   let client: Client | undefined;
   let connectingClient: Client | undefined;
   let startupPromise: Promise<void> | undefined;
@@ -198,7 +200,7 @@ export default function idaCodemode(pi: ExtensionAPI) {
         "--project",
         PACKAGE_ROOT,
         "ida-codemode-mcp",
-        "--agent=pi",
+        `--agent=${agentKind}`,
       ],
       cwd: PACKAGE_ROOT,
       stderr: "pipe",
@@ -258,7 +260,7 @@ export default function idaCodemode(pi: ExtensionAPI) {
                 name: tool.name,
                 arguments: params as Record<string, unknown>,
                 ...(sessionPath
-                  ? { _meta: { pi_session_path: sessionPath } }
+                  ? { _meta: { [sessionPathField]: sessionPath } }
                   : {}),
               },
               undefined,

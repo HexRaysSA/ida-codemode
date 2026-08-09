@@ -166,6 +166,7 @@ def _session_fields() -> dict[str, Any]:
         "claude_session_path",
         "codex_session_path",
         "pi_session_path",
+        "omp_session_path",
     ):
         value = meta.get(name)
         if isinstance(value, str) and value:

@@ -9,7 +9,7 @@ The main data path is:
 
 ```text
 Claude/Codex MCP config ─┐
-Pi extension ────────────┴─> ZeroMCP adapter -> DatabaseManager -> DatabaseHandle
+Pi/oh-my-pi extension ───┴─> ZeroMCP adapter -> DatabaseManager -> DatabaseHandle
                                                                   │
                                       private registry <──────────┤
                                                                   ├─ SSE lease
@@ -39,8 +39,8 @@ connection expresses one client's interest in an already-running database.
 | `ida_codemode/reference.py` | Builds and searches an AST-based reference from the installed ida-domain package and examples without importing ida-domain in the MCP process. |
 | `ida_codemode/paths.py` | Resolves the shared state root from the environment and IDA defaults. |
 | `ida_codemode_mcp.py` | ZeroMCP tools/transports, error mapping, startup attachment, agent metadata, and semantic session tracing. |
-| `ida-codemode.ts` | Pi extension that starts the stdio MCP child, mirrors its tools with `ida_` names, attaches Pi transcript metadata, and applies Pi output truncation. |
-| `ida_codemode_dashboard.py` | Renders semantic session traces and linked Claude, Codex, or Pi transcripts from the local state directory or a portable log ZIP. |
+| `ida-codemode.ts` | Shared Pi/oh-my-pi extension that starts MCP asynchronously from `session_start`, mirrors its tools with `ida_` names, attaches compatible transcript metadata, and applies host output truncation. Both hosts can enter the session immediately; their lifecycle runners publish late tool registrations before the first model turn. |
+| `ida_codemode_dashboard.py` | Renders semantic session traces and linked Claude, Codex, Pi, or oh-my-pi transcripts from the local state directory or a portable log ZIP. |
 | `ida_codemode/logs.py` | Builds and validates portable log ZIPs containing selected semantic sessions, linked agent transcripts, operational logs, and a JSON path-mapping TOC. |
 | `scripts/migrate_logs.py` | One-shot conversion of pre-0.2 operational/bridge logs into schema-1 semantic sessions. |
 

@@ -2,7 +2,7 @@
 
 Serves a local HTTP UI (stdlib only, no extra dependencies) that lists the
 JSONL traces under ``<IDAUSR>/codemode/sessions`` and renders each MCP/agent
-session as a timeline linked to its Claude Code, Codex, or Pi transcript.
+session as a timeline linked to its Claude Code, Codex, Pi, or OMP transcript.
 
 Run with: ida-codemode-dashboard [--host 127.0.0.1] [--port 8736] [--open]
 """
@@ -381,7 +381,7 @@ def _summarize_session(
         codemode_id = session.get("codemode_id")
         if isinstance(codemode_id, str) and codemode_id:
             summary.codemode_id = codemode_id
-        for kind in ("claude", "codex", "pi"):
+        for kind in ("claude", "codex", "pi", "omp"):
             session_path = session.get(f"{kind}_session_path")
             if isinstance(session_path, str) and session_path:
                 if agent_transcript is not None:
@@ -542,6 +542,7 @@ table.sessions td:first-child a { word-break: break-all; }
 .badge.claude { color: #b0530a; border-color: #b0530a55; }
 .badge.codex { color: var(--ok); border-color: var(--ok); }
 .badge.pi { color: var(--accent); border-color: var(--accent); }
+.badge.omp { color: #9b59ff; border-color: #9b59ff; }
 .badge.open { color: var(--ok); border-color: var(--ok); }
 .badge.closed { color: var(--muted); }
 .badge.killed { color: var(--error); border-color: var(--error); opacity: 0.75; }
@@ -1407,7 +1408,7 @@ def render_session(name: str, *, export: bool = False) -> str | None:
 
 
 # --------------------------------------------------------------------------
-# Agent transcript pages (Claude Code + Codex + Pi)
+# Agent transcript pages (Claude Code + Codex + Pi + OMP)
 # --------------------------------------------------------------------------
 
 
@@ -2294,6 +2295,15 @@ def render_agent_session(session_path: str) -> str | None:
         return _page("missing transcript — ida-codemode", body)
 
     items, meta, kind, totals = _load_agent_items(session_path)
+    if kind == "pi":
+        referenced_kinds = {
+            referenced_kind
+            for summary in known[session_path]
+            for referenced_kind, referenced_path in _summary_agent_sessions(summary)
+            if referenced_path == session_path
+        }
+        if "omp" in referenced_kinds:
+            kind = "omp"
     transcript_html = "".join(item.html for item in items)
     unsupported_count = sum(item.category == "event" for item in items)
 

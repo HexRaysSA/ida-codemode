@@ -747,6 +747,75 @@ class SemanticSessionTests(unittest.TestCase):
             {"tool", "agent"},
         )
 
+    def test_omp_session_path_uses_omp_agent_label(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sessions_dir = Path(directory)
+            agent_path = sessions_dir / "omp.trace"
+            agent_path.write_text(
+                "\n".join(
+                    json.dumps(record)
+                    for record in [
+                        {
+                            "type": "session",
+                            "version": 3,
+                            "id": "omp-session",
+                            "timestamp": "2026-01-01T00:00:00Z",
+                            "cwd": "/tmp/project",
+                        },
+                        {
+                            "type": "message",
+                            "id": "assistant",
+                            "parentId": None,
+                            "timestamp": "2026-01-01T00:00:01Z",
+                            "message": {
+                                "role": "assistant",
+                                "model": "gpt-5.6",
+                                "content": [{"type": "text", "text": "done"}],
+                            },
+                        },
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (sessions_dir / "omp.jsonl").write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "ts": "2026-01-01T00:00:02Z",
+                        "pid": 999999,
+                        "event": "mcp_started",
+                        "mcp_server_id": "omp-server",
+                        "agent": "omp",
+                        "session": {"omp_session_path": str(agent_path)},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            original = dashboard.SESSIONS_DIR
+            dashboard.SESSIONS_DIR = sessions_dir
+            dashboard._AGENT_ITEMS_CACHE.clear()
+            try:
+                summary = dashboard._scan_sessions()[0]
+                index = dashboard.render_index()
+                transcript = dashboard.render_agent_session(str(agent_path))
+            finally:
+                dashboard.SESSIONS_DIR = original
+                dashboard._AGENT_ITEMS_CACHE.clear()
+
+        self.assertEqual(summary.agent, "omp")
+        self.assertEqual(
+            summary.agent_session_refs,
+            {("omp", str(agent_path))},
+        )
+        self.assertIn('class="badge omp"', index)
+        self.assertIsNotNone(transcript)
+        assert transcript is not None
+        self.assertIn("omp transcript", transcript)
+        self.assertIn('class="badge omp"', transcript)
+
     def test_benchmark_autodetect_and_agent_resolution(self) -> None:
         def write(path: Path, records: list[dict[str, object]]) -> None:
             path.write_text(
