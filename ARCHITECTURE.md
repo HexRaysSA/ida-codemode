@@ -224,7 +224,7 @@ from a lock-held record marks that owner `BLOCKED` before probing HTTP. This is
 deliberate—starting a replacement could corrupt an IDB already owned by a peer
 that the scanner does not understand.
 
-Protocol version 2 consists of the following interoperable contracts.
+Protocol version 4 consists of the following interoperable contracts.
 
 ### Discovery contract
 
@@ -260,15 +260,16 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 | `GET /health` | Raw health identity object described above. |
 | `GET /health?sse=1` | `text/event-stream`; accepts `lease_id` and bounded `keepalive` query values, emits one initial `health` event and heartbeat comments. |
 | `POST /release_lease` | `{lease_id}`; idempotently releases that lease after acknowledging the request. |
-| `POST /execute_python` | `{code, timeout?, lease_id?, operation_id?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. Execution does not implicitly wait for autoanalysis. |
+| `POST /execute_python` | `{code, timeout?, lease_id?, operation_id?, persist_globals?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. Persistence defaults to false and requires an active lease. Execution does not implicitly wait for autoanalysis. |
 | `POST /cancel_operation` | `{lease_id, operation_id}`; success is `{"ok":true,"result":{"cancelled":bool}}`. Cancellation is lease-scoped and preserves the handle. |
 | `POST /save_database` | `{lease_id?}`; success is `{"ok":true,"result":{"saved":true,"idb_path":...}}`. |
 | `GET /poll_autoanalysis` | Raw `{status, complete}` analysis object. |
 | `GET` or `POST /wait_autoanalysis` | The same raw analysis object; POST accepts optional `timeout`, `lease_id`, and `operation_id` fields. An omitted timeout waits without a deadline. |
 
-Request-owned cancellation requires registry protocol version 3. This prevents a
-new MCP client from silently attaching to a version 2 GUI plugin or worker that
-cannot service `/cancel_operation`.
+Request-owned cancellation requires registry protocol version 3. Version 4 adds
+opt-in lease-scoped persistent Python namespaces. This prevents a new client from
+silently attaching to a GUI plugin or worker that cannot provide the lifecycle
+and execution semantics on which it relies.
 
 Operation failures use a non-2xx status and, once application dispatch has
 begun, `{"ok":false,"error":{"code":...,"message":...}}`; additional error
@@ -281,12 +282,18 @@ execution outcome is unknown.
 The execution rules (`db`/`ida_domain`, trailing-expression results, optional
 entry functions, JSON-compatible result conversion, output capture, and
 serialized IDA execution) and the SSE-driven managed shutdown semantics are
-also protocol behavior because clients observe them. JSON-safe results are
-encoded directly with the standard C-backed encoder after leaving IDA's main
-thread; uncommon unsupported values use a compatibility conversion fallback.
-Result conversion is
-recursive; notably, non-finite Python floats become the strings `nan`, `inf`,
-or `-inf` so the service never emits non-standard JSON numbers.
+also protocol behavior because clients observe them. Execution uses a fresh
+namespace by default. A stateless leased execution first discards any namespace
+previously retained by that lease. When `persist_globals` is true, imports,
+assignments, and definitions remain visible to later opted-in executions through
+the same lease. Runtime-owned globals are refreshed, previous
+`run`/`execute`/`main` functions are not invoked again implicitly, and `result`
+remains a consumed per-call output slot rather than durable state. JSON-safe
+results are encoded directly with the standard C-backed encoder after leaving
+IDA's main thread; uncommon unsupported values use a compatibility conversion
+fallback. Result conversion is recursive; notably, non-finite Python floats
+become the strings `nan`, `inf`, or `-inf` so the service never emits
+non-standard JSON numbers.
 
 ### When to bump the version
 
@@ -322,11 +329,21 @@ so their explicit release or detected disappearance starts shutdown without an
 additional grace period. Low-level clients may request a bounded keepalive when
 opening a lease to retain an idle worker for repeated short-lived invocations.
 
-Each RPC carries its owning lease identity. Releasing a lease cancels its
-orphaned operation; cancellation is cooperative and the worker waits only for
-safe unwinding, not successful completion. Once no leases remain and the final
-lease's keepalive has expired, the worker stops serving, returns to the idalib
-main thread, saves/closes the IDB, then withdraws its registry record and exits.
+Each RPC carries its owning lease identity. An execution that explicitly opts
+into persistence uses a lease-scoped global namespace, giving one handle
+REPL-like imports, variables, and definitions without exposing them to other
+handles or agents. Stateless execution remains the default and resets any
+persistent state previously associated with its lease. Adapters may reserve
+private names in the persistent namespace; `ida-domain-multiplex` uses one such
+name for its process-bound proxy table. The
+runtime clears the namespace on explicit release or SSE disconnection, breaking
+function/global cycles so native objects are released promptly. Unleased
+requests continue to use fresh execution globals. Releasing a lease cancels its
+orphaned operation before session cleanup; cancellation is cooperative and the
+worker waits only for safe unwinding, not successful completion. Once no leases
+remain and the final lease's keepalive has expired, the worker stops serving,
+returns to the idalib main thread, saves/closes the IDB, then withdraws its
+registry record and exits.
 A new lease before shutdown begins cancels pending shutdown. GUI instances are
 unmanaged and ignore zero leases.
 

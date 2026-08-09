@@ -47,6 +47,7 @@ class WorkerStartError(ResolveError):
 class WorkerLaunchOptions:
     """IDA import options used only when a new idalib worker is spawned."""
 
+    registry_dir: str | None = None
     auto_analysis: bool = False
     image_base: int | None = None
     new_database: bool = False
@@ -205,6 +206,8 @@ def spawn_worker(
         "--lease-grace",
         str(lease_grace),
     ]
+    if options.registry_dir is not None:
+        command.extend(["--registry-dir", options.registry_dir])
     if input_path == source and source != expected_idb:
         command.extend(["--output-database", expected_idb])
     if options.auto_analysis:
@@ -449,6 +452,7 @@ def resolve_instance(
         else expected_idb_path(source)
     )
     launch_options = WorkerLaunchOptions(
+        registry_dir=os.fspath(registry_dir),
         auto_analysis=auto_analysis,
         image_base=image_base,
         new_database=new_database,

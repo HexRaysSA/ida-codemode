@@ -447,9 +447,10 @@ async def execute_python(
         (
             "Python code that runs against an already-open database. Call reference(query) "
             "first; do not guess the API shape. `db` is the current ida-domain Database, "
-            "and `ida_domain` is also imported globally. A single or trailing expression "
-            "is returned. "
-            "For function-style code, define run(db), execute(db), or main(db); "
+            "and `ida_domain` is also imported globally. Imports, variables, and "
+            "definitions persist for this agent's database lease. A single or trailing "
+            "expression is returned. For function-style code, define run(db), "
+            "execute(db), or main(db); "
             "it is invoked automatically when there is no trailing expression."
         ),
     ],
@@ -491,6 +492,7 @@ async def execute_python(
             target_id,
             timeout=timeout,
             operation_id=operation_id,
+            persist_globals=True,
         )
 
     operation = asyncio.create_task(asyncio.to_thread(execute))

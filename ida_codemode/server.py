@@ -29,7 +29,18 @@ class _Lease:
 
 
 class CodeModeBackend(Protocol):
-    def execute_python(self, code: str, timeout: float | None) -> Any: ...
+    def execute_python(
+        self,
+        code: str,
+        timeout: float | None,
+        *,
+        lease_id: str | None = None,
+        persist_globals: bool = False,
+    ) -> Any: ...
+
+    def cancel_active(self) -> None: ...
+
+    def release_session(self, lease_id: str) -> None: ...
 
     def wait_autoanalysis(self, timeout: float | None) -> dict[str, Any]: ...
 
@@ -244,15 +255,18 @@ class CodeModeHTTPServer:
                 # Keep operation handoff blocked until cancellation reaches the
                 # backend; otherwise a successor can become active and receive
                 # cancellation intended for the released lease.
-                cancel = getattr(self.backend, "cancel_active", None)
-                if cancel is not None:
-                    try:
-                        cancel()
-                    except Exception:
-                        logger.exception("Code Mode operation cancellation failed")
+                try:
+                    self.backend.cancel_active()
+                except Exception:
+                    logger.exception("Code Mode operation cancellation failed")
             if self._active_leases == 0:
                 self._shutdown_at = time.monotonic() + lease.keepalive
             self._activity.notify_all()
+
+        try:
+            self.backend.release_session(lease_id)
+        except Exception:
+            logger.exception("Code Mode lease session cleanup failed")
 
     def _request_started(self, lease_id: str | None) -> None:
         with self._activity:
@@ -354,9 +368,7 @@ class CodeModeHTTPServer:
                 # Serialize cancellation with the running-operation fields so a
                 # finishing operation cannot hand the backend to a successor
                 # before cancel_active() observes the intended generation.
-                cancel = getattr(self.backend, "cancel_active", None)
-                if cancel is not None:
-                    cancel()
+                self.backend.cancel_active()
             return True
 
     def _health_payload(self) -> dict[str, Any]:
@@ -468,6 +480,16 @@ class CodeModeHTTPServer:
         return operation_id
 
     @staticmethod
+    def _persist_globals(payload: dict[str, Any]) -> bool:
+        persist_globals = payload.get("persist_globals", False)
+        if not isinstance(persist_globals, bool):
+            raise APIError(
+                "invalid_persist_globals",
+                "persist_globals must be a boolean",
+            )
+        return persist_globals
+
+    @staticmethod
     def _timeout(payload: dict[str, Any]) -> float | None:
         timeout = payload.get("timeout")
         if timeout is None:
@@ -568,11 +590,20 @@ class CodeModeHTTPServer:
                         raise APIError(
                             "invalid_code", "code must be a non-empty string"
                         )
+                    persist_globals = self._persist_globals(payload)
+                    if persist_globals and lease_id is None:
+                        raise APIError(
+                            "invalid_lease",
+                            "persist_globals requires an active lease",
+                        )
                     return self._success(
                         self._run_operation(
                             lease_id,
                             lambda: self.backend.execute_python(
-                                code, self._timeout(payload)
+                                code,
+                                self._timeout(payload),
+                                lease_id=lease_id,
+                                persist_globals=persist_globals,
                             ),
                             self._operation_id(payload),
                         )

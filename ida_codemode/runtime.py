@@ -153,7 +153,7 @@ _deadline_scheduler = _DeadlineScheduler()
 
 def _execute_user_code(
     code: str,
-    global_ns: dict[str, Any],
+    namespace: dict[str, Any],
     runtime: dict[str, Any],
 ) -> Any:
     stripped = code.strip()
@@ -161,41 +161,48 @@ def _execute_user_code(
         raise CodeValidationError("code must not be empty")
 
     module = ast.parse(stripped, filename=USER_CODE_FILENAME, mode="exec")
-    namespace = dict(global_ns)
-
-    if len(module.body) == 1 and isinstance(module.body[0], ast.Expr):
-        expression = ast.Expression(module.body[0].value)
-        return eval(
-            compile(expression, USER_CODE_FILENAME, "eval"),
-            namespace,
-            namespace,
-        )
-
-    if module.body and isinstance(module.body[-1], ast.Expr):
-        prefix = ast.Module(body=module.body[:-1], type_ignores=module.type_ignores)
-        if prefix.body:
-            exec(  # noqa: S102 -- intentional Code Mode surface
-                compile(prefix, USER_CODE_FILENAME, "exec"),
+    previous_entrypoints = {
+        name: namespace.get(name) for name in ("run", "execute", "main")
+    }
+    # `result` is the legacy per-call output slot, not durable REPL state.
+    # Ordinary names remain untouched in the persistent namespace.
+    namespace.pop("result", None)
+    try:
+        if len(module.body) == 1 and isinstance(module.body[0], ast.Expr):
+            expression = ast.Expression(module.body[0].value)
+            return eval(
+                compile(expression, USER_CODE_FILENAME, "eval"),
                 namespace,
                 namespace,
             )
-        expression = ast.Expression(module.body[-1].value)
-        return eval(
-            compile(expression, USER_CODE_FILENAME, "eval"),
+
+        if module.body and isinstance(module.body[-1], ast.Expr):
+            prefix = ast.Module(body=module.body[:-1], type_ignores=module.type_ignores)
+            if prefix.body:
+                exec(  # noqa: S102 -- intentional Code Mode surface
+                    compile(prefix, USER_CODE_FILENAME, "exec"),
+                    namespace,
+                    namespace,
+                )
+            expression = ast.Expression(module.body[-1].value)
+            return eval(
+                compile(expression, USER_CODE_FILENAME, "eval"),
+                namespace,
+                namespace,
+            )
+
+        exec(  # noqa: S102 -- intentional Code Mode surface
+            compile(module, USER_CODE_FILENAME, "exec"),
             namespace,
             namespace,
         )
-
-    exec(  # noqa: S102 -- intentional Code Mode surface
-        compile(module, USER_CODE_FILENAME, "exec"),
-        namespace,
-        namespace,
-    )
-    for name in ("run", "execute", "main"):
-        candidate = namespace.get(name)
-        if callable(candidate):
-            return _invoke_callable(candidate, runtime)
-    return namespace.get("result")
+        for name in ("run", "execute", "main"):
+            candidate = namespace.get(name)
+            if callable(candidate) and candidate is not previous_entrypoints[name]:
+                return _invoke_callable(candidate, runtime)
+        return namespace.get("result")
+    finally:
+        namespace.pop("result", None)
 
 
 def _format_user_traceback(error: BaseException) -> str | None:
@@ -313,6 +320,7 @@ class IDARuntime:
         self._active_cancel_event: threading.Event | None = None
         self._active_thread_id: int | None = None
         self._active_interrupt_error: APIError | None = None
+        self._session_namespaces: dict[str, dict[str, Any]] = {}
 
     def _interrupt_active(
         self,
@@ -533,6 +541,9 @@ class IDARuntime:
         self,
         code: str,
         timeout: float | None,
+        *,
+        lease_id: str | None = None,
+        persist_globals: bool = False,
     ) -> PythonExecutionResult:
         import ida_domain
 
@@ -541,12 +552,33 @@ class IDARuntime:
                 "db": self.database,
                 "ida_domain": ida_domain,
             }
-            global_ns = {
-                "__builtins__": builtins.__dict__,
-                "__name__": "__ida_codemode_execute__",
-                **runtime,
-            }
-            result = _execute_user_code(code, global_ns, runtime)
+            if not persist_globals:
+                if lease_id is not None:
+                    previous = self._session_namespaces.pop(lease_id, None)
+                    if previous is not None:
+                        previous.clear()
+                namespace = {
+                    "__builtins__": builtins.__dict__,
+                    "__name__": "__ida_codemode_execute__",
+                    **runtime,
+                }
+            else:
+                if lease_id is None:
+                    raise APIError(
+                        "invalid_lease",
+                        "persist_globals requires an active lease",
+                    )
+                namespace = self._session_namespaces.setdefault(lease_id, {})
+                # Runtime-owned globals remain valid even if a prior snippet
+                # rebound or deleted them; all other names behave like a REPL.
+                namespace.update(
+                    {
+                        "__builtins__": builtins.__dict__,
+                        "__name__": "__ida_codemode_execute__",
+                        **runtime,
+                    }
+                )
+            result = _execute_user_code(code, namespace, runtime)
             if inspect.isawaitable(result):
                 result = asyncio.run(result)
             return result
@@ -556,6 +588,24 @@ class IDARuntime:
             kind="execute",
             timeout=self.default_timeout if timeout is None else timeout,
             capture_output=True,
+        )
+
+    def release_session(self, lease_id: str) -> None:
+        """Release process-bound objects retained by one disconnected client."""
+
+        def release() -> None:
+            namespace = self._session_namespaces.pop(lease_id, None)
+            if namespace is not None:
+                # Explicitly break function -> __globals__ -> function cycles
+                # so process-bound IDA objects are released with the lease,
+                # not at a later cyclic-GC pass.
+                namespace.clear()
+
+        self._run_sync(
+            release,
+            kind="release_session",
+            timeout=None,
+            batch=False,
         )
 
     def wait_autoanalysis(self, timeout: float | None) -> dict[str, Any]:

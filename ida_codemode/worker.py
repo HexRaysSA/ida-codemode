@@ -114,6 +114,12 @@ def _parser() -> argparse.ArgumentParser:
         help="Exit after the last Code Mode client lease is released",
     )
     parser.add_argument(
+        "--registry-dir",
+        type=Path,
+        default=REGISTRY_DIR,
+        help="Directory in which to publish this worker",
+    )
+    parser.add_argument(
         "--record-suffix",
         help=argparse.SUPPRESS,
     )
@@ -311,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
             runtime,
             identity,
             analysis_state,
-            REGISTRY_DIR,
+            args.registry_dir,
             record_suffix=suffix,
             lease_grace=args.lease_grace,
             on_shutdown=kernwin.stop_serving,

@@ -18,9 +18,24 @@ class RecordingBackend:
         self.analysis = analysis
         self.calls: list[tuple[object, ...]] = []
 
-    def execute_python(self, code: str, timeout: float | None):
-        self.calls.append(("execute_python", code, timeout))
+    def execute_python(
+        self,
+        code: str,
+        timeout: float | None,
+        *,
+        lease_id: str | None = None,
+        persist_globals: bool = False,
+    ):
+        self.calls.append(
+            ("execute_python", code, timeout, lease_id, persist_globals)
+        )
         return {"code": code}
+
+    def cancel_active(self) -> None:
+        pass
+
+    def release_session(self, lease_id: str) -> None:
+        del lease_id
 
     def wait_autoanalysis(self, timeout: float | None):
         self.calls.append(("wait", timeout))
@@ -193,7 +208,7 @@ def test_execute_wait_and_save_routes(tmp_path: Path):
         assert status == 200
         assert payload["result"]["saved"] is True
         assert backend.calls == [
-            ("execute_python", "lambda: 1", 2.5),
+            ("execute_python", "lambda: 1", 2.5, None, False),
             ("wait", 4.0),
             ("save",),
         ]
@@ -220,6 +235,32 @@ def test_execute_rejects_invalid_timeouts(tmp_path: Path):
         server.release_registration()
 
 
+def test_persistent_globals_require_boolean_and_active_lease(tmp_path: Path):
+    server, backend = make_server(tmp_path)
+    try:
+        status, payload, _ = request(
+            server,
+            "POST",
+            "/execute_python",
+            {"code": "value = 1", "persist_globals": "yes"},
+        )
+        assert status == 400
+        assert payload["error"]["code"] == "invalid_persist_globals"
+
+        status, payload, _ = request(
+            server,
+            "POST",
+            "/execute_python",
+            {"code": "value = 1", "persist_globals": True},
+        )
+        assert status == 400
+        assert payload["error"]["code"] == "invalid_lease"
+        assert backend.calls == []
+    finally:
+        server.stop()
+        server.release_registration()
+
+
 def test_compressed_request_body(tmp_path: Path):
     server, backend = make_server(tmp_path)
     try:
@@ -239,7 +280,9 @@ def test_compressed_request_body(tmp_path: Path):
         assert response.status == 200
         response.read()
         connection.close()
-        assert backend.calls == [("execute_python", "lambda: 7", None)]
+        assert backend.calls == [
+            ("execute_python", "lambda: 7", None, None, False)
+        ]
     finally:
         server.stop()
         server.release_registration()
@@ -267,7 +310,9 @@ def test_chunked_framing_browser_gate_and_size_limit(tmp_path: Path):
         )
         assert status == 200
         assert json.loads(response_body)["result"] == {"code": "lambda: 9"}
-        assert backend.calls == [("execute_python", "lambda: 9", None)]
+        assert backend.calls == [
+            ("execute_python", "lambda: 9", None, None, False)
+        ]
 
         status, _ = raw_request(
             server,
@@ -352,6 +397,88 @@ def test_sse_health_holds_and_releases_a_client_lease(tmp_path: Path):
         assert server._active_leases == 0
     finally:
         connection.close()
+        server.stop()
+        server.release_registration()
+
+
+def test_execute_state_is_scoped_to_and_released_with_lease(tmp_path: Path):
+    class SessionBackend(RecordingBackend):
+        def execute_python(
+            self,
+            code: str,
+            timeout: float | None,
+            *,
+            lease_id: str | None = None,
+            persist_globals: bool = False,
+        ):
+            self.calls.append(
+                (
+                    "execute",
+                    lease_id,
+                    code,
+                    timeout,
+                    persist_globals,
+                )
+            )
+            return {"lease_id": lease_id}
+
+        def release_session(self, lease_id: str) -> None:
+            self.calls.append(("release_session", lease_id))
+
+    analysis = AnalysisState()
+    backend = SessionBackend(analysis)
+    identity = InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib")
+    server = CodeModeHTTPServer(
+        backend,
+        identity,
+        analysis,
+        tmp_path,
+        token="test-token",
+        heartbeat_interval=0.05,
+    )
+    server.start()
+    lease = HTTPConnection("127.0.0.1", server.port, timeout=3)
+    try:
+        lease.request(
+            "GET",
+            "/health?sse=1&lease_id=scoped",
+            headers={
+                "Accept": "text/event-stream",
+                "Authorization": "Bearer test-token",
+            },
+        )
+        response = lease.getresponse()
+        assert response.status == 200
+        assert response.readline() == b"event: health\n"
+
+        status, payload, _ = request(
+            server,
+            "POST",
+            "/execute_python",
+            {
+                "lease_id": "scoped",
+                "code": "result = 1",
+                "persist_globals": True,
+            },
+        )
+        assert status == 200
+        assert payload["result"] == {"lease_id": "scoped"}
+        assert request(
+            server,
+            "POST",
+            "/release_lease",
+            {"lease_id": "scoped"},
+        )[0] == 200
+        deadline = time.monotonic() + 1
+        while ("release_session", "scoped") not in backend.calls:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert backend.calls == [
+            ("execute", "scoped", "result = 1", None, True),
+            ("release_session", "scoped"),
+        ]
+    finally:
+        lease.close()
         server.stop()
         server.release_registration()
 

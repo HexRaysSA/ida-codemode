@@ -403,6 +403,7 @@ class DatabaseManager:
         timeout: float | None = None,
         *,
         operation_id: str | None = None,
+        persist_globals: bool = False,
     ) -> PythonExecutionResult:
         effective_timeout = self._execute_timeout if timeout is None else timeout
         if (
@@ -421,6 +422,7 @@ class DatabaseManager:
                     code,
                     timeout=float(effective_timeout),
                     operation_id=operation_id,
+                    persist_globals=persist_globals,
                 )
             except ClientError:
                 if not session.handle.connected:

@@ -7,6 +7,13 @@ IDA Code Mode gives agents a compact Python execution surface over the
 discover and share databases already open in the IDA GUI, and starts
 managed idalib workers only when no suitable instance exists.
 
+The MCP adapter explicitly runs `execute_python` as a lease-scoped REPL: imports,
+variables, and function definitions persist between its calls through the same
+database handle. The low-level API remains stateless by default and opts in with
+`persist_globals=True`; a stateless call discards any namespace previously
+retained by that handle. Separate handles receive isolated namespaces, and
+closing a handle releases its namespace and retained IDA objects.
+
 ## Installation
 
 ### Requirements

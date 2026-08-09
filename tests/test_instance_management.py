@@ -45,8 +45,22 @@ from ida_codemode.worker import (
 
 
 class StaticBackend:
-    def execute_python(self, code: str, timeout: float | None):
+    def execute_python(
+        self,
+        code: str,
+        timeout: float | None,
+        *,
+        lease_id: str | None = None,
+        persist_globals: bool = False,
+    ):
+        del lease_id, persist_globals
         return {"code": code, "timeout": timeout}
+
+    def cancel_active(self) -> None:
+        pass
+
+    def release_session(self, lease_id: str) -> None:
+        del lease_id
 
     def wait_autoanalysis(self, timeout: float | None):
         return {"status": "complete", "complete": True}
@@ -390,6 +404,7 @@ def test_resolver_builds_worker_import_options(tmp_path: Path, monkeypatch) -> N
     assert captured["source"] == str(source.resolve())
     assert captured["expected_idb"] == str(output.resolve())
     assert captured["options"] == resolver_mod.WorkerLaunchOptions(
+        registry_dir=str((tmp_path / "instances").resolve()),
         auto_analysis=True,
         image_base=0x8000,
         new_database=True,
@@ -833,7 +848,9 @@ def test_mcp_execute_owns_autoanalysis_policy(monkeypatch) -> None:
             timeout: float | None = None,
             *,
             operation_id: str | None = None,
+            persist_globals: bool = False,
         ):
+            assert persist_globals
             self.calls.append(
                 ("execute_python", code, instance_id, timeout, operation_id)
             )
@@ -980,8 +997,10 @@ def test_cancelling_queued_mcp_execution_does_not_cancel_running_request(
             timeout: float | None = None,
             *,
             operation_id: str | None = None,
+            persist_globals: bool = False,
         ) -> dict[str, object]:
             assert timeout == 360
+            assert persist_globals
             assert operation_id is not None
             self.operation_ids[code] = operation_id
             if code == "second":
@@ -1401,9 +1420,21 @@ def test_mcp_execution_waits_for_autoanalysis_once_per_database(
             self.analysis = analysis
             self.calls: list[tuple[object, ...]] = []
 
-        def execute_python(self, code: str, timeout: float | None):
+        def execute_python(
+            self,
+            code: str,
+            timeout: float | None,
+            *,
+            lease_id: str | None = None,
+            persist_globals: bool = False,
+        ):
             self.calls.append(("execute", code, timeout))
-            return super().execute_python(code, timeout)
+            return super().execute_python(
+                code,
+                timeout,
+                lease_id=lease_id,
+                persist_globals=persist_globals,
+            )
 
         def wait_autoanalysis(self, timeout: float | None):
             self.calls.append(("wait", timeout))
@@ -1698,6 +1729,7 @@ def test_worker_launch_forwards_all_ida_command_options(
     log_file = tmp_path / "ida kernel.log"
     script_file = tmp_path / "startup.py"
     windows_dir = tmp_path / "windows"
+    registry_dir = tmp_path / "registry"
     captured = {}
 
     def fake_popen(command, **kwargs):
@@ -1711,6 +1743,7 @@ def test_worker_launch_forwards_all_ida_command_options(
         str(expected_idb),
         7.5,
         resolver_mod.WorkerLaunchOptions(
+            registry_dir=str(registry_dir),
             auto_analysis=True,
             image_base=0x8000,
             new_database=True,
@@ -1739,6 +1772,7 @@ def test_worker_launch_forwards_all_ida_command_options(
     )
 
     command = captured["command"]
+    assert command[command.index("--registry-dir") + 1] == str(registry_dir)
     assert "--auto-analysis" in command
     assert command[command.index("--image-base") + 1] == "0x8000"
     assert "--new-database" in command
@@ -2042,9 +2076,21 @@ def test_cancel_active_preserves_database_handle(tmp_path: Path) -> None:
             self.started = threading.Event()
             self.cancelled = threading.Event()
 
-        def execute_python(self, code: str, timeout: float | None):
+        def execute_python(
+            self,
+            code: str,
+            timeout: float | None,
+            *,
+            lease_id: str | None = None,
+            persist_globals: bool = False,
+        ):
             if code == "second":
-                return super().execute_python(code, timeout)
+                return super().execute_python(
+                    code,
+                    timeout,
+                    lease_id=lease_id,
+                    persist_globals=persist_globals,
+                )
             self.started.set()
             assert self.cancelled.wait(2)
             raise RuntimeError("cancelled")
@@ -2099,7 +2145,15 @@ def test_database_close_cancels_its_active_execution(tmp_path: Path) -> None:
             self.started = threading.Event()
             self.cancelled = threading.Event()
 
-        def execute_python(self, code: str, timeout: float | None):
+        def execute_python(
+            self,
+            code: str,
+            timeout: float | None,
+            *,
+            lease_id: str | None = None,
+            persist_globals: bool = False,
+        ):
+            del lease_id, persist_globals
             self.started.set()
             assert self.cancelled.wait(2)
             raise RuntimeError("cancelled")

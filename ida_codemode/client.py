@@ -440,8 +440,14 @@ class DatabaseHandle:
         timeout: float | None = None,
         *,
         operation_id: str | None = None,
+        persist_globals: bool = False,
     ) -> Any:
-        payload: dict[str, Any] = {"code": code}
+        """Execute Python; stateless execution resets this handle's namespace."""
+
+        payload: dict[str, Any] = {
+            "code": code,
+            "persist_globals": persist_globals,
+        }
         if timeout is not None:
             payload["timeout"] = timeout
         # Leave enough HTTP time for the server to return its structured
