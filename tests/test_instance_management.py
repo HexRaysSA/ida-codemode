@@ -21,6 +21,7 @@ from ida_codemode.database import DatabaseError, DatabaseManager
 from ida_codemode.http import RequestHandler
 from ida_codemode.registry import (
     PROTOCOL_VERSION,
+    REGISTRY_DIR,
     FileLock,
     InstanceIdentity,
     InstanceRegistration,
@@ -94,8 +95,6 @@ def test_lifecycle_apis_reject_nonfinite_timeouts(tmp_path: Path) -> None:
             resolve_instance(
                 tmp_path / "missing.exe",
                 timeout=timeout,
-                registry_dir=tmp_path / "instances",
-                spawn_dir=tmp_path / "spawn",
             )
         except ValueError:
             pass
@@ -109,8 +108,6 @@ def test_lifecycle_apis_reject_nonfinite_timeouts(tmp_path: Path) -> None:
         for name, open_timeout, execute_timeout in parameter_sets:
             try:
                 DatabaseManager(
-                    tmp_path / "instances",
-                    tmp_path / "spawn",
                     open_timeout=open_timeout,
                     execute_timeout=execute_timeout,
                 )
@@ -153,7 +150,7 @@ def test_scan_reaps_a_record_after_its_lifetime_lock_dies(tmp_path: Path) -> Non
 
 
 def test_scan_blocks_an_unsupported_protocol_version(tmp_path: Path) -> None:
-    registry_dir = tmp_path / "instances"
+    registry_dir = REGISTRY_DIR
     server = CodeModeHTTPServer(
         StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
@@ -183,7 +180,7 @@ def test_scan_blocks_an_unsupported_protocol_version(tmp_path: Path) -> None:
 
 
 def test_scan_accepts_additive_protocol_fields(tmp_path: Path, monkeypatch) -> None:
-    registry_dir = tmp_path / "instances"
+    registry_dir = REGISTRY_DIR
     server = CodeModeHTTPServer(
         StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
@@ -219,7 +216,7 @@ def test_resolver_timeout_is_shared_across_registry_probes(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    registry_dir = tmp_path / "instances"
+    registry_dir = REGISTRY_DIR
     registrations = [
         InstanceRegistration(
             registry_dir,
@@ -247,8 +244,6 @@ def test_resolver_timeout_is_shared_across_registry_probes(
                 tmp_path / "missing.exe",
                 spawn=False,
                 timeout=0.05,
-                registry_dir=registry_dir,
-                spawn_dir=tmp_path / "spawn",
             )
         except TimeoutError:
             pass
@@ -309,8 +304,6 @@ def test_database_handle_forwards_import_options(monkeypatch) -> None:
     assert captured["options"] == {
         "spawn": True,
         "timeout": 120.0,
-        "registry_dir": client_mod.REGISTRY_DIR,
-        "spawn_dir": client_mod.SPAWN_DIR,
         "output_database": "firmware.i64",
         "auto_analysis": True,
         "image_base": 0x8000,
@@ -370,8 +363,6 @@ def test_resolver_builds_worker_import_options(tmp_path: Path, monkeypatch) -> N
 
     result = resolve_instance(
         source,
-        registry_dir=tmp_path / "instances",
-        spawn_dir=tmp_path / "spawn",
         output_database=output,
         auto_analysis=True,
         image_base=0x8000,
@@ -404,7 +395,6 @@ def test_resolver_builds_worker_import_options(tmp_path: Path, monkeypatch) -> N
     assert captured["source"] == str(source.resolve())
     assert captured["expected_idb"] == str(output.resolve())
     assert captured["options"] == resolver_mod.WorkerLaunchOptions(
-        registry_dir=str((tmp_path / "instances").resolve()),
         auto_analysis=True,
         image_base=0x8000,
         new_database=True,
@@ -437,7 +427,7 @@ def test_handle_close_does_not_wait_for_sse_heartbeat(tmp_path: Path) -> None:
     idb_path = tmp_path / "sample.exe.i64"
     executable.write_bytes(b"binary")
     idb_path.write_bytes(b"idb")
-    registry_dir = tmp_path / "instances"
+    registry_dir = REGISTRY_DIR
     server = CodeModeHTTPServer(
         StaticBackend(),
         InstanceIdentity(str(idb_path), str(executable), "gui"),
@@ -449,8 +439,6 @@ def test_handle_close_does_not_wait_for_sse_heartbeat(tmp_path: Path) -> None:
     handle = DatabaseHandle.open(
         str(executable),
         spawn=False,
-        registry_dir=registry_dir,
-        spawn_dir=tmp_path / "spawn",
     )
     try:
         # Let the monitor consume the initial event and block waiting for the
@@ -475,15 +463,13 @@ def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
         StaticBackend(),
         InstanceIdentity(str(funny_idb), str(executable), "gui"),
         AnalysisState(),
-        tmp_path / "instances",
+        REGISTRY_DIR,
     )
     server.start()
     try:
         entry = resolve_instance(
             executable,
             spawn=False,
-            registry_dir=tmp_path / "instances",
-            spawn_dir=tmp_path / "spawn",
         )
         assert entry.backend == "gui"
         assert entry.idb_path.endswith("saved-elsewhere.i64")
@@ -492,8 +478,6 @@ def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
                 executable,
                 spawn=False,
                 new_database=True,
-                registry_dir=tmp_path / "instances",
-                spawn_dir=tmp_path / "spawn",
             )
         except resolver_mod.IdbBusy as exc:
             assert "cannot create a fresh database" in str(exc)
@@ -1124,8 +1108,6 @@ def test_mcp_session_trace_metadata(tmp_path: Path, monkeypatch) -> None:
 
     trace = FakeTrace()
     manager = DatabaseManager(
-        tmp_path / "instances",
-        tmp_path / "spawn",
         on_event=mcp_app._trace_database_event,
     )
     monkeypatch.setattr(mcp_app, "TRACE", trace)
@@ -1159,7 +1141,7 @@ def test_mcp_session_trace_metadata(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_list_databases_uses_idb_when_gui_executable_is_missing(tmp_path: Path) -> None:
-    registry_dir = tmp_path / "instances"
+    registry_dir = REGISTRY_DIR
     idb_path = tmp_path / "open.i64"
     idb_path.write_bytes(b"idb")
     server = CodeModeHTTPServer(
@@ -1172,7 +1154,7 @@ def test_list_databases_uses_idb_when_gui_executable_is_missing(tmp_path: Path) 
     assert server.entry is not None
     entry = server.entry
     try:
-        result = DatabaseManager(registry_dir).list_databases()
+        result = DatabaseManager().list_databases()
     finally:
         server.stop()
         server.release_registration()
@@ -1191,7 +1173,7 @@ def test_list_databases_uses_idb_when_gui_executable_is_missing(tmp_path: Path) 
 
 
 def test_list_databases_prefers_existing_gui_executable(tmp_path: Path) -> None:
-    registry_dir = tmp_path / "instances"
+    registry_dir = REGISTRY_DIR
     idb_path = tmp_path / "open.i64"
     executable = tmp_path / "open.exe"
     idb_path.write_bytes(b"idb")
@@ -1204,7 +1186,7 @@ def test_list_databases_prefers_existing_gui_executable(tmp_path: Path) -> None:
     )
     server.start()
     try:
-        result = DatabaseManager(registry_dir).list_databases()
+        result = DatabaseManager().list_databases()
     finally:
         server.stop()
         server.release_registration()
@@ -1230,7 +1212,7 @@ def test_paths_preserve_case_but_matching_is_case_insensitive(tmp_path: Path) ->
     assert canonical_path(executable).endswith("MixedCase.exe")
     assert expected_idb_path(executable).endswith("MixedCase.exe.i64")
 
-    registry_dir = tmp_path / "instances"
+    registry_dir = REGISTRY_DIR
     server = CodeModeHTTPServer(
         StaticBackend(),
         InstanceIdentity(str(idb_path), str(executable), "gui"),
@@ -1241,7 +1223,7 @@ def test_paths_preserve_case_but_matching_is_case_insensitive(tmp_path: Path) ->
     assert server.entry is not None
     try:
         # The listed path preserves case (no more lowercase databases).
-        result = DatabaseManager(registry_dir).list_databases()
+        result = DatabaseManager().list_databases()
         assert result["instances"][0]["path"].endswith("MixedCase.exe")
 
         # The model may pass the executable or the .i64; both find the one
@@ -1251,10 +1233,7 @@ def test_paths_preserve_case_but_matching_is_case_insensitive(tmp_path: Path) ->
             # Case-insensitive volumes: differently-cased spellings name the
             # same file and must resolve to the same instance.
             variants += [tmp_path / "mixedcase.exe", tmp_path / "mixedcase.exe.i64"]
-        record_ids = {
-            resolve_instance(str(p), spawn=False, registry_dir=registry_dir).record_id
-            for p in variants
-        }
+        record_ids = {resolve_instance(str(p), spawn=False).record_id for p in variants}
         assert record_ids == {server.entry.record_id}
     finally:
         server.stop()
@@ -1273,7 +1252,7 @@ def test_resolves_live_instance_when_idb_not_on_disk(tmp_path: Path) -> None:
     idb_path = tmp_path / "Fresh.exe.i64"  # intentionally NOT created on disk
     assert not idb_path.exists()
 
-    registry_dir = tmp_path / "instances"
+    registry_dir = REGISTRY_DIR
     server = CodeModeHTTPServer(
         StaticBackend(),
         InstanceIdentity(str(idb_path), str(executable), "gui"),
@@ -1284,9 +1263,7 @@ def test_resolves_live_instance_when_idb_not_on_disk(tmp_path: Path) -> None:
     assert server.entry is not None
     try:
         for lookup in (idb_path, executable):
-            entry = resolve_instance(
-                str(lookup), spawn=False, registry_dir=registry_dir
-            )
+            entry = resolve_instance(str(lookup), spawn=False)
             assert entry.record_id == server.entry.record_id
     finally:
         server.stop()
@@ -1296,7 +1273,7 @@ def test_resolves_live_instance_when_idb_not_on_disk(tmp_path: Path) -> None:
 def test_get_session_waits_for_in_flight_startup_open(tmp_path: Path) -> None:
     # Regression: the agent's first tool call must not race a --database startup
     # open. _get_session waits for the background thread to finish attaching.
-    manager = DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+    manager = DatabaseManager()
     sentinel: Any = object()
 
     def _startup() -> None:
@@ -1362,7 +1339,7 @@ def test_shutdown_during_open_releases_the_late_handle(
             handle_closed.set()
 
     monkeypatch.setattr("ida_codemode.database.DatabaseHandle", SlowHandle)
-    manager = DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+    manager = DatabaseManager()
 
     def open_database() -> None:
         try:
@@ -1388,7 +1365,7 @@ def test_shutdown_during_open_releases_the_late_handle(
 
 
 def test_get_session_raises_without_startup_open(tmp_path: Path) -> None:
-    manager = DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+    manager = DatabaseManager()
     try:
         manager._get_session(None)
     except DatabaseError as exc:
@@ -1400,7 +1377,7 @@ def test_get_session_raises_without_startup_open(tmp_path: Path) -> None:
 def test_get_session_raises_after_failed_startup_open(tmp_path: Path) -> None:
     # A startup open that finishes without setting a current DB (i.e. it failed)
     # must not hang the tool call: waiting ends when the thread ends.
-    manager = DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+    manager = DatabaseManager()
     thread = threading.Thread(target=lambda: None, daemon=True)
     manager._startup_open_thread = thread
     thread.start()
@@ -1451,12 +1428,10 @@ def test_mcp_execution_waits_for_autoanalysis_once_per_database(
         backend,
         InstanceIdentity(str(idb_path), str(executable), "gui"),
         analysis,
-        tmp_path / "instances",
+        REGISTRY_DIR,
     )
     server.start()
     manager = DatabaseManager(
-        tmp_path / "instances",
-        tmp_path / "spawn",
         execute_timeout=7,
     )
     try:
@@ -1486,8 +1461,7 @@ def test_mcp_execution_waits_for_autoanalysis_once_per_database(
 def test_gui_disconnect_invalidates_mcp_instance_without_spawning(
     tmp_path: Path,
 ) -> None:
-    registry_dir = tmp_path / "instances"
-    spawn_dir = tmp_path / "spawn"
+    registry_dir = REGISTRY_DIR
     idb_path = tmp_path / "open.i64"
     executable = tmp_path / "open.exe"
     idb_path.write_bytes(b"idb")
@@ -1499,7 +1473,7 @@ def test_gui_disconnect_invalidates_mcp_instance_without_spawning(
         registry_dir,
     )
     server.start()
-    manager = DatabaseManager(registry_dir, spawn_dir)
+    manager = DatabaseManager()
     opened = manager.open_database(str(executable), set_current=True)
 
     server.stop()
@@ -1524,7 +1498,7 @@ def test_database_handle_reuses_http11_rpc_connection(tmp_path: Path) -> None:
         StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib"),
         AnalysisState(),
-        tmp_path / "instances",
+        REGISTRY_DIR,
     )
     server.start()
     assert server.entry is not None
@@ -1729,7 +1703,6 @@ def test_worker_launch_forwards_all_ida_command_options(
     log_file = tmp_path / "ida kernel.log"
     script_file = tmp_path / "startup.py"
     windows_dir = tmp_path / "windows"
-    registry_dir = tmp_path / "registry"
     captured = {}
 
     def fake_popen(command, **kwargs):
@@ -1743,7 +1716,6 @@ def test_worker_launch_forwards_all_ida_command_options(
         str(expected_idb),
         7.5,
         resolver_mod.WorkerLaunchOptions(
-            registry_dir=str(registry_dir),
             auto_analysis=True,
             image_base=0x8000,
             new_database=True,
@@ -1772,7 +1744,6 @@ def test_worker_launch_forwards_all_ida_command_options(
     )
 
     command = captured["command"]
-    assert command[command.index("--registry-dir") + 1] == str(registry_dir)
     assert "--auto-analysis" in command
     assert command[command.index("--image-base") + 1] == "0x8000"
     assert "--new-database" in command
@@ -1857,7 +1828,6 @@ def test_await_ready_accepts_console_launcher_child_pid(
         expected_idb,
         tmp_path / "111-abcdef.log",
         time.monotonic() + 1,
-        tmp_path / "instances",
     )
 
     assert result is entry
@@ -1869,7 +1839,7 @@ def test_multiple_leases_share_one_managed_server(tmp_path: Path) -> None:
         StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
         AnalysisState(),
-        tmp_path / "instances",
+        REGISTRY_DIR,
         lease_grace=0.1,
         heartbeat_interval=0.02,
         on_shutdown=stopped.set,
@@ -1902,7 +1872,7 @@ def test_final_explicit_release_skips_startup_grace(tmp_path: Path) -> None:
         StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
         AnalysisState(),
-        tmp_path / "instances",
+        REGISTRY_DIR,
         lease_grace=30,
         heartbeat_interval=30,
         on_shutdown=stopped.set,
@@ -1923,7 +1893,7 @@ def test_draining_owner_remains_discoverable_until_database_close(
     executable.write_bytes(b"binary")
     idb.write_bytes(b"database")
     stopped = threading.Event()
-    registry_dir = tmp_path / "instances"
+    registry_dir = REGISTRY_DIR
     server = CodeModeHTTPServer(
         StaticBackend(),
         InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
@@ -1958,8 +1928,6 @@ def test_draining_owner_remains_discoverable_until_database_close(
         resolve_instance(
             executable,
             timeout=1,
-            registry_dir=registry_dir,
-            spawn_dir=tmp_path / "spawn",
             spawner=unexpected_spawner,
         )
     except resolver_mod.IdbBusy:
@@ -1979,7 +1947,7 @@ def test_handle_keepalive_retains_idle_managed_worker(tmp_path: Path) -> None:
         StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
         AnalysisState(),
-        tmp_path / "instances",
+        REGISTRY_DIR,
         lease_grace=30,
         heartbeat_interval=0.02,
         on_shutdown=stopped.set,
@@ -2019,7 +1987,7 @@ def test_operation_cancellation_cannot_reach_successor(tmp_path: Path) -> None:
         backend,
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
         AnalysisState(),
-        tmp_path / "instances",
+        REGISTRY_DIR,
     )
     assert server._lease_opened("test-lease", 0) is not None
     failures: list[BaseException] = []
@@ -2107,12 +2075,12 @@ def test_cancel_active_preserves_database_handle(tmp_path: Path) -> None:
         backend,
         InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
         AnalysisState(),
-        tmp_path / "instances",
+        REGISTRY_DIR,
         lease_grace=30,
         on_shutdown=lambda: None,
     )
     server.start()
-    manager = DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+    manager = DatabaseManager()
     opened = manager.open_database(str(idb), set_current=True)
     failures: list[Exception] = []
 
@@ -2170,12 +2138,12 @@ def test_database_close_cancels_its_active_execution(tmp_path: Path) -> None:
         backend,
         InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
         AnalysisState(),
-        tmp_path / "instances",
+        REGISTRY_DIR,
         lease_grace=30,
         on_shutdown=lambda: None,
     )
     server.start()
-    manager = DatabaseManager(tmp_path / "instances", tmp_path / "spawn")
+    manager = DatabaseManager()
     opened = manager.open_database(str(idb), set_current=True)
     failures: list[Exception] = []
 

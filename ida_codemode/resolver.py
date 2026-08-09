@@ -10,7 +10,6 @@ from .paths import find_console_script
 from .registry import (
     DEFAULT_TIMEOUT,
     LOG_DIR,
-    REGISTRY_DIR,
     SPAWN_DIR,
     DiscoveredInstance,
     FileLock,
@@ -47,7 +46,6 @@ class WorkerStartError(ResolveError):
 class WorkerLaunchOptions:
     """IDA import options used only when a new idalib worker is spawned."""
 
-    registry_dir: str | None = None
     auto_analysis: bool = False
     image_base: int | None = None
     new_database: bool = False
@@ -206,8 +204,6 @@ def spawn_worker(
         "--lease-grace",
         str(lease_grace),
     ]
-    if options.registry_dir is not None:
-        command.extend(["--registry-dir", options.registry_dir])
     if input_path == source and source != expected_idb:
         command.extend(["--output-database", expected_idb])
     if options.auto_analysis:
@@ -304,7 +300,6 @@ def _log_tail(path: Path, limit: int = 16 * 1024) -> str:
 
 
 def _scan_until(
-    registry_dir: str | os.PathLike[str],
     deadline: float,
     *,
     probe_timeout: float = DEFAULT_TIMEOUT,
@@ -313,7 +308,6 @@ def _scan_until(
     if remaining <= 0:
         raise TimeoutError("timed out scanning Code Mode instances")
     return scan_instances(
-        registry_dir,
         timeout=min(probe_timeout, remaining),
         deadline=deadline,
     )
@@ -330,7 +324,6 @@ def _await_ready(
     expected_idb: str,
     log_path: Path,
     deadline: float,
-    registry_dir: str | os.PathLike[str],
 ) -> RegistryEntry:
     expected_key = idb_key(expected_idb)
     # Windows console-script launchers may keep a wrapper PID while Python runs
@@ -352,7 +345,6 @@ def _await_ready(
 
         try:
             instances = _scan_until(
-                registry_dir,
                 deadline,
                 probe_timeout=0.25,
             )
@@ -405,8 +397,6 @@ def resolve_instance(
     *,
     spawn: bool = True,
     timeout: float = 120.0,
-    registry_dir: str | os.PathLike[str] = REGISTRY_DIR,
-    spawn_dir: str | os.PathLike[str] = SPAWN_DIR,
     lease_grace: float = 20.0,
     output_database: str | os.PathLike[str] | None = None,
     auto_analysis: bool = False,
@@ -452,7 +442,6 @@ def resolve_instance(
         else expected_idb_path(source)
     )
     launch_options = WorkerLaunchOptions(
-        registry_dir=os.fspath(registry_dir),
         auto_analysis=auto_analysis,
         image_base=image_base,
         new_database=new_database,
@@ -488,7 +477,7 @@ def resolve_instance(
     # request for that IDB identity, so do not attach to a GUI that merely has
     # the same input executable open under a different database path.
     instance = _resolve_existing(
-        _scan_until(registry_dir, deadline),
+        _scan_until(deadline),
         source if output_database is None else expected_idb,
         expected_idb,
     )
@@ -501,7 +490,7 @@ def resolve_instance(
         return instance
 
     spawn_lock = FileLock(
-        ensure_private_directory(spawn_dir) / f"{idb_key(expected_idb)}.lock"
+        ensure_private_directory(SPAWN_DIR) / f"{idb_key(expected_idb)}.lock"
     )
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -509,7 +498,7 @@ def resolve_instance(
     spawn_lock.acquire(remaining)
     try:
         instance = _resolve_existing(
-            _scan_until(registry_dir, deadline),
+            _scan_until(deadline),
             source if output_database is None else expected_idb,
             expected_idb,
         )
@@ -533,6 +522,6 @@ def resolve_instance(
             lease_grace,
             launch_options,
         )
-        return _await_ready(process, expected_idb, log_path, deadline, registry_dir)
+        return _await_ready(process, expected_idb, log_path, deadline)
     finally:
         spawn_lock.close()

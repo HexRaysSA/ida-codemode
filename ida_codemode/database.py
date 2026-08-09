@@ -21,8 +21,6 @@ from ida_codemode.registry import (
     idb_key,
     scan_instances,
 )
-from ida_codemode.registry import REGISTRY_DIR as DEFAULT_REGISTRY_DIR
-from ida_codemode.registry import SPAWN_DIR as DEFAULT_SPAWN_DIR
 from ida_codemode.resolver import expected_idb_path
 from ida_codemode.runtime import PythonExecutionResult
 
@@ -119,8 +117,6 @@ class _DatabaseSession:
 class DatabaseManager:
     def __init__(
         self,
-        registry_dir: Path = DEFAULT_REGISTRY_DIR,
-        spawn_dir: Path = DEFAULT_SPAWN_DIR,
         *,
         on_event: DatabaseEventCallback | None = None,
         open_timeout: float = DEFAULT_OPEN_TIMEOUT_SECONDS,
@@ -140,8 +136,6 @@ class DatabaseManager:
                 f"keepalive must be between 0 and {MAX_KEEPALIVE_SECONDS:g} seconds"
             )
         self._on_event = on_event
-        self.registry_dir = registry_dir
-        self.spawn_dir = spawn_dir
         self._open_timeout = open_timeout
         self._execute_timeout = execute_timeout
         self._keepalive = float(keepalive)
@@ -231,8 +225,6 @@ class DatabaseManager:
                 handle = DatabaseHandle.open(
                     resolved_path,
                     timeout=self._open_timeout,
-                    registry_dir=self.registry_dir,
-                    spawn_dir=self.spawn_dir,
                     keepalive=self._keepalive,
                 )
                 if not handle.connected:
@@ -523,7 +515,7 @@ class DatabaseManager:
                 )
 
         instances: list[DatabaseListing] = []
-        for discovered in scan_instances(self.registry_dir):
+        for discovered in scan_instances():
             entry = discovered.entry
             local = attached.pop(entry.record_id, None)
             if discovered.state.value != "ready":

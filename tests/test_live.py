@@ -11,7 +11,7 @@ import time
 from http.client import HTTPConnection
 from urllib.parse import urlsplit
 
-from ida_codemode.registry import REGISTRY_DIR, discover_instances
+from ida_codemode.registry import discover_instances
 
 
 class CheckFailed(RuntimeError):
@@ -43,9 +43,9 @@ def request(endpoint, token, method, path, payload=None, *, compressed=False):
     return response.status, json.loads(data)
 
 
-def discover_token(endpoint, registry_dir):
+def discover_token(endpoint):
     port = urlsplit(endpoint).port
-    valid, _unavailable = discover_instances(registry_dir)
+    valid, _unavailable = discover_instances()
     matches = [entry for entry in valid if entry["port"] == port]
     if len(matches) != 1:
         raise CheckFailed(f"expected one valid registry entry for port {port}")
@@ -128,14 +128,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("endpoint", help="http://127.0.0.1:<port>")
     parser.add_argument("--token")
-    parser.add_argument("--registry-dir")
     parser.add_argument("--save", action="store_true")
     args = parser.parse_args()
     endpoint = args.endpoint.rstrip("/")
     parsed = urlsplit(endpoint)
     if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or not parsed.port:
         raise SystemExit("endpoint must be http://127.0.0.1:<port>")
-    token = args.token or discover_token(endpoint, args.registry_dir or REGISTRY_DIR)
+    token = args.token or discover_token(endpoint)
     try:
         run(endpoint, token, save=args.save)
     except CheckFailed as exc:

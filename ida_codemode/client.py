@@ -10,7 +10,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 
-from .registry import HOST, REGISTRY_DIR, SPAWN_DIR, RegistryEntry
+from .registry import HOST, RegistryEntry
 from .resolver import resolve_instance
 
 
@@ -91,8 +91,6 @@ class DatabaseHandle:
         *,
         spawn: bool = True,
         timeout: float = 120.0,
-        registry_dir: str | Path = REGISTRY_DIR,
-        spawn_dir: str | Path = SPAWN_DIR,
         output_database: str | Path | None = None,
         auto_analysis: bool = False,
         image_base: int | None = None,
@@ -134,8 +132,6 @@ class DatabaseHandle:
                 path,
                 spawn=spawn,
                 timeout=timeout,
-                registry_dir=registry_dir,
-                spawn_dir=spawn_dir,
                 output_database=output_database,
                 auto_analysis=auto_analysis,
                 image_base=image_base,
