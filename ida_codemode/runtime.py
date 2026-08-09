@@ -3,7 +3,6 @@ import asyncio
 import builtins
 import ctypes
 import heapq
-import importlib
 import inspect
 import io
 import math
@@ -288,15 +287,10 @@ class IDARuntime:
         # to the agent alongside execution output.
         _suppress_ida_domain_warnings()
 
-        # ida-domain loads idapro when running outside IDA, making the
-        # IDAPython modules importable before the runtime binds them.
-        ida_domain = importlib.import_module("ida_domain")
-
-        import ida_auto
-        import ida_kernwin
-        import ida_loader
+        # Outside IDA, ida-domain loads idapro and makes IDAPython modules
+        # such as idaapi importable.
+        import ida_domain as _ida_domain  # noqa: F401
         import idaapi
-        import idc
 
         version = tuple(
             int(part) for part in idaapi.get_kernel_version().split(".")[:2]
@@ -311,12 +305,6 @@ class IDARuntime:
         self.database = database
         self.analysis_state = analysis_state
         self.default_timeout = default_timeout
-
-        self.ida_auto = ida_auto
-        self.ida_kernwin = ida_kernwin
-        self.ida_loader = ida_loader
-        self.idc = idc
-        self.ida_domain = ida_domain
 
         self._operation_lock = threading.Lock()
         self._active_lock = threading.Lock()
@@ -334,6 +322,8 @@ class IDARuntime:
     ) -> None:
         """Interrupt the active native or Python operation exactly once."""
 
+        import ida_kernwin
+
         with self._active_lock:
             if (
                 self._active_generation != generation
@@ -344,7 +334,7 @@ class IDARuntime:
                 return
             self._active_interrupt_error = error
             self._active_cancel_event.set()
-            self.ida_kernwin.set_cancelled()
+            ida_kernwin.set_cancelled()
             if self._active_thread_id is not None:
                 _interrupt_thread(self._active_thread_id)
 
@@ -357,6 +347,9 @@ class IDARuntime:
         batch: bool = True,
         capture_output: bool = False,
     ) -> Any:
+        import ida_kernwin
+        import idc
+
         effective_timeout = timeout
         if effective_timeout is not None and (
             not math.isfinite(effective_timeout) or effective_timeout <= 0
@@ -381,7 +374,7 @@ class IDARuntime:
                 nonlocal outcome
                 old_batch: int | None = None
                 deadline_token: int | None = None
-                self.ida_kernwin.clr_cancelled()
+                ida_kernwin.clr_cancelled()
                 stdout_capture = io.StringIO()
                 stderr_capture = io.StringIO()
 
@@ -421,7 +414,7 @@ class IDARuntime:
 
                 try:
                     if batch:
-                        old_batch = self.idc.batch(1)
+                        old_batch = idc.batch(1)
                     if effective_timeout is not None:
                         deadline_token = _deadline_scheduler.schedule(
                             effective_timeout,
@@ -465,13 +458,13 @@ class IDARuntime:
                             self._active_thread_id = None
                     if deadline_token is not None:
                         _deadline_scheduler.cancel(deadline_token)
-                    self.ida_kernwin.clr_cancelled()
+                    ida_kernwin.clr_cancelled()
                     if old_batch is not None:
-                        self.idc.batch(old_batch)
+                        idc.batch(old_batch)
                 return 1
 
             try:
-                self.ida_kernwin.execute_sync(invoke, self.ida_kernwin.MFF_WRITE)
+                ida_kernwin.execute_sync(invoke, ida_kernwin.MFF_WRITE)
                 if outcome is None:
                     raise APIError(
                         "execute_sync_failed",
@@ -486,8 +479,8 @@ class IDARuntime:
                         self._active_cancel_event = None
                         self._active_thread_id = None
                         self._active_interrupt_error = None
-                # Defend against a timeout racing with Timer.cancel().
-                self.ida_kernwin.clr_cancelled()
+                # Defend against a timeout racing with deadline cancellation.
+                ida_kernwin.clr_cancelled()
 
         if succeeded:
             if capture_output:
@@ -541,10 +534,12 @@ class IDARuntime:
         code: str,
         timeout: float | None,
     ) -> PythonExecutionResult:
+        import ida_domain
+
         def execute() -> Any:
             runtime = {
                 "db": self.database,
-                "ida_domain": self.ida_domain,
+                "ida_domain": ida_domain,
             }
             global_ns = {
                 "__builtins__": builtins.__dict__,
@@ -564,17 +559,19 @@ class IDARuntime:
         )
 
     def wait_autoanalysis(self, timeout: float | None) -> dict[str, Any]:
+        import ida_auto
+
         if self.analysis_state.complete.is_set():
             return self.analysis_state.snapshot()
 
         def wait() -> bool:
-            previously_enabled = self.ida_auto.enable_auto(True)
+            previously_enabled = ida_auto.enable_auto(True)
             try:
-                completed = bool(self.ida_auto.auto_wait())
+                completed = bool(ida_auto.auto_wait())
             finally:
                 if not previously_enabled:
-                    self.ida_auto.enable_auto(False)
-            if completed and self.ida_auto.auto_is_ok():
+                    ida_auto.enable_auto(False)
+            if completed and ida_auto.auto_is_ok():
                 self.analysis_state.mark_complete()
             return completed
 
@@ -589,8 +586,11 @@ class IDARuntime:
         return status
 
     def save_database(self) -> dict[str, Any]:
+        import ida_kernwin
+        import ida_loader
+
         def save() -> dict[str, Any]:
-            path = self.ida_loader.get_path(self.ida_loader.PATH_TYPE_IDB) or ""
+            path = ida_loader.get_path(ida_loader.PATH_TYPE_IDB) or ""
             if not path:
                 raise APIError(
                     "no_database", "No database is currently open", status=409
@@ -598,7 +598,7 @@ class IDARuntime:
 
             if self.backend == "gui":
                 is_temporary = bool(
-                    self.ida_loader.is_database_flag(self.ida_loader.DBFL_TEMP)
+                    ida_loader.is_database_flag(ida_loader.DBFL_TEMP)
                 )
                 if is_temporary:
                     raise APIError(
@@ -606,9 +606,9 @@ class IDARuntime:
                         "Use Save As in the IDA GUI before saving remotely",
                         status=409,
                     )
-                saved = bool(self.ida_kernwin.process_ui_action("SaveBase"))
+                saved = bool(ida_kernwin.process_ui_action("SaveBase"))
             else:
-                saved = bool(self.ida_loader.save_database(path, 0))
+                saved = bool(ida_loader.save_database(path, 0))
             if not saved:
                 raise APIError(
                     "save_failed",

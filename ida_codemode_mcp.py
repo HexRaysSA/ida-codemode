@@ -32,7 +32,16 @@ from enum import Enum
 from functools import wraps
 from importlib.metadata import version
 from pathlib import Path
-from typing import Annotated, Any, BinaryIO, NoReturn, NotRequired, ParamSpec, TypeVar
+from typing import (
+    Annotated,
+    Any,
+    BinaryIO,
+    NoReturn,
+    NotRequired,
+    ParamSpec,
+    TypeVar,
+    cast,
+)
 from urllib.parse import urlparse
 
 from packaging.version import InvalidVersion, Version
@@ -688,8 +697,8 @@ class _ShutdownOnEOFInput:
         self._eof_seen = False
         self._lock = threading.Lock()
 
-    def readline(self) -> bytes:
-        data = self._stream.readline()
+    def readline(self, size: int = -1) -> bytes:
+        data = self._stream.readline(size)
         if data:
             return data
         with self._lock:
@@ -697,6 +706,9 @@ class _ShutdownOnEOFInput:
                 self._eof_seen = True
                 self._on_eof()
         return data
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
 
 
 def _serve(
@@ -716,7 +728,12 @@ def _serve(
         DATABASE_MANAGER.schedule_startup_open(database)
 
     if transport == "stdio":
-        stdin = _ShutdownOnEOFInput(sys.stdin.buffer, _shutdown_server_state)
+        # ZeroMCP only reads from this transparent proxy, but its public
+        # annotation requires the concrete BinaryIO type.
+        stdin = cast(
+            BinaryIO,
+            _ShutdownOnEOFInput(sys.stdin.buffer, _shutdown_server_state),
+        )
         try:
             asyncio.run(mcp.stdio_async(stdin=stdin))
         finally:

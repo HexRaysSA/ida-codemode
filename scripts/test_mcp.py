@@ -15,7 +15,7 @@ import threading
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, cast
 
 from zeromcp import McpServer
 
@@ -54,13 +54,16 @@ class LoggingInput:
     def __init__(self, stream: BinaryIO) -> None:
         self.stream = stream
 
-    def readline(self) -> bytes:
-        data = self.stream.readline()
+    def readline(self, size: int = -1) -> bytes:
+        data = self.stream.readline(size)
         if data:
             log("mcp_inbound", message=wire_message(data))
         else:
             log("mcp_input_eof")
         return data
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.stream, name)
 
 
 class LoggingOutput:
@@ -73,6 +76,9 @@ class LoggingOutput:
 
     def flush(self) -> None:
         self.stream.flush()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.stream, name)
 
 
 @mcp.tool
@@ -171,8 +177,10 @@ def main() -> int:
     if not args.append_log:
         LOG_PATH.write_text("", encoding="utf-8")
 
-    stdin = LoggingInput(sys.stdin.buffer)
-    stdout = LoggingOutput(sys.stdout.buffer)
+    # ZeroMCP only calls the intercepted methods on these transparent proxies,
+    # but its public annotations require the concrete BinaryIO type.
+    stdin = cast(BinaryIO, LoggingInput(sys.stdin.buffer))
+    stdout = cast(BinaryIO, LoggingOutput(sys.stdout.buffer))
     log("server_started", stdio_mode=args.stdio_mode, log_path=str(LOG_PATH))
     try:
         if args.stdio_mode == "async":
