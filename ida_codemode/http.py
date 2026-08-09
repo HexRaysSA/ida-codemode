@@ -1,5 +1,8 @@
 import hmac
-import socketserver
+import queue
+import socket
+import threading
+import time
 import zlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -13,6 +16,9 @@ HOST = "127.0.0.1"
 POST_BODY_LIMIT = 4 * 1024 * 1024
 MAX_CHUNK_LINE = 8192
 MAX_TRAILER_BYTES = 64 * 1024
+PREWARM_HANDLER_THREADS = 4
+MAX_IDLE_HANDLER_THREADS = 8
+ServerRequest = socket.socket | tuple[bytes, socket.socket]
 
 
 @dataclass
@@ -365,15 +371,34 @@ class RequestHandler(BaseHTTPRequestHandler):
         return None
 
 
-class LocalHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
-    daemon_threads = True
+class LocalHTTPServer(HTTPServer):
+    """HTTP server with reusable daemon connection-handler threads.
+
+    ``socketserver.ThreadingMixIn`` creates one OS thread per accepted
+    connection. Thread startup has a recurring 15-25 ms scheduling tail on
+    Windows, even for loopback requests. A small prewarmed cache removes that
+    cost while retaining unbounded growth for long-lived SSE leases and
+    concurrent cancellation requests.
+    """
+
     allow_reuse_address = True
+    # TCPServer defaults to a backlog of only five connections on Python 3.11.
+    # A short loopback burst can fill it while Windows schedules handlers,
+    # producing a second latency mode around one scheduler quantum.
+    request_queue_size = socket.SOMAXCONN
 
     def __init__(
         self,
         token: str,
         application: Callable[[str, str, str, bytes | None], HTTPResponse],
     ) -> None:
+        self._request_queue: queue.Queue[
+            tuple[ServerRequest, tuple[str, int]] | None
+        ] = queue.Queue()
+        self._worker_condition = threading.Condition()
+        self._worker_count = 0
+        self._idle_worker_count = 0
+        self._closing_workers = False
         super().__init__((HOST, 0), RequestHandler)
         self.port = int(self.server_address[1])
         self.token = token
@@ -381,3 +406,89 @@ class LocalHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
         self.allowed_hosts = frozenset(
             {f"127.0.0.1:{self.port}", f"localhost:{self.port}"}
         )
+        with self._worker_condition:
+            for _ in range(PREWARM_HANDLER_THREADS):
+                self._start_worker_locked()
+            deadline = time.monotonic() + 1.0
+            while (
+                self._idle_worker_count < PREWARM_HANDLER_THREADS
+                and time.monotonic() < deadline
+            ):
+                self._worker_condition.wait(deadline - time.monotonic())
+
+    def _start_worker_locked(self) -> None:
+        self._worker_count += 1
+        worker = threading.Thread(
+            target=self._connection_worker,
+            name=f"ida-codemode-http-{self._worker_count}",
+            daemon=True,
+        )
+        worker.start()
+
+    def _connection_worker(self) -> None:
+        while True:
+            with self._worker_condition:
+                if self._closing_workers:
+                    self._worker_count -= 1
+                    self._worker_condition.notify_all()
+                    return
+                if (
+                    self._idle_worker_count >= MAX_IDLE_HANDLER_THREADS
+                    and self._worker_count > PREWARM_HANDLER_THREADS
+                ):
+                    self._worker_count -= 1
+                    self._worker_condition.notify_all()
+                    return
+                self._idle_worker_count += 1
+                self._worker_condition.notify_all()
+            request = self._request_queue.get()
+            with self._worker_condition:
+                self._idle_worker_count -= 1
+            if request is None:
+                with self._worker_condition:
+                    self._worker_count -= 1
+                    self._worker_condition.notify_all()
+                return
+            connection, client_address = request
+            if not isinstance(connection, socket.socket):
+                self.shutdown_request(connection)
+                continue
+            try:
+                self.finish_request(connection, client_address)
+            except Exception:  # noqa: BLE001 -- socketserver isolation boundary
+                self.handle_error(connection, client_address)
+            finally:
+                self.shutdown_request(connection)
+
+    def process_request(
+        self,
+        request: ServerRequest,
+        client_address: tuple[str, int],
+    ) -> None:
+        with self._worker_condition:
+            if self._closing_workers:
+                self.shutdown_request(request)
+                return
+            self._request_queue.put((request, client_address))
+            if self._idle_worker_count == 0:
+                self._start_worker_locked()
+
+    def server_close(self) -> None:
+        super().server_close()
+        with self._worker_condition:
+            if self._closing_workers:
+                return
+            self._closing_workers = True
+            worker_count = self._worker_count
+            while True:
+                try:
+                    pending = self._request_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if pending is not None:
+                    self.shutdown_request(pending[0])
+            for _ in range(worker_count):
+                self._request_queue.put(None)
+            deadline = time.monotonic() + 1.0
+            while self._worker_count > 0 and time.monotonic() < deadline:
+                self._worker_condition.wait(deadline - time.monotonic())

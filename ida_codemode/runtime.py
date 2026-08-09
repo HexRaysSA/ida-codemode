@@ -597,9 +597,7 @@ class IDARuntime:
                 )
 
             if self.backend == "gui":
-                is_temporary = bool(
-                    ida_loader.is_database_flag(ida_loader.DBFL_TEMP)
-                )
+                is_temporary = bool(ida_loader.is_database_flag(ida_loader.DBFL_TEMP))
                 if is_temporary:
                     raise APIError(
                         "save_as_required",

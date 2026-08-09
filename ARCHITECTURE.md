@@ -193,8 +193,11 @@ There is no remote database-close route. Closing a client handle uses a
 separate control connection to release only its identified lease, then closes
 its local connections. Ordinary RPCs carry that lease identity so orphaned
 execution can be cancelled. The reusable HTTP/1.1 RPC connection is replaced
-before the server's idle timeout. A failed operation POST is never retried
-because its execution status may be ambiguous.
+before the server's idle timeout. The listener uses the platform's maximum
+backlog and a small prewarmed cache of reusable daemon handler threads; this
+avoids paying Windows thread-start scheduling latency on every fresh loopback
+connection while still growing for long-lived SSE leases. A failed operation
+POST is never retried because its execution status may be ambiguous.
 
 These guarantees apply to the per-database API. The optional ZeroMCP HTTP
 transport and dashboard have no built-in authentication; both default to local

@@ -94,6 +94,22 @@ def make_server(tmp_path: Path, *, gui: bool = False):
     return server, backend
 
 
+def test_http_handler_workers_are_prewarmed_and_stopped(tmp_path: Path):
+    server, _ = make_server(tmp_path)
+    httpd = server._httpd
+    assert httpd is not None
+    try:
+        with httpd._worker_condition:
+            assert httpd._idle_worker_count >= 4
+        for _ in range(10):
+            assert request(server, "GET", "/health")[0] == 200
+    finally:
+        server.stop()
+        server.release_registration()
+    with httpd._worker_condition:
+        assert httpd._worker_count == 0
+
+
 def test_server_rejects_nonfinite_lifecycle_intervals(tmp_path: Path):
     analysis = AnalysisState()
     identity = InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib")

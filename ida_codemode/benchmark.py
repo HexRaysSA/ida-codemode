@@ -11,7 +11,6 @@ import importlib.metadata
 import json
 import math
 import platform
-import socket
 import statistics
 import sys
 import time
@@ -26,16 +25,10 @@ TRIVIAL_CODE = "result = 1"
 IDA_CALL_CODE = """\
 import ida_bytes
 import ida_ida
-import time
 _ea = ida_ida.inf_get_min_ea()
-_started = time.perf_counter_ns()
 for _index in range(__IDA_CALL_ITERATIONS__):
     ida_bytes.get_flags(_ea)
-{
-    "iterations": __IDA_CALL_ITERATIONS__,
-    "per_call_us": (time.perf_counter_ns() - _started)
-        / __IDA_CALL_ITERATIONS__ / 1000,
-}
+{"iterations": __IDA_CALL_ITERATIONS__}
 """
 LARGE_RESULT_CODE = """\
 [
@@ -96,6 +89,19 @@ def measure(
         result = operation()
         samples_ms.append((time.perf_counter_ns() - started) / 1_000_000)
     return summarize(samples_ms), result
+
+
+def measure_reported(
+    operation: Callable[[], float],
+    *,
+    iterations: int,
+    warmup: int,
+) -> dict[str, Any]:
+    """Summarize durations measured inside an operation with untimed cleanup."""
+
+    for _ in range(warmup):
+        operation()
+    return summarize([operation() for _ in range(iterations)])
 
 
 class Endpoint:
@@ -202,14 +208,22 @@ def benchmark(args: argparse.Namespace) -> dict[str, Any]:
         }
         metrics: dict[str, Any] = report["metrics"]
 
-        def fresh_tcp_connection() -> None:
-            sock = socket.create_connection(
-                (HOST, entry.port),
-                timeout=args.request_timeout,
-            )
-            sock.close()
+        def fresh_tcp_connection() -> float:
+            connection = endpoint.connection()
+            try:
+                started = time.perf_counter_ns()
+                connection.connect()
+                elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
+                # Complete one request outside the measured interval. Closing
+                # immediately after connect can outrun accept(), fill the small
+                # listener backlog in older servers, and benchmark Linux's
+                # one-second SYN retry rather than ordinary connection setup.
+                endpoint.request(connection, "GET", "/health")
+                return elapsed_ms
+            finally:
+                connection.close()
 
-        metrics["tcp_connect_fresh"], _ = measure(
+        metrics["tcp_connect_fresh"] = measure_reported(
             fresh_tcp_connection,
             iterations=args.iterations,
             warmup=args.warmup,
@@ -283,9 +297,12 @@ def benchmark(args: argparse.Namespace) -> dict[str, Any]:
             )
         finally:
             ida_connection.close()
-        ida_payload, ida_response_bytes = ida_response
+        _ida_payload, ida_response_bytes = ida_response
         ida_metric["response_bytes"] = ida_response_bytes
-        ida_metric["worker_result"] = ida_payload["result"]["result"]
+        ida_metric["workload"] = {
+            "operation": "ida_bytes.get_flags",
+            "calls_per_iteration": args.ida_call_iterations,
+        }
         metrics["execute_ida_get_flags_loop_reused_connection"] = ida_metric
 
         large_result_code = LARGE_RESULT_CODE.replace(
@@ -311,11 +328,37 @@ def benchmark(args: argparse.Namespace) -> dict[str, Any]:
             large_connection.close()
         _large_payload, large_response_bytes = large_response
         large_metric["response_bytes"] = large_response_bytes
+        large_metric["workload"] = {
+            "result_items": args.large_result_items,
+        }
         metrics["execute_large_json_reused_connection"] = large_metric
 
         return report
     finally:
         handle.close()
+
+
+def metric_label(name: str, metric: dict[str, Any]) -> str:
+    labels = {
+        "tcp_connect_fresh": "TCP connect (fresh connection)",
+        "health_fresh_connection": "GET /health (fresh connection)",
+        "health_reused_connection": "GET /health (reused connection)",
+        "execute_trivial_fresh_connection": ('execute "result = 1" (fresh connection)'),
+        "execute_trivial_reused_connection": (
+            'execute "result = 1" (reused connection)'
+        ),
+        "execute_trivial_database_handle": (
+            'DatabaseHandle.execute_python("result = 1")'
+        ),
+    }
+    if name == "execute_ida_get_flags_loop_reused_connection":
+        calls = metric["workload"]["calls_per_iteration"]
+        return f"{calls:,}-call ida_bytes.get_flags loop"
+    if name == "execute_large_json_reused_connection":
+        items = metric["workload"]["result_items"]
+        response_bytes = metric["response_bytes"]
+        return f"{items:,}-item JSON result ({response_bytes:,} byte response)"
+    return labels.get(name, name)
 
 
 def print_human(report: dict[str, Any]) -> None:
@@ -329,30 +372,28 @@ def print_human(report: dict[str, Any]) -> None:
         f"Python {instance['python_version'].split()[0]}, "
         f"{instance['backend']} pid {instance['pid']}"
     )
+    parameters = report["parameters"]
     print(f"  trace hook:   {instance['trace_installed']}")
-    print(f"  handle open:  {report['one_time']['handle_open_ms']:.3f} ms")
-    print()
+    print(f"  handle open (one time): {report['one_time']['handle_open_ms']:.3f} ms")
     print(
-        f"{'metric':48} {'n':>5} {'median':>10} {'p95':>10} "
-        f"{'mean':>10} {'min':>10} {'max':>10}"
+        f"  sampling:     {parameters['warmup']} warmups, then "
+        f"{parameters['iterations']} request samples "
+        f"({parameters['workload_iterations']} workload samples)"
     )
-    print("-" * 119)
+    print()
+    print("End-to-end latency; each sample is one complete operation/request")
+    print(
+        f"{'operation':70} {'samples':>7} {'median':>12} {'p95':>12} "
+        f"{'mean':>12} {'min':>12} {'max':>12}"
+    )
+    print("-" * 150)
     for name, metric in report["metrics"].items():
         print(
-            f"{name:48} {metric['iterations']:5d} "
-            f"{metric['median_ms']:9.3f}ms {metric['p95_ms']:9.3f}ms "
-            f"{metric['mean_ms']:9.3f}ms {metric['min_ms']:9.3f}ms "
-            f"{metric['max_ms']:9.3f}ms"
+            f"{metric_label(name, metric):70} {metric['iterations']:7d} "
+            f"{metric['median_ms']:9.3f} ms {metric['p95_ms']:9.3f} ms "
+            f"{metric['mean_ms']:9.3f} ms {metric['min_ms']:9.3f} ms "
+            f"{metric['max_ms']:9.3f} ms"
         )
-        if "worker_result" in metric:
-            worker_result = metric["worker_result"]
-            print(
-                f"  worker ida_bytes.get_flags: "
-                f"{worker_result['per_call_us']:.6f} us/call "
-                f"({worker_result['iterations']} iterations)"
-            )
-        if "response_bytes" in metric:
-            print(f"  response size: {metric['response_bytes']} bytes")
 
 
 def positive_int(value: str) -> int:
