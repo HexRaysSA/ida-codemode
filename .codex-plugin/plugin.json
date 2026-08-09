@@ -1,6 +1,6 @@
 {
   "name": "ida-mcp",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Code Mode MCP server for the ida-domain API.",
   "author": {
     "name": "Hex-Rays",
