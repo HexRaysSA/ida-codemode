@@ -1,20 +1,18 @@
 import ast
 import asyncio
 import builtins
+import ctypes
+import heapq
 import importlib
 import inspect
 import io
 import math
-import queue
-import sys
 import threading
 import time
 import traceback
 import warnings
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import asdict, is_dataclass
-from enum import Enum
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -67,34 +65,94 @@ class AnalysisState:
         }
 
 
-def to_jsonable(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, bool)):
-        return value
-    if isinstance(value, float):
-        # NaN and infinities are accepted by Python's encoder but are not JSON.
-        # Preserve them as readable values without putting invalid JSON on the
-        # versioned HTTP wire protocol.
-        return value if math.isfinite(value) else repr(value)
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Enum):
-        return value.value
-    if is_dataclass(value) and not isinstance(value, type):
-        return to_jsonable(asdict(value))
-    if isinstance(value, dict):
-        return {str(key): to_jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [to_jsonable(item) for item in value]
-    if hasattr(value, "__dict__"):
-        public = {
-            key: item for key, item in vars(value).items() if not key.startswith("_")
-        }
-        if public:
-            return to_jsonable(public)
-    return repr(value)
+class _OperationInterrupt(BaseException):
+    """Asynchronous exception used to stop Python code without tracing it."""
 
 
-async def _execute_user_code(
+# Code Mode runs on CPython through IDAPython. Injecting one private exception
+# into the executing thread keeps pure-Python loops cancellable without
+# installing a trace callback on every opcode. Use a void pointer so a null
+# value can undo the injection if CPython ever reports multiple matching thread
+# states (which should be impossible for a threading.get_ident() value).
+_set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
+_set_async_exc.argtypes = (ctypes.c_ulong, ctypes.c_void_p)
+_set_async_exc.restype = ctypes.c_int
+
+
+def _interrupt_thread(thread_id: int) -> bool:
+    count = _set_async_exc(thread_id, id(_OperationInterrupt))
+    if count > 1:
+        _set_async_exc(thread_id, None)
+        raise RuntimeError("CPython matched multiple Code Mode execution threads")
+    return count == 1
+
+
+class _DeadlineScheduler:
+    """One reusable daemon for execution deadlines across all runtimes."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._deadlines: list[tuple[float, int]] = []
+        self._callbacks: dict[int, Callable[[], None]] = {}
+        self._next_token = 0
+        self._thread: threading.Thread | None = None
+
+    def schedule(self, delay: float, callback: Callable[[], None]) -> int:
+        deadline = time.monotonic() + delay
+        with self._condition:
+            self._next_token += 1
+            token = self._next_token
+            self._callbacks[token] = callback
+            heapq.heappush(self._deadlines, (deadline, token))
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._run,
+                    name="ida-codemode-deadlines",
+                    daemon=True,
+                )
+                self._thread.start()
+            self._condition.notify()
+            return token
+
+    def cancel(self, token: int) -> None:
+        with self._condition:
+            if self._callbacks.pop(token, None) is not None:
+                self._condition.notify()
+
+    def _run(self) -> None:
+        while True:
+            callback: Callable[[], None] | None = None
+            with self._condition:
+                while callback is None:
+                    while (
+                        self._deadlines and self._deadlines[0][1] not in self._callbacks
+                    ):
+                        heapq.heappop(self._deadlines)
+                    if not self._deadlines:
+                        self._condition.wait()
+                        continue
+                    deadline, token = self._deadlines[0]
+                    delay = deadline - time.monotonic()
+                    if delay > 0:
+                        self._condition.wait(delay)
+                        continue
+                    heapq.heappop(self._deadlines)
+                    callback = self._callbacks.pop(token, None)
+            if callback is not None:
+                try:
+                    callback()
+                except BaseException as exc:  # noqa: BLE001 -- keep the scheduler alive
+                    warnings.warn(
+                        f"Code Mode deadline callback failed: {exc}",
+                        RuntimeWarning,
+                        stacklevel=1,
+                    )
+
+
+_deadline_scheduler = _DeadlineScheduler()
+
+
+def _execute_user_code(
     code: str,
     global_ns: dict[str, Any],
     runtime: dict[str, Any],
@@ -137,7 +195,7 @@ async def _execute_user_code(
     for name in ("run", "execute", "main"):
         candidate = namespace.get(name)
         if callable(candidate):
-            return await _invoke_callable(candidate, runtime)
+            return _invoke_callable(candidate, runtime)
     return namespace.get("result")
 
 
@@ -164,7 +222,7 @@ def _format_user_traceback(error: BaseException) -> str | None:
     )
 
 
-async def _invoke_callable(
+def _invoke_callable(
     function: Callable[..., Any],
     runtime: dict[str, Any],
 ) -> Any:
@@ -190,10 +248,7 @@ async def _invoke_callable(
             args.append(value)
         else:
             kwargs[parameter.name] = value
-    result = function(*args, **kwargs)
-    if inspect.isawaitable(result):
-        result = await result
-    return result
+    return function(*args, **kwargs)
 
 
 def _suppress_ida_domain_warnings() -> None:
@@ -268,6 +323,30 @@ class IDARuntime:
         self._active_generation = 0
         self._active_kind: str | None = None
         self._active_cancel_event: threading.Event | None = None
+        self._active_thread_id: int | None = None
+        self._active_interrupt_error: APIError | None = None
+
+    def _interrupt_active(
+        self,
+        generation: int,
+        kind: str,
+        error: APIError,
+    ) -> None:
+        """Interrupt the active native or Python operation exactly once."""
+
+        with self._active_lock:
+            if (
+                self._active_generation != generation
+                or self._active_kind != kind
+                or self._active_cancel_event is None
+                or self._active_interrupt_error is not None
+            ):
+                return
+            self._active_interrupt_error = error
+            self._active_cancel_event.set()
+            self.ida_kernwin.set_cancelled()
+            if self._active_thread_id is not None:
+                _interrupt_thread(self._active_thread_id)
 
     def _run_sync(
         self,
@@ -286,9 +365,7 @@ class IDARuntime:
                 "invalid_timeout",
                 "timeout must be a positive finite number",
             )
-        results: queue.Queue[tuple[bool, Any, str | None, str, str]] = queue.Queue(
-            maxsize=1
-        )
+        outcome: tuple[bool, Any, str | None, str, str] | None = None
 
         with self._operation_lock:
             cancel_event = threading.Event()
@@ -297,99 +374,97 @@ class IDARuntime:
                 generation = self._active_generation
                 self._active_kind = kind
                 self._active_cancel_event = cancel_event
+                self._active_thread_id = None
+                self._active_interrupt_error = None
 
             def invoke() -> int:
+                nonlocal outcome
                 old_batch: int | None = None
-                old_trace = sys.gettrace()
-                timer: threading.Timer | None = None
-                deadline = (
-                    time.monotonic() + effective_timeout
-                    if effective_timeout is not None
-                    else None
-                )
+                deadline_token: int | None = None
                 self.ida_kernwin.clr_cancelled()
                 stdout_capture = io.StringIO()
                 stderr_capture = io.StringIO()
 
-                def fire_native_cancel() -> None:
-                    # Keep the generation check and flag update under one lock.
-                    # The outer cleanup clears the flag only after changing the
-                    # active generation, preventing a late timer from poisoning
-                    # the following request.
-                    with self._active_lock:
-                        if (
-                            self._active_generation == generation
-                            and self._active_kind == kind
-                        ):
-                            self.ida_kernwin.set_cancelled()
-
-                trace_events = 0
-
-                def timeout_trace(frame: Any, event: str, arg: Any) -> Any:
-                    nonlocal trace_events
-                    # Line tracing cannot interrupt `while True: pass` because
-                    # every iteration remains on one source line. Opcode events
-                    # make arbitrary Python cancellable; sample them to keep the
-                    # tracing overhead reasonable.
-                    frame.f_trace_opcodes = True
-                    trace_events += 1
-                    if event == "opcode" and trace_events % 256:
-                        return timeout_trace
-                    if cancel_event.is_set():
-                        raise APIError(
-                            "operation_cancelled",
-                            f"{kind} was cancelled",
-                            status=409,
-                        )
-                    if deadline is not None and time.monotonic() >= deadline:
-                        assert effective_timeout is not None
-                        raise APIError(
+                def timeout_operation() -> None:
+                    assert effective_timeout is not None
+                    self._interrupt_active(
+                        generation,
+                        kind,
+                        APIError(
                             "operation_timeout",
                             f"{kind} timed out after {effective_timeout:.2f}s",
                             status=408,
-                        )
-                    return timeout_trace
+                        ),
+                    )
+
+                def call_function() -> Any:
+                    # Limit asynchronous interruption to user execution. Once
+                    # this function returns, timeout/cancel callbacks can no
+                    # longer replace an error while it is being marshalled.
+                    try:
+                        with self._active_lock:
+                            self._active_thread_id = threading.get_ident()
+                            pending_error = self._active_interrupt_error
+                        if pending_error is not None:
+                            raise pending_error
+                        if capture_output:
+                            with (
+                                redirect_stdout(stdout_capture),
+                                redirect_stderr(stderr_capture),
+                            ):
+                                return function()
+                        return function()
+                    finally:
+                        with self._active_lock:
+                            if self._active_generation == generation:
+                                self._active_thread_id = None
 
                 try:
                     if batch:
                         old_batch = self.idc.batch(1)
-                    if deadline is not None:
-                        assert effective_timeout is not None
-                        timer = threading.Timer(effective_timeout, fire_native_cancel)
-                        timer.daemon = True
-                        timer.start()
-                    sys.settrace(timeout_trace)
-                    if capture_output:
-                        with (
-                            redirect_stdout(stdout_capture),
-                            redirect_stderr(stderr_capture),
-                        ):
-                            result = function()
-                    else:
-                        result = function()
-                    results.put(
-                        (
-                            True,
-                            result,
-                            None,
-                            stdout_capture.getvalue(),
-                            stderr_capture.getvalue(),
+                    if effective_timeout is not None:
+                        deadline_token = _deadline_scheduler.schedule(
+                            effective_timeout,
+                            timeout_operation,
                         )
+                    result = call_function()
+                    outcome = (
+                        True,
+                        result,
+                        None,
+                        stdout_capture.getvalue(),
+                        stderr_capture.getvalue(),
+                    )
+                except _OperationInterrupt:
+                    with self._active_lock:
+                        error = self._active_interrupt_error
+                    if error is None:
+                        error = APIError(
+                            "operation_cancelled",
+                            f"{kind} was interrupted",
+                            status=409,
+                        )
+                    outcome = (
+                        False,
+                        error,
+                        None,
+                        stdout_capture.getvalue(),
+                        stderr_capture.getvalue(),
                     )
                 except BaseException as exc:  # noqa: BLE001 -- marshal any IDA callback failure
-                    results.put(
-                        (
-                            False,
-                            exc,
-                            _format_user_traceback(exc),
-                            stdout_capture.getvalue(),
-                            stderr_capture.getvalue(),
-                        )
+                    outcome = (
+                        False,
+                        exc,
+                        _format_user_traceback(exc),
+                        stdout_capture.getvalue(),
+                        stderr_capture.getvalue(),
                     )
                 finally:
-                    sys.settrace(old_trace)
-                    if timer is not None:
-                        timer.cancel()
+                    with self._active_lock:
+                        if self._active_generation == generation:
+                            self._active_thread_id = None
+                    if deadline_token is not None:
+                        _deadline_scheduler.cancel(deadline_token)
                     self.ida_kernwin.clr_cancelled()
                     if old_batch is not None:
                         self.idc.batch(old_batch)
@@ -397,22 +472,21 @@ class IDARuntime:
 
             try:
                 self.ida_kernwin.execute_sync(invoke, self.ida_kernwin.MFF_WRITE)
-                try:
-                    succeeded, value, formatted_traceback, stdout, stderr = (
-                        results.get_nowait()
-                    )
-                except queue.Empty as exc:
+                if outcome is None:
                     raise APIError(
                         "execute_sync_failed",
                         "IDA did not execute the synchronized request",
                         status=500,
-                    ) from exc
+                    )
+                succeeded, value, formatted_traceback, stdout, stderr = outcome
             finally:
                 with self._active_lock:
                     if self._active_generation == generation:
                         self._active_kind = None
                         self._active_cancel_event = None
-                # Defend against a timer racing with Timer.cancel().
+                        self._active_thread_id = None
+                        self._active_interrupt_error = None
+                # Defend against a timeout racing with Timer.cancel().
                 self.ida_kernwin.clr_cancelled()
 
         if succeeded:
@@ -446,14 +520,21 @@ class IDARuntime:
         ) from value
 
     def cancel_active(self) -> None:
-        """Request cooperative cancellation of the current IDA operation."""
+        """Request cancellation of the current IDA operation."""
 
         with self._active_lock:
-            cancel_event = self._active_cancel_event
-            if cancel_event is None:
-                return
-            cancel_event.set()
-            self.ida_kernwin.set_cancelled()
+            generation = self._active_generation
+            kind = self._active_kind
+        if kind is not None:
+            self._interrupt_active(
+                generation,
+                kind,
+                APIError(
+                    "operation_cancelled",
+                    f"{kind} was cancelled",
+                    status=409,
+                ),
+            )
 
     def execute_python(
         self,
@@ -470,8 +551,10 @@ class IDARuntime:
                 "__name__": "__ida_codemode_execute__",
                 **runtime,
             }
-            result = asyncio.run(_execute_user_code(code, global_ns, runtime))
-            return to_jsonable(result)
+            result = _execute_user_code(code, global_ns, runtime)
+            if inspect.isawaitable(result):
+                result = asyncio.run(result)
+            return result
 
         return self._run_sync(
             execute,

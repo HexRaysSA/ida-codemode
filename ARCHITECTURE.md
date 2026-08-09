@@ -207,8 +207,10 @@ globally as `db`, alongside the imported `ida_domain` package. Ordinary
 statements execute once, and a single or trailing expression becomes the
 result. As an alternative, code without a trailing
 expression may define `run(db)`, `execute(db)`, or `main(db)` for automatic
-invocation. Timeout tracing and IDA cancellation prevent one timed-out request
-from poisoning the next operation.
+invocation. Native IDA cancellation and a targeted asynchronous CPython
+exception interrupt both native work and pure-Python loops without installing a
+per-line or per-opcode trace hook. Generation checks prevent a late timeout from
+poisoning the next operation.
 
 ## Protocol contract and versioning
 
@@ -276,7 +278,10 @@ execution outcome is unknown.
 The execution rules (`db`/`ida_domain`, trailing-expression results, optional
 entry functions, JSON-compatible result conversion, output capture, and
 serialized IDA execution) and the SSE-driven managed shutdown semantics are
-also protocol behavior because clients observe them. Result conversion is
+also protocol behavior because clients observe them. JSON-safe results are
+encoded directly with the standard C-backed encoder after leaving IDA's main
+thread; uncommon unsupported values use a compatibility conversion fallback.
+Result conversion is
 recursive; notably, non-finite Python floats become the strings `nan`, `inf`,
 or `-inf` so the service never emits non-standard JSON numbers.
 

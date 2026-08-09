@@ -17,6 +17,7 @@ dependencies = [
 ida-codemode-mcp = "ida_codemode_mcp:cli"
 ida-codemode-dashboard = "ida_codemode_dashboard:cli"
 ida-codemode-worker = "ida_codemode.worker:main"
+ida-codemode-benchmark = "ida_codemode.benchmark:main"
 
 [dependency-groups]
 dev = [

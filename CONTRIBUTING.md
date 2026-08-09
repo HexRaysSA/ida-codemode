@@ -128,6 +128,37 @@ a numeric argument. MCP cancellation is handled concurrently: the tool sends a
 lease- and operation-scoped `/cancel_operation` control request, waits for IDA
 to unwind, and preserves the attached database handle.
 
+Latency-sensitive clients should aggregate work into one snippet rather than
+making one request per row or symbol. Each request requires one IDA main-thread
+handoff, though the handoff itself is normally only a few microseconds in an
+idle idalib worker. Return ordinary JSON-compatible dictionaries, lists, and
+scalars: they are encoded directly off IDA's main thread. Unsupported Python or
+IDA objects retain a slower compatibility-conversion fallback.
+
+## Performance benchmark
+
+Run the endpoint benchmark against an existing IDB to compare client-visible
+latency across machines or revisions:
+
+```bash
+uv run ida-codemode-benchmark /path/to/database.i64 \
+  --output benchmark.json
+```
+
+The script holds a real `DatabaseHandle` lease and reports fresh TCP connection
+cost, fresh and reused `/health`, fresh and reused trivial execution, the public
+`DatabaseHandle.execute_python` path, an in-worker `ida_bytes.get_flags` loop,
+and a roughly 35 KB JSON result. Timings include reading and decoding the HTTP
+response. Defaults are 20 warmups and 200 measured requests; use
+`--iterations`, `--warmup`, and `--workload-iterations` for quicker probes.
+`--no-spawn` requires an already-running GUI or worker, `--json` prints only the
+machine-readable schema-1 report, and `--output` preserves raw samples plus
+summary percentiles for regression tracking.
+
+Use the same IDB, backend, iteration counts, and otherwise-idle host when
+comparing reports. `handle_open_ms` may include worker startup and is deliberately
+kept separate from steady-state request metrics.
+
 ## Shared clients and lifecycle
 
 Each open MCP handle maintains an authenticated SSE lease. Multiple agents and

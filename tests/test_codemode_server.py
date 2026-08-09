@@ -8,7 +8,8 @@ from pathlib import Path
 
 from ida_codemode.http import POST_BODY_LIMIT
 from ida_codemode.registry import InstanceIdentity, load_registry_entry
-from ida_codemode.runtime import AnalysisState, to_jsonable
+from ida_codemode.runtime import AnalysisState
+from ida_codemode.serialization import to_jsonable
 from ida_codemode.server import CodeModeHTTPServer
 
 

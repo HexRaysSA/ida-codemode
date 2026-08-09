@@ -1,5 +1,4 @@
 import hmac
-import json
 import socketserver
 import zlib
 from collections.abc import Callable, Mapping
@@ -7,6 +6,8 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BufferedIOBase
 from urllib.parse import urlsplit
+
+from .serialization import dumps_json
 
 HOST = "127.0.0.1"
 POST_BODY_LIMIT = 4 * 1024 * 1024
@@ -33,7 +34,7 @@ def json_response(
 ) -> HTTPResponse:
     return HTTPResponse(
         status=status,
-        body=json.dumps(payload, allow_nan=False).encode("utf-8") + b"\n",
+        body=dumps_json(payload).encode("utf-8") + b"\n",
         headers=headers or {},
         after_send=after_send,
     )
