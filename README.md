@@ -53,7 +53,6 @@ Configure a regular stdio MCP server in your `mcp.json`:
     "ida": {
       "command": "uvx",
       "args": [
-        "--prerelease=allow",
         "--from",
         "ida-codemode@latest",
         "ida-codemode-mcp",

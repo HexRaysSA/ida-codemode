@@ -113,7 +113,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = "<1" },
-    { name = "ida-domain", specifier = ">=0.5.1.dev2" },
+    { name = "ida-domain", specifier = ">=0.5.1" },
     { name = "ida-hcli", specifier = ">=0.19.0" },
     { name = "idapro" },
     { name = "packaging" },
@@ -128,16 +128,16 @@ dev = [
 
 [[package]]
 name = "ida-domain"
-version = "0.5.1.dev2"
+version = "0.5.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "idapro" },
     { name = "packaging" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2f/8a/d8f8d51bc9541048c7cf914b8ae1212dd996a7a19fd60b95b1d795f65f87/ida_domain-0.5.1.dev2.tar.gz", hash = "sha256:64285f61d708aaedc20e115d2b55d3cf5578031d9055fab8e8a36ee07eccb631", size = 391539, upload-time = "2026-08-04T11:15:21.148Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/80/34/be087d3ea1c3a6573e0660cb5b40f0c4ade9ae5772cf1c5d98d52472d28b/ida_domain-0.5.1.tar.gz", hash = "sha256:c49f2c417047d882e954f651b50a709a3f27903b33ba533b794aa54d6536d16f", size = 396413, upload-time = "2026-08-10T13:32:48.45Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ae/5c/232f709fee42227e8849ff1734ff822d51a000eac9bf928071bb49af2e5c/ida_domain-0.5.1.dev2-py3-none-any.whl", hash = "sha256:89187eed1c6365751a578c2d887e51b31dd645904bc6aeac60ad472af2d9e3be", size = 198406, upload-time = "2026-08-04T11:15:19.792Z" },
+    { url = "https://files.pythonhosted.org/packages/27/78/9c698d818b0fddc6648f703a0821edeeb65b18404b43f556d249c5446c96/ida_domain-0.5.1-py3-none-any.whl", hash = "sha256:bfbb17c7d0cb2ed7d3f21342e1c8787f9018d5c2a94cdfd29e06537dd026a06d", size = 201275, upload-time = "2026-08-10T13:32:46.955Z" },
 ]
 
 [[package]]
