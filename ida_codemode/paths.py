@@ -25,7 +25,7 @@ def get_state_dir() -> Path:
     return get_idausr_dir() / "codemode"
 
 
-def find_console_script(name: str) -> str | None:
+def find_console_script(name: str) -> str:
     """Locate a pip-installed console script for the current interpreter.
 
     Inside IDA, ``sys.executable`` is the IDA binary, not a Python interpreter,
@@ -36,6 +36,9 @@ def find_console_script(name: str) -> str | None:
     Only script directories belonging to the current interpreter are searched.
     We never fall back to ``PATH``, which could resolve a same-named script from
     an unrelated environment running a different interpreter.
+
+    Raises ``FileNotFoundError`` listing every path that was tried if *name*
+    cannot be found.
     """
     dirs: list[str] = []
     scripts_dir = sysconfig.get_path("scripts")
@@ -45,12 +48,18 @@ def find_console_script(name: str) -> str | None:
         dirs.append(os.path.join(prefix, "Scripts" if os.name == "nt" else "bin"))
 
     exe_names = [f"{name}.exe", name] if os.name == "nt" else [name]
+    tried: list[str] = []
     for directory in dirs:
         for exe in exe_names:
             candidate = os.path.join(directory, exe)
+            tried.append(candidate)
             if os.path.isfile(candidate):
                 return candidate
-    return None
+    tried_list = "\n".join(f"  - {path}" for path in tried)
+    raise FileNotFoundError(
+        f"Could not find the {name!r} console script for this Python "
+        f"interpreter. Tried:\n{tried_list}"
+    )
 
 
 STATE_DIR = get_state_dir()

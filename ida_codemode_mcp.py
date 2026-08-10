@@ -16,7 +16,6 @@ import inspect
 import ipaddress
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -566,13 +565,10 @@ def _install_gui_plugin(project_dir: Path) -> None:
             if _gui_plugin_installed():
                 return
 
-            # Prefer the mandatory hcli dependency from this Python environment.
-            # The PATH fallback also supports manually packaged MCP launchers.
-            hcli = find_console_script("hcli") or shutil.which("hcli")
-            if hcli is None:
-                raise FileNotFoundError(
-                    "Could not find hcli; install it to enable the IDA GUI plugin"
-                )
+            # Use the mandatory hcli dependency from this Python environment.
+            # find_console_script raises FileNotFoundError (caught below) if
+            # it cannot be found.
+            hcli = find_console_script("hcli")
 
             command = [hcli, "plugin", "install", str(project_dir)]
             TRACE.emit(

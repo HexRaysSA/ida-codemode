@@ -659,28 +659,6 @@ def test_mcp_plugin_install_command_failure_does_not_raise(
     assert failure["stderr"] == "install failed"
 
 
-def test_mcp_plugin_install_uses_hcli_from_path(tmp_path: Path, monkeypatch) -> None:
-    captured: dict[str, object] = {}
-    hcli = str(tmp_path / "external" / "hcli")
-
-    def fake_run(
-        command: list[str], **kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
-        captured.update(command=command, **kwargs)
-        return subprocess.CompletedProcess(command, 0, "installed\n", "")
-
-    monkeypatch.setattr(mcp_app, "TRACE", SimpleNamespace(emit=lambda *_a, **_k: None))
-    monkeypatch.setattr(mcp_app, "_gui_plugin_installed", lambda: False)
-    monkeypatch.setattr(mcp_app, "find_console_script", lambda _name: None)
-    monkeypatch.setattr(mcp_app.shutil, "which", lambda name: hcli)
-    monkeypatch.setattr(mcp_app, "get_idausr_dir", lambda: tmp_path / "idausr")
-    monkeypatch.setattr(mcp_app.subprocess, "run", fake_run)
-
-    mcp_app._install_gui_plugin(tmp_path)
-
-    assert captured["command"] == [hcli, "plugin", "install", str(tmp_path)]
-
-
 def test_mcp_plugin_install_missing_hcli_does_not_raise(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -691,8 +669,14 @@ def test_mcp_plugin_install_missing_hcli_does_not_raise(
         SimpleNamespace(emit=lambda event, **fields: records.append((event, fields))),
     )
     monkeypatch.setattr(mcp_app, "_gui_plugin_installed", lambda: False)
-    monkeypatch.setattr(mcp_app, "find_console_script", lambda _name: None)
-    monkeypatch.setattr(mcp_app.shutil, "which", lambda _name: None)
+
+    def missing_hcli(name: str) -> str:
+        raise FileNotFoundError(
+            f"Could not find the {name!r} console script for this Python "
+            f"interpreter. Tried:\n  - /fake/bin/{name}"
+        )
+
+    monkeypatch.setattr(mcp_app, "find_console_script", missing_hcli)
     monkeypatch.setattr(mcp_app, "get_idausr_dir", lambda: tmp_path / "idausr")
     monkeypatch.setattr(
         mcp_app.subprocess,
@@ -703,7 +687,9 @@ def test_mcp_plugin_install_missing_hcli_does_not_raise(
     mcp_app._install_gui_plugin(tmp_path)
 
     assert [event for event, _fields in records] == ["plugin_install_failed"]
-    assert "Could not find hcli" in records[0][1]["error"]["message"]
+    message = records[0][1]["error"]["message"]
+    assert "Could not find the 'hcli' console script" in message
+    assert "/fake/bin/hcli" in message
 
 
 def test_mcp_plugin_install_thread_failure_does_not_raise(monkeypatch) -> None:

@@ -189,12 +189,10 @@ def spawn_worker(
         if os.path.exists(expected_idb)
         else source
     )
-    worker = find_console_script("ida-codemode-worker")
-    if worker is None:
-        raise ResolveError(
-            "Could not find the 'ida-codemode-worker' console script for this "
-            "Python. Ensure the ida-codemode package is installed."
-        )
+    try:
+        worker = find_console_script("ida-codemode-worker")
+    except FileNotFoundError as error:
+        raise ResolveError(str(error)) from error
     command = [
         worker,
         input_path,
