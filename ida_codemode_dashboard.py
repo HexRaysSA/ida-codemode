@@ -19,10 +19,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
+from ida_codemode.logs import LogArchiveError, open_log_archive
 from ida_codemode.paths import STATE_DIR
 
 DEFAULT_SESSIONS_DIR = STATE_DIR / "sessions"
@@ -30,6 +31,10 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8736
 
 SESSIONS_DIR = DEFAULT_SESSIONS_DIR
+ARCHIVE_PATH: Path | None = None
+ARCHIVE_PATH_MAP: dict[str, Path] = {}
+ARCHIVE_SESSION_AGENT_PATHS: dict[tuple[str, str], str] = {}
+ARCHIVE_SOURCE_PATHS: dict[Path, str] = {}
 
 _MIN_DT = datetime.min.replace(tzinfo=UTC)
 
@@ -106,6 +111,11 @@ def _format_cost(cost: float) -> str:
     if cost >= 0.01:
         return f"${cost:.3f}"
     return f"${cost:.4f}"
+
+
+def _path_name(value: str) -> str:
+    """Return a basename for paths recorded on either Unix or Windows."""
+    return PureWindowsPath(value).name if "\\" in value else Path(value).name
 
 
 # Per-1M-token USD pricing (input, output), sourced from the Claude API model
@@ -222,7 +232,7 @@ class SessionSummary:
         for target in self.targets:
             path = target.get("idb_path") or target.get("exe_path")
             if isinstance(path, str) and path:
-                names.append(Path(path).name)
+                names.append(_path_name(path))
         unique = list(dict.fromkeys(names))
         if not unique:
             return "No database opened"
@@ -326,6 +336,15 @@ def _add_target(summary: SessionSummary, value: object) -> None:
 
 
 def _resolve_agent_session_path(recorded: str, trace_path: Path) -> str:
+    if ARCHIVE_PATH is not None:
+        contextual = ARCHIVE_SESSION_AGENT_PATHS.get(
+            (str(trace_path.resolve()), recorded)
+        )
+        if contextual is not None:
+            return contextual
+        # Keep unresolved references visible, but never use the receiving
+        # machine's filesystem for paths that were not included in the ZIP.
+        return recorded
     if Path(recorded).is_file():
         return recorded
     resolved_root = SESSIONS_DIR.resolve()
@@ -629,6 +648,10 @@ def _e(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
+def _source_label() -> str:
+    return str(ARCHIVE_PATH or SESSIONS_DIR)
+
+
 def _page(title: str, body: str, subtitle: str = "", standalone: bool = False) -> str:
     heading = "ida-codemode dashboard"
     heading_html = (
@@ -636,7 +659,7 @@ def _page(title: str, body: str, subtitle: str = "", standalone: bool = False) -
         if standalone
         else f'<h1><a href="/">{_e(heading)}</a></h1>'
     )
-    sub = subtitle if (subtitle or standalone) else str(SESSIONS_DIR)
+    sub = subtitle if (subtitle or standalone) else _source_label()
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -829,7 +852,7 @@ def render_index() -> str:
         return _page(
             "ida-codemode dashboard",
             '<div class="empty">No sessions found in '
-            f"<code>{_e(str(SESSIONS_DIR))}</code>.<br>"
+            f"<code>{_e(_source_label())}</code>.<br>"
             "Open a database through the MCP server first.</div>",
         )
     rows = "".join(_summary_index_row(summary) for summary in summaries)
@@ -1111,8 +1134,9 @@ def render_session(name: str, *, export: bool = False) -> str | None:
     if totals["has_tokens"]:
         meta_rows.append(("Tokens", _totals_summary_html(totals)))
     if not export:
+        trace_path = ARCHIVE_SOURCE_PATHS.get(path.resolve(), str(path))
         meta_rows.insert(
-            0, ("Trace file", f'<span class="mono">{_e(str(path))}</span>')
+            0, ("Trace file", f'<span class="mono">{_e(trace_path)}</span>')
         )
     kv = "".join(
         f'<span class="k">{key}</span><span class="v">{value}</span>'
@@ -1799,8 +1823,12 @@ def _load_agent_items(
     Results are cached per (path, mtime, size) so the index — which loads the
     same shared transcript for many sessions — parses each file only once.
     """
-    path = Path(session_path)
-    if not path.is_file():
+    path = (
+        ARCHIVE_PATH_MAP.get(session_path)
+        if ARCHIVE_PATH is not None
+        else Path(session_path)
+    )
+    if path is None or not path.is_file():
         return [], {}, "unknown", _blank_totals()
 
     try:
@@ -1852,10 +1880,15 @@ def render_agent_session(session_path: str) -> str | None:
     known = _known_agent_sessions()
     if session_path not in known:
         return None
-    path = Path(session_path)
-    if not path.is_file():
+    source_path = Path(session_path)
+    path = (
+        ARCHIVE_PATH_MAP.get(session_path)
+        if ARCHIVE_PATH is not None
+        else source_path
+    )
+    if path is None or not path.is_file():
         body = (
-            '<div class="empty">Transcript no longer exists:<br>'
+            '<div class="empty">Transcript was not included or no longer exists:<br>'
             f"<code>{_e(session_path)}</code></div>"
         )
         return _page("missing transcript — ida-codemode", body)
@@ -1883,7 +1916,7 @@ def render_agent_session(session_path: str) -> str | None:
 
     body = f"""
 <div class="crumbs"><a href="/">sessions</a> / {_e(kind)} transcript</div>
-<h2><span class="badge {_e(kind)}">{_e(kind)}</span> {_e(path.name)}</h2>
+<h2><span class="badge {_e(kind)}">{_e(kind)}</span> {_e(_path_name(session_path))}</h2>
 <div class="kv">{kv}</div>
 <div class="toolbar">
   <button onclick="setAllDetails(true)">expand all</button>
@@ -1891,7 +1924,11 @@ def render_agent_session(session_path: str) -> str | None:
 </div>
 {transcript_html}
 """
-    return _page(f"{path.name} — ida-codemode", body, subtitle=f"{kind} session")
+    return _page(
+        f"{_path_name(session_path)} — ida-codemode",
+        body,
+        subtitle=f"{kind} session",
+    )
 
 
 # --------------------------------------------------------------------------
@@ -2020,7 +2057,10 @@ def serve(host: str, port: int, open_browser: bool = False) -> None:
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     url = f"http://{host}:{port}/"
     print(f"ida-codemode dashboard: {url}")
-    print(f"sessions directory: {SESSIONS_DIR}")
+    if ARCHIVE_PATH is not None:
+        print(f"sessions archive: {ARCHIVE_PATH}")
+    else:
+        print(f"sessions directory: {SESSIONS_DIR}")
     if open_browser:
         threading.Timer(0.3, webbrowser.open, args=(url,)).start()
     try:
@@ -2032,25 +2072,51 @@ def serve(host: str, port: int, open_browser: bool = False) -> None:
 
 
 def cli() -> int:
-    global SESSIONS_DIR
+    global ARCHIVE_PATH, ARCHIVE_PATH_MAP, ARCHIVE_SESSION_AGENT_PATHS
+    global ARCHIVE_SOURCE_PATHS, SESSIONS_DIR
     parser = argparse.ArgumentParser(
         prog="ida-codemode-dashboard",
         description="Web dashboard for ida-codemode semantic sessions",
     )
     parser.add_argument("--host", default=DEFAULT_HOST, help="Bind address")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Bind port")
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument(
         "--sessions-dir",
         type=Path,
-        default=DEFAULT_SESSIONS_DIR,
         help="Directory containing semantic session JSONL traces",
+    )
+    source.add_argument(
+        "--archive",
+        "--sessions-zip",
+        type=Path,
+        help="ZIP produced by ida-codemode-logs",
     )
     parser.add_argument(
         "--open", action="store_true", help="Open the dashboard in a browser"
     )
     args = parser.parse_args()
 
-    SESSIONS_DIR = args.sessions_dir.expanduser().resolve()
+    if args.archive is not None:
+        try:
+            with open_log_archive(args.archive) as archive:
+                ARCHIVE_PATH = archive.archive_path
+                ARCHIVE_PATH_MAP = archive.path_map
+                ARCHIVE_SESSION_AGENT_PATHS = archive.session_agent_paths
+                ARCHIVE_SOURCE_PATHS = archive.source_paths
+                SESSIONS_DIR = archive.sessions_dir
+                _AGENT_ITEMS_CACHE.clear()
+                serve(args.host, args.port, open_browser=args.open)
+        except (LogArchiveError, OSError) as exc:
+            parser.error(str(exc))
+        return 0
+
+    ARCHIVE_PATH = None
+    ARCHIVE_PATH_MAP = {}
+    ARCHIVE_SESSION_AGENT_PATHS = {}
+    ARCHIVE_SOURCE_PATHS = {}
+    SESSIONS_DIR = (args.sessions_dir or DEFAULT_SESSIONS_DIR).expanduser().resolve()
+    _AGENT_ITEMS_CACHE.clear()
     serve(args.host, args.port, open_browser=args.open)
     return 0
 

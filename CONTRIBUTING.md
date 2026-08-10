@@ -249,6 +249,36 @@ The dashboard provides:
 
 Only transcript paths referenced by semantic sessions may be served.
 
+## Portable log archives
+
+Create a support ZIP containing every local semantic session, each linked
+Claude, Codex, or Pi transcript, and every file under
+`<IDAUSR>/codemode/logs/`:
+
+```bash
+uv run ida-codemode-logs
+uv run ida-codemode-logs --output support.zip
+```
+
+Pass one or more semantic session files to collect only those sessions:
+
+```bash
+uv run ida-codemode-logs session-a.jsonl session-b.jsonl -o selected.zip
+```
+
+The ZIP contains `ida-codemode-logs.json`, a schema-versioned JSON table of
+contents mapping semantic and agent session paths to archive members. Missing
+linked transcripts are recorded in the TOC and reported as warnings.
+Operational logs are preserved beneath `logs/` without TOC entries because the
+dashboard does not resolve or render them. Open a bundle without accessing the
+receiving machine's transcript paths with:
+
+```bash
+uv run ida-codemode-dashboard --archive support.zip --open
+```
+
+`--sessions-zip` is an alias for `--archive`.
+
 ## Migrating pre-0.2 logs
 
 The one-shot migration utility intentionally remains a project script rather

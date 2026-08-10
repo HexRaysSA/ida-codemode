@@ -40,7 +40,8 @@ connection expresses one client's interest in an already-running database.
 | `ida_codemode/paths.py` | Resolves the shared state root from the environment and IDA defaults. |
 | `ida_codemode_mcp.py` | ZeroMCP tools/transports, error mapping, startup attachment, agent metadata, and semantic session tracing. |
 | `ida-codemode.ts` | Pi extension that starts the stdio MCP child, mirrors its tools with `ida_` names, attaches Pi transcript metadata, and applies Pi output truncation. |
-| `ida_codemode_dashboard.py` | Renders semantic session traces and linked Claude, Codex, or Pi transcripts. |
+| `ida_codemode_dashboard.py` | Renders semantic session traces and linked Claude, Codex, or Pi transcripts from the local state directory or a portable log ZIP. |
+| `ida_codemode/logs.py` | Builds and validates portable log ZIPs containing selected semantic sessions, linked agent transcripts, operational logs, and a JSON path-mapping TOC. |
 | `scripts/migrate_logs.py` | One-shot conversion of pre-0.2 operational/bridge logs into schema-1 semantic sessions. |
 
 ## State layout
@@ -425,6 +426,17 @@ referenced agent transcripts. It can also auto-detect the benchmark run layout,
 select Pi's active transcript branch, summarize available token/cost data, and
 export a self-contained session page. Its `/agent` route serves only transcript
 paths referenced by discoverable semantic sessions.
+
+`ida-codemode-logs` packages all local semantic sessions by default, or only
+explicitly named session files, together with every available linked agent
+transcript and every file under the operational `logs/` directory. The root
+`ida-codemode-logs.json` TOC records schema/version, checksums,
+original-to-archive path mappings, per-session transcript references, and
+missing references for semantic and agent sessions. Operational files are
+preserved under `logs/` without TOC entries. The dashboard validates checksums
+and extracts only TOC-listed session members into a private temporary directory
+when started with `--archive`; unresolved archive references are never read
+from the receiving machine's filesystem.
 
 ## Legacy migration
 
