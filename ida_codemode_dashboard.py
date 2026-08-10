@@ -311,12 +311,13 @@ def _record_session_fields(record: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _target_key(target: dict[str, Any]) -> tuple[Any, ...]:
-    return (
-        target.get("record_id"),
-        target.get("instance_id"),
-        target.get("idb_path"),
-    )
+def _targets_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    for key in ("instance_id", "record_id", "idb_path"):
+        left_value = left.get(key)
+        right_value = right.get(key)
+        if left_value and right_value and left_value == right_value:
+            return True
+    return False
 
 
 def _add_target(summary: SessionSummary, value: object) -> None:
@@ -327,9 +328,8 @@ def _add_target(summary: SessionSummary, value: object) -> None:
     target: dict[str, Any] = {str(key): item for key, item in raw_target.items()}
     if not any(target.get(key) for key in ("record_id", "instance_id", "idb_path")):
         return
-    key = _target_key(target)
     for index, existing in enumerate(summary.targets):
-        if _target_key(existing) == key:
+        if _targets_match(existing, target):
             summary.targets[index] = {**existing, **target}
             return
     summary.targets.append(dict(target))
@@ -546,6 +546,7 @@ table.sessions td:first-child a { word-break: break-all; }
 .badge.closed { color: var(--muted); }
 .badge.killed { color: var(--error); border-color: var(--error); opacity: 0.75; }
 .badge.error { color: var(--error); border-color: var(--error); }
+.badge.internal { color: var(--muted); border-style: dashed; }
 .muted { color: var(--muted); }
 .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
   font-size: 12px; }
@@ -556,6 +557,12 @@ table.sessions td:first-child a { word-break: break-all; }
 .card > .head .title { font-weight: 600; }
 .card > .head .ts { color: var(--muted); font-size: 12px; margin-left: auto; }
 .card > .body { padding: 12px; }
+.response-label { display: flex; gap: 8px; align-items: baseline; margin: 10px 0 4px;
+  color: var(--muted); font-size: 12px; }
+.response-label:first-child { margin-top: 0; }
+.execution-field { margin-top: 10px; }
+.execution-field > .name { color: var(--muted); font-weight: 600; margin-bottom: 2px; }
+.execution-field > .empty { color: var(--muted); font-style: italic; padding: 4px 0; }
 pre { background: var(--code-bg); border: 1px solid var(--border);
   border-radius: 6px; padding: 10px 12px; overflow-x: auto; margin: 8px 0;
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
@@ -592,11 +599,20 @@ details[open] > summary { margin-bottom: 4px; }
   opacity: 0.4; border-radius: 2px; }
 .transcript-item .msg { margin: 6px 0; }
 .transcript-item > details { margin: 6px 0; }
+.unsupported-event { border-left: 3px dashed var(--border); padding: 6px 10px;
+  background: var(--panel); border-radius: 4px; }
+.unsupported-event > summary { color: var(--text); }
+.unsupported-event > summary .ts { float: right; margin-left: 12px; }
 body.hide-transcript .transcript-item { display: none; }
-.toolbar { display: flex; gap: 12px; margin: 12px 0; font-size: 13px; }
+body.hide-unsupported .unsupported-event,
+body.hide-unsupported .unsupported-transcript-item { display: none; }
+.toolbar { display: flex; gap: 12px; margin: 12px 0; font-size: 13px;
+  align-items: center; flex-wrap: wrap; }
 .toolbar button { background: var(--panel); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px;
   cursor: pointer; font-size: 12px; }
+.toolbar label { display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+.token-note { color: var(--muted); font-size: 12px; margin: -4px 0 12px; }
 .empty { text-align: center; padding: 48px; color: var(--muted); }
 .crumbs { font-size: 13px; margin-bottom: 8px; color: var(--muted); }
 """
@@ -604,6 +620,9 @@ body.hide-transcript .transcript-item { display: none; }
 _PAGE_JS = """
 function setAllDetails(open) {
   document.querySelectorAll('details').forEach(function (d) { d.open = open; });
+}
+function setVisible(hiddenClass, visible) {
+  document.body.classList.toggle(hiddenClass, !visible);
 }
 function sortTable(table, col, th) {
   var tbody = table.tBodies[0];
@@ -725,6 +744,16 @@ def _json_block(value: object, collapsed_label: str | None = None) -> str:
     return (
         f"<details><summary>{_e(collapsed_label)} "
         f"({len(text):,} chars)</summary>{block}</details>"
+    )
+
+
+def _model_json_block(value: object, collapsed_label: str) -> str:
+    text = json.dumps(value, indent=2, ensure_ascii=False, default=str)
+    if len(text) <= 1500:
+        return f"<pre><code>{_e(text)}</code></pre>"
+    return (
+        f"<details><summary>{_e(collapsed_label)} "
+        f"({len(text):,} chars)</summary><pre><code>{_e(text)}</code></pre></details>"
     )
 
 
@@ -888,11 +917,76 @@ def _card(title: str, ts: datetime | None, body: str, extra_head: str = "") -> s
     )
 
 
-def _render_tool_card(
-    call: dict[str, Any],
-    response: dict[str, Any] | None,
-    response_ts: datetime | None,
-) -> str:
+def _call_id_badge(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        return ""
+    display = value if len(value) <= 12 else f"{value[:8]}…"
+    escaped = _e(value)
+    return (
+        f'<span class="badge mono" data-call-id="{escaped}" '
+        f'title="call_id: {escaped}">call {_e(display)}</span>'
+    )
+
+
+def _response_label(kind: str, text: str) -> str:
+    css = "internal" if kind == "internal" else "open"
+    return (
+        f'<div class="response-label"><span class="badge {css}">{_e(kind)}</span>'
+        f"{_e(text)}</div>"
+    )
+
+
+def _model_facing_error_payload(error: object) -> dict[str, Any]:
+    if not isinstance(error, dict):
+        message = str(error) or "Unknown error"
+    else:
+        message = str(error.get("message") or "Unknown error")
+        if error.get("type") == "RemoteError":
+            details = error.get("details")
+            if isinstance(details, dict):
+                sections = [message]
+                for label in ("stdout", "stderr", "traceback"):
+                    value = details.get(label)
+                    if isinstance(value, str) and value:
+                        sections.append(f"{label}:\n{value.rstrip()}")
+                message = "\n\n".join(sections)
+    return {
+        "content": [{"type": "text", "text": message}],
+        "isError": True,
+    }
+
+
+def _python_execution_result_html(output: object) -> str:
+    if not isinstance(output, dict):
+        return _model_json_block(output, "PythonExecutionResult returned to model")
+
+    parts: list[str] = []
+    for name in ("result", "stdout", "stderr"):
+        value = output.get(name)
+        if name in {"stdout", "stderr"} and (name not in output or value == ""):
+            continue
+        parts.append(
+            f'<div class="execution-field"><div class="name mono">{name}</div>'
+        )
+        if name not in output:
+            parts.append('<div class="empty">missing</div>')
+        elif isinstance(value, str):
+            if value:
+                parts.append(
+                    _text_block(
+                        value,
+                        label=f"{name} returned by MCP",
+                    )
+                )
+            else:
+                parts.append('<div class="empty">empty string</div>')
+        else:
+            parts.append(_model_json_block(value, f"{name} returned by MCP"))
+        parts.append("</div>")
+    return "".join(parts)
+
+
+def _render_tool_call_card(call: dict[str, Any], *, pending: bool) -> str:
     tool = str(call.get("tool", "?"))
     raw_arguments = call.get("input")
     arguments: dict[str, Any] = (
@@ -900,37 +994,87 @@ def _render_tool_card(
         if isinstance(raw_arguments, dict)
         else {}
     )
-    call_ts = _parse_ts(call.get("ts"))
-    duration = ""
-    if response is not None and isinstance(response.get("duration_ms"), (int, float)):
-        duration = _format_duration(float(response["duration_ms"]) / 1000)
-    elif call_ts and response_ts:
-        duration = _format_duration((response_ts - call_ts).total_seconds())
-    extra_head = f'<span class="muted">{_e(duration)}</span>' if duration else ""
-
     parts: list[str] = []
     if tool == "execute_python" and isinstance(arguments.get("code"), str):
         parts.append(_python_block(arguments["code"]))
         rest = {key: value for key, value in arguments.items() if key != "code"}
         if rest:
             parts.append(_json_block(rest, collapsed_label="arguments"))
+    elif (
+        tool == "reference"
+        and isinstance(arguments.get("query"), str)
+        and set(arguments) == {"query"}
+    ):
+        parts.append(
+            '<div class="execution-field"><div class="name mono">query</div>'
+            f'<div class="text">{_e(arguments["query"])}</div></div>'
+        )
     else:
         parts.append(_json_block(arguments, collapsed_label="arguments"))
 
-    badge = '<span class="badge muted">pending</span>'
-    if response is not None and response.get("event") == "tool_result":
+    state = "pending" if pending else "started"
+    badge = f'<span class="badge muted">{state}</span>'
+    call_ts = _parse_ts(call.get("ts"))
+    return _card(
+        f"{_e(tool)} {badge}",
+        call_ts,
+        "".join(parts),
+        _call_id_badge(call.get("call_id")),
+    )
+
+
+def _render_tool_response_card(
+    response: dict[str, Any], call: dict[str, Any] | None
+) -> str:
+    tool = str(response.get("tool") or (call or {}).get("tool") or "?")
+    response_ts = _parse_ts(response.get("ts"))
+    call_ts = _parse_ts((call or {}).get("ts"))
+    duration = ""
+    if isinstance(response.get("duration_ms"), (int, float)):
+        duration = _format_duration(float(response["duration_ms"]) / 1000)
+    elif call_ts and response_ts:
+        duration = _format_duration((response_ts - call_ts).total_seconds())
+    duration_html = f'<span class="muted">{_e(duration)}</span>' if duration else ""
+    call_id = response.get("call_id") or (call or {}).get("call_id")
+    extra_head = _call_id_badge(call_id) + duration_html
+
+    parts: list[str] = []
+    if response.get("event") == "tool_result":
         badge = '<span class="badge open">ok</span>'
         output = response.get("output")
-        if tool == "reference" and isinstance(output, str):
+        if tool == "execute_python":
+            parts.append(
+                _response_label(
+                    "MCP result",
+                    "PythonExecutionResult fields; agent clients may truncate before model ingestion",
+                )
+            )
+            parts.append(_python_execution_result_html(output))
+        elif tool == "reference" and isinstance(output, str):
+            parts.append(_response_label("model-facing", "text tool result"))
             parts.append(_text_block(output, 800, "reference result"))
         elif output is not None:
-            parts.append(_json_block(output, collapsed_label="result"))
-    elif response is not None:
+            parts.append(_response_label("model-facing", "structured tool result"))
+            parts.append(_model_json_block(output, "tool result returned to model"))
+    else:
         badge = '<span class="badge error">error</span>'
         error = response.get("error")
-        parts.append(_json_block(error, collapsed_label="error"))
+        parts.append(
+            _response_label(
+                "model-facing",
+                "MCP error JSON; no PythonExecutionResult was returned",
+            )
+        )
+        parts.append(
+            _model_json_block(
+                _model_facing_error_payload(error),
+                "MCP error returned to model",
+            )
+        )
+        parts.append(_response_label("internal", "server diagnostic metadata"))
+        parts.append(_json_block(error, collapsed_label="internal error diagnostic"))
 
-    return _card(f"{_e(tool)} {badge}", call_ts, "".join(parts), extra_head)
+    return _card(f"{_e(tool)} {badge}", response_ts, "".join(parts), extra_head)
 
 
 _LIFECYCLE_EVENTS = {
@@ -949,39 +1093,90 @@ _LIFECYCLE_EVENTS = {
 }
 
 
-def _render_event_card(event: str, record: dict[str, Any], ts: datetime | None) -> str:
+def _render_event_card(
+    event: str,
+    record: dict[str, Any],
+    ts: datetime | None,
+    call_id: str | None = None,
+) -> str:
+    linked_call_id = record.get("call_id") or call_id
     details = {
         key: value
         for key, value in record.items()
-        if key not in {"schema", "ts", "event", "session", "mcp_server_id"}
+        if key not in {"schema", "ts", "event", "session", "mcp_server_id", "call_id"}
     }
-    return _card(_e(event), ts, _json_block(details) if details else "")
+    return _card(
+        _e(event),
+        ts,
+        _json_block(details) if details else "",
+        _call_id_badge(linked_call_id),
+    )
+
+
+def _enclosing_call_id(
+    ts: datetime | None,
+    calls: dict[str, dict[str, Any]],
+    responses: dict[str, dict[str, Any]],
+) -> str | None:
+    if ts is None:
+        return None
+    candidates: list[str] = []
+    for call_id, call in calls.items():
+        response = responses.get(call_id)
+        if response is None:
+            continue
+        call_ts = _parse_ts(call.get("ts"))
+        response_ts = _parse_ts(response.get("ts"))
+        if (
+            call_ts is not None
+            and response_ts is not None
+            and call_ts <= ts <= response_ts
+        ):
+            candidates.append(call_id)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _add_session_timeline(
     records: list[dict[str, Any]],
     add_event: Callable[[datetime | None, str], None],
 ) -> None:
-    responses: dict[str, tuple[dict[str, Any], datetime | None]] = {}
-    for record in records:
-        if record.get("event") not in {"tool_result", "tool_error"}:
-            continue
-        call_id = record.get("call_id")
-        if isinstance(call_id, str):
-            responses[call_id] = (record, _parse_ts(record.get("ts")))
+    calls = {
+        record["call_id"]: record
+        for record in records
+        if record.get("event") == "tool_call" and isinstance(record.get("call_id"), str)
+    }
+    responses = {
+        record["call_id"]: record
+        for record in records
+        if record.get("event") in {"tool_result", "tool_error"}
+        and isinstance(record.get("call_id"), str)
+    }
+    completed_call_ids = set(responses)
 
     for record in records:
         event = record.get("event")
         ts = _parse_ts(record.get("ts"))
         if event == "tool_call":
-            response, response_ts = responses.get(
-                str(record.get("call_id")), (None, None)
+            call_id = record.get("call_id")
+            add_event(
+                ts,
+                _render_tool_call_card(
+                    record,
+                    pending=not (
+                        isinstance(call_id, str) and call_id in completed_call_ids
+                    ),
+                ),
             )
-            add_event(ts, _render_tool_card(record, response, response_ts))
         elif event in {"tool_result", "tool_error"}:
-            continue
+            call_id = record.get("call_id")
+            call = calls.get(call_id) if isinstance(call_id, str) else None
+            add_event(ts, _render_tool_response_card(record, call))
         elif event in _LIFECYCLE_EVENTS:
-            add_event(ts, _render_event_card(str(event), record, ts))
+            linked_call_id = _enclosing_call_id(ts, calls, responses)
+            add_event(
+                ts,
+                _render_event_card(str(event), record, ts, linked_call_id),
+            )
         elif event is not None:
             # Catch-all so an event type we don't explicitly know about yet
             # still shows up on the timeline instead of being silently dropped.
@@ -1026,14 +1221,15 @@ def _in_window(
 def _interleave_transcript(
     summary: SessionSummary,
     add_event: Callable[[datetime | None, str], None],
-) -> int:
+) -> tuple[int, int]:
     """Add linked-transcript conversation items to the timeline, in time order.
 
     IDA calls are skipped because they already appear as session events. Other
     agent tool calls remain visible so the inline transcript is complete.
-    Returns the count added.
+    Returns total and unsupported-event counts.
     """
     added = 0
+    unsupported = 0
     for _kind, session_path in _summary_agent_sessions(summary):
         lower, upper = _transcript_window(summary, summary.path, session_path)
         items, _meta, _kind, _totals = _load_agent_items(session_path)
@@ -1044,9 +1240,16 @@ def _interleave_transcript(
                 and _codemode_tool_name(item.tool_name) is not None
             ) or not _in_window(item.ts, lower, upper):
                 continue
-            add_event(item.ts, f'<div class="transcript-item">{item.html}</div>')
+            unsupported_class = (
+                " unsupported-transcript-item" if item.category == "event" else ""
+            )
+            add_event(
+                item.ts,
+                f'<div class="transcript-item{unsupported_class}">{item.html}</div>',
+            )
             added += 1
-    return added
+            unsupported += item.category == "event"
+    return added, unsupported
 
 
 def _session_usage(summary: SessionSummary) -> dict[str, Any]:
@@ -1075,7 +1278,8 @@ def _totals_summary_html(totals: dict[str, Any]) -> str:
     parts = [
         f"in {_format_tokens(totals['input'])}",
         f"out {_format_tokens(totals['output'])}",
-        f"cached {_format_tokens(totals['cache_read'])}",
+        f"cache read {_format_tokens(totals['cache_read'])}",
+        f"cache write {_format_tokens(totals['cache_write'])}",
     ]
     if totals["cost_available"]:
         parts.append(_format_cost(totals["cost"]))
@@ -1103,7 +1307,7 @@ def render_session(name: str, *, export: bool = False) -> str | None:
         sequence += 1
 
     _add_session_timeline(records, add_event)
-    transcript_count = _interleave_transcript(summary, add_event)
+    transcript_count, unsupported_count = _interleave_transcript(summary, add_event)
     events.sort(key=lambda item: (item[0], item[1]))
 
     agents = " ".join(
@@ -1160,8 +1364,15 @@ def render_session(name: str, *, export: bool = False) -> str | None:
     ]
     if transcript_count:
         controls.append(
-            "<button onclick=\"document.body.classList.toggle('hide-transcript')\">"
-            f"toggle transcript ({transcript_count})</button>"
+            '<label><input type="checkbox" checked '
+            "onchange=\"setVisible('hide-transcript', this.checked)\"> "
+            f"transcript ({transcript_count})</label>"
+        )
+    if unsupported_count:
+        controls.append(
+            '<label><input type="checkbox" checked '
+            "onchange=\"setVisible('hide-unsupported', this.checked)\"> "
+            f"unsupported events ({unsupported_count})</label>"
         )
     if not export:
         controls.append(
@@ -1172,11 +1383,19 @@ def render_session(name: str, *, export: bool = False) -> str | None:
         if export
         else f'<div class="crumbs"><a href="/">sessions</a> / {_e(name)}</div>'
     )
+    token_note = (
+        '<p class="token-note">Token usage reflects what the agent sent to the '
+        "model; cached input is listed separately, and agent clients may truncate "
+        "or save large MCP results before model ingestion.</p>"
+        if totals["has_tokens"]
+        else ""
+    )
     body = f"""
 {crumbs}
 <h2>{_e(summary.display_target)} <span class="muted mono">{_e(summary.session_id)}</span> {_status_badge(summary)}</h2>
 <div class="kv">{kv}</div>
 <div class="toolbar">{"".join(controls)}</div>
+{token_note}
 {"".join(item[2] for item in events)}
 """
     return _page(
@@ -1331,13 +1550,128 @@ def _tool_result_text(content: object) -> str:
 _SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 
 
+def _claude_backgrounded_result(text: str) -> bool:
+    return "moved to the background as task" in text.lower()
+
+
+def _claude_truncated_result(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        "exceeds maximum allowed tokens" in lowered
+        and "output has been saved to" in lowered
+    )
+
+
 @dataclass
 class TranscriptItem:
     ts: datetime | None
-    category: str  # "user" | "assistant" | "thinking" | "tool"
+    category: str  # user | assistant | thinking | tool | status | event
     html: str
     usage: dict[str, Any] | None = None  # attached once per source record
     tool_name: str | None = None
+
+
+def _message_content_types_supported(
+    content: object, supported: set[str], *, allow_text: bool = False
+) -> bool:
+    if isinstance(content, str):
+        return allow_text
+    if not isinstance(content, list):
+        return False
+    return all(
+        isinstance(part, dict) and part.get("type") in supported for part in content
+    )
+
+
+def _claude_record_supported(record: dict[str, Any]) -> bool:
+    record_type = record.get("type")
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return False
+    content = message.get("content")
+    if record_type == "user":
+        return _message_content_types_supported(
+            content, {"text", "tool_result"}, allow_text=True
+        )
+    if record_type == "assistant":
+        return _message_content_types_supported(
+            content, {"text", "thinking", "tool_use"}
+        )
+    return False
+
+
+def _pi_record_supported(record: dict[str, Any]) -> bool:
+    record_type = record.get("type")
+    if record_type in {"session", "model_change"}:
+        return True
+    if record_type != "message":
+        return False
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return False
+    role = message.get("role")
+    content = message.get("content")
+    if role == "toolResult":
+        return True
+    if role == "user":
+        return _message_content_types_supported(content, {"text"}, allow_text=True)
+    if role == "assistant":
+        return _message_content_types_supported(
+            content, {"text", "thinking", "toolCall"}
+        )
+    return False
+
+
+def _codex_record_supported(record: dict[str, Any]) -> bool:
+    record_type = record.get("type")
+    if record_type in {"session_meta", "turn_context"}:
+        return True
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    payload_type = payload.get("type")
+    if record_type == "event_msg":
+        return payload_type in {
+            "user_message",
+            "agent_message",
+            "agent_reasoning",
+            "mcp_tool_call_end",
+            "token_count",
+        }
+    if record_type == "response_item":
+        return payload_type in {"function_call", "function_call_output"}
+    return False
+
+
+def _unsupported_agent_item(
+    record: dict[str, Any], ts: datetime, kind: str
+) -> TranscriptItem:
+    labels = [str(record.get("type") or "unknown")]
+    payload = record.get("payload")
+    attachment = record.get("attachment")
+    if isinstance(payload, dict) and payload.get("type"):
+        labels.append(str(payload["type"]))
+    elif isinstance(attachment, dict) and attachment.get("type"):
+        labels.append(str(attachment["type"]))
+    elif record.get("operation"):
+        labels.append(str(record["operation"]))
+    message = record.get("message")
+    if isinstance(message, dict) and message.get("role") not in {
+        None,
+        record.get("type"),
+    }:
+        labels.append(str(message["role"]))
+
+    raw = json.dumps(record, indent=2, ensure_ascii=False, default=str)
+    event_name = " · ".join(labels)
+    event_html = (
+        '<details class="unsupported-event"><summary>'
+        '<span class="badge internal">unsupported</span> '
+        f"{_e(kind)} · {_e(event_name)}"
+        f'<span class="ts">{_e(_format_ts(ts))}</span></summary>'
+        f"<pre><code>{_e(raw)}</code></pre></details>"
+    )
+    return TranscriptItem(ts, "event", event_html)
 
 
 def _usage_line(usage: dict[str, Any]) -> str:
@@ -1345,9 +1679,12 @@ def _usage_line(usage: dict[str, Any]) -> str:
         f"in {_format_tokens(usage.get('input', 0))}",
         f"out {_format_tokens(usage.get('output', 0))}",
     ]
-    cached = usage.get("cache_read", 0)
-    if cached:
-        parts.append(f"cached {_format_tokens(cached)}")
+    cache_read = usage.get("cache_read", 0)
+    if cache_read:
+        parts.append(f"cache read {_format_tokens(cache_read)}")
+    cache_write = usage.get("cache_write", 0)
+    if cache_write:
+        parts.append(f"cache write {_format_tokens(cache_write)}")
     cost = usage.get("cost")
     if cost is not None:
         parts.append(_format_cost(cost))
@@ -1356,14 +1693,20 @@ def _usage_line(usage: dict[str, Any]) -> str:
 
 def _claude_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, str]]:
     tool_results: dict[str, object] = {}
+    tool_names: dict[str, str] = {}
     for record in records:
-        if record.get("type") != "user":
-            continue
         content = record.get("message", {}).get("content")
         if not isinstance(content, list):
             continue
         for item in content:
-            if isinstance(item, dict) and item.get("type") == "tool_result":
+            if not isinstance(item, dict):
+                continue
+            if record.get("type") == "assistant" and item.get("type") == "tool_use":
+                tool_use_id = item.get("id")
+                tool_name = item.get("name")
+                if isinstance(tool_use_id, str) and isinstance(tool_name, str):
+                    tool_names[tool_use_id] = tool_name
+            elif record.get("type") == "user" and item.get("type") == "tool_result":
                 tool_use_id = item.get("tool_use_id")
                 if isinstance(tool_use_id, str):
                     tool_results[tool_use_id] = item.get("content")
@@ -1374,6 +1717,8 @@ def _claude_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, 
         record_type = record.get("type")
         ts = _parse_ts(record.get("timestamp"))
         sidechain = "sidechain" if record.get("isSidechain") else ""
+        if ts is not None and not _claude_record_supported(record):
+            items.append(_unsupported_agent_item(record, ts, "claude"))
 
         if not meta and record_type in ("user", "assistant"):
             for key in ("sessionId", "cwd", "version", "gitBranch"):
@@ -1402,6 +1747,39 @@ def _claude_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, 
                             _message_bubble(
                                 "user", "user", _render_markdownish(text), ts, sidechain
                             ),
+                        )
+                    )
+            if isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict) or item.get("type") != "tool_result":
+                        continue
+                    result_text = _tool_result_text(item.get("content"))
+                    if _claude_backgrounded_result(result_text):
+                        tag = "backgrounded"
+                    elif _claude_truncated_result(result_text):
+                        tag = "truncated by agent"
+                    else:
+                        continue
+                    tool_use_id = item.get("tool_use_id")
+                    tool_name = (
+                        tool_names.get(tool_use_id, "tool")
+                        if isinstance(tool_use_id, str)
+                        else "tool"
+                    )
+                    if sidechain:
+                        tag += " · sidechain"
+                    items.append(
+                        TranscriptItem(
+                            ts,
+                            "status",
+                            _message_bubble(
+                                _tool_display_name(tool_name),
+                                "toolcall",
+                                _render_markdownish(result_text),
+                                ts,
+                                tag,
+                            ),
+                            tool_name=tool_name,
                         )
                     )
         elif record_type == "assistant":
@@ -1446,7 +1824,11 @@ def _claude_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, 
                     tool_use_id = item.get("id")
                     if tool_use_id in tool_results:
                         result_text = _tool_result_text(tool_results[tool_use_id])
-                        if result_text.strip():
+                        if (
+                            result_text.strip()
+                            and not _claude_backgrounded_result(result_text)
+                            and not _claude_truncated_result(result_text)
+                        ):
                             body_parts.append(_text_block(result_text, 700, "result"))
                     record_items.append(
                         TranscriptItem(
@@ -1564,6 +1946,8 @@ def _pi_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, str]
     for record in records:
         record_type = record.get("type")
         ts = _parse_ts(record.get("timestamp"))
+        if ts is not None and not _pi_record_supported(record):
+            items.append(_unsupported_agent_item(record, ts, "pi"))
 
         if record_type == "session":
             for key in ("id", "cwd", "version", "parentSession"):
@@ -1685,6 +2069,8 @@ def _codex_items(records: list[dict]) -> tuple[list[TranscriptItem], dict[str, s
         record_type = record.get("type")
         ts = _parse_ts(record.get("timestamp"))
         payload = record.get("payload") or {}
+        if ts is not None and not _codex_record_supported(record):
+            items.append(_unsupported_agent_item(record, ts, "codex"))
 
         if record_type == "session_meta":
             for key in ("session_id", "cwd", "cli_version", "model_provider"):
@@ -1875,6 +2261,10 @@ def _load_agent_items(
             if item.usage:
                 _add_usage(totals, item.usage)
 
+    # Agent files can append queued/background records after later-timestamped
+    # events. Keep both recognized and fallback items in timestamp order.
+    items.sort(key=lambda item: item.ts or _MIN_DT)
+
     models = _agent_models(records, kind)
     if models:
         meta["model"] = ", ".join(models)
@@ -1905,6 +2295,7 @@ def render_agent_session(session_path: str) -> str | None:
 
     items, meta, kind, totals = _load_agent_items(session_path)
     transcript_html = "".join(item.html for item in items)
+    unsupported_count = sum(item.category == "event" for item in items)
 
     related = "".join(
         f'<a href="/session/{quote(_session_route_name(s.path))}">{_e(s.display_target)} '
@@ -1924,6 +2315,13 @@ def render_agent_session(session_path: str) -> str | None:
     if not transcript_html:
         transcript_html = '<div class="empty">No renderable messages found.</div>'
 
+    unsupported_control = (
+        '<label><input type="checkbox" checked '
+        "onchange=\"setVisible('hide-unsupported', this.checked)\"> "
+        f"unsupported events ({unsupported_count})</label>"
+        if unsupported_count
+        else ""
+    )
     body = f"""
 <div class="crumbs"><a href="/">sessions</a> / {_e(kind)} transcript</div>
 <h2><span class="badge {_e(kind)}">{_e(kind)}</span> {_e(_path_name(session_path))}</h2>
@@ -1931,6 +2329,7 @@ def render_agent_session(session_path: str) -> str | None:
 <div class="toolbar">
   <button onclick="setAllDetails(true)">expand all</button>
   <button onclick="setAllDetails(false)">collapse all</button>
+  {unsupported_control}
 </div>
 {transcript_html}
 """

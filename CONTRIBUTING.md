@@ -217,8 +217,10 @@ The trace contains:
 - GUI or idalib record identity and worker log path;
 - Claude, Codex, Pi, and `IDA_CODEMODE_ID` session metadata.
 
-Tool calls and results are paired by `call_id`. Shared worker operational logs
-are linked through `record_id`.
+Tool calls and results are paired by `call_id`; the dashboard shows the same
+short call ID on both cards and exposes the full value in the badge tooltip and
+`data-call-id` attribute. Shared worker operational logs are linked through
+`record_id`.
 
 Claude and Codex use the bundled `PreToolUse` hook to inject transcript paths as
 hidden `_meta` values. The MCP server removes `_meta` from public arguments and
@@ -241,10 +243,21 @@ The dashboard provides:
   traces without MCP tool or linked-agent activity are hidden);
 - running, closed, or killed status;
 - all GUI and idalib targets used in one session;
-- paired tool-call timelines with highlighted Python code;
+- chronological tool-call and completion events with shared call-ID badges;
+  database lifecycle events emitted inside a call carry the same badge;
+- highlighted Python code and compact single-value `reference` queries;
+- MCP `PythonExecutionResult` fields with string values rendered as unescaped
+  text and empty stdout/stderr omitted; agent-side truncation notices show when
+  the complete MCP result was not inserted into model context;
+- model-facing MCP error payloads separated from clearly marked internal
+  diagnostic metadata;
 - logged reference output and structured errors;
-- interleaved Claude, Codex, or Pi transcript activity;
-- token and estimated cost summaries where available;
+- interleaved Claude, Codex, or Pi transcript activity with visibility
+  checkboxes for the transcript and unsupported events;
+- timestamped unsupported agent records as collapsed raw-JSON events rather
+  than silently dropping them;
+- token and estimated cost summaries, including separate cache-read and
+  cache-write counts, where available;
 - self-contained HTML export.
 
 Only transcript paths referenced by semantic sessions may be served.

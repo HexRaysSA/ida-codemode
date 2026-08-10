@@ -1126,6 +1126,27 @@ def test_mcp_session_trace_metadata(tmp_path: Path, monkeypatch) -> None:
     assert trace.records[2][1]["instance_id"] == "test-instance"
 
 
+def test_database_event_inherits_active_trace_call_id(monkeypatch) -> None:
+    records: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        mcp_app,
+        "TRACE",
+        SimpleNamespace(emit=lambda event, **fields: records.append((event, fields))),
+    )
+
+    token = mcp_app._TRACE_CALL_ID.set("tool-call-id")
+    try:
+        mcp_app._trace_database_event("database_opened", {"instance_id": "instance-1"})
+    finally:
+        mcp_app._TRACE_CALL_ID.reset(token)
+
+    assert len(records) == 1
+    event, fields = records[0]
+    assert event == "database_opened"
+    assert fields["instance_id"] == "instance-1"
+    assert fields["call_id"] == "tool-call-id"
+
+
 def test_list_databases_uses_idb_when_gui_executable_is_missing(tmp_path: Path) -> None:
     registry_dir = REGISTRY_DIR
     idb_path = tmp_path / "open.i64"

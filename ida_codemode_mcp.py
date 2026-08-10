@@ -25,6 +25,7 @@ import traceback
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
+from contextvars import ContextVar
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -147,6 +148,9 @@ class _TraceLogger:
 
 
 TRACE = _TraceLogger()
+_TRACE_CALL_ID: ContextVar[str | None] = ContextVar(
+    "ida_codemode_trace_call_id", default=None
+)
 
 
 def _session_fields() -> dict[str, Any]:
@@ -254,6 +258,9 @@ def _trace_database_event(event: str, fields: dict[str, Any]) -> None:
     error = fields.get("error")
     if isinstance(error, Exception):
         fields["error"] = _error_fields(error)
+    call_id = _TRACE_CALL_ID.get()
+    if call_id is not None:
+        fields.setdefault("call_id", call_id)
     TRACE.emit(event, session=_session_fields(), **fields)
 
 
@@ -363,33 +370,41 @@ def tool(func: Callable[P, R]) -> Callable[P, R]:
         @wraps(func)
         async def traced_async(*args: P.args, **kwargs: P.kwargs) -> Any:
             name, call_id, session, started = start_trace(args, kwargs)
+            token = _TRACE_CALL_ID.set(call_id)
             try:
-                result = await func(*args, **kwargs)
-            except asyncio.CancelledError:
-                TRACE.emit(
-                    "tool_cancelled",
-                    call_id=call_id,
-                    tool=name,
-                    session=session,
-                    duration_ms=round((time.monotonic() - started) * 1000, 3),
-                )
-                raise
-            except Exception as error:  # noqa: BLE001 - traced tool boundary
-                trace_error(error, name, call_id, session, started)
-            trace_result(result, name, call_id, session, started)
-            return result
+                try:
+                    result = await func(*args, **kwargs)
+                except asyncio.CancelledError:
+                    TRACE.emit(
+                        "tool_cancelled",
+                        call_id=call_id,
+                        tool=name,
+                        session=session,
+                        duration_ms=round((time.monotonic() - started) * 1000, 3),
+                    )
+                    raise
+                except Exception as error:  # noqa: BLE001 - traced tool boundary
+                    trace_error(error, name, call_id, session, started)
+                trace_result(result, name, call_id, session, started)
+                return result
+            finally:
+                _TRACE_CALL_ID.reset(token)
 
         return mcp.tool(traced_async)  # type: ignore[return-value]
 
     @wraps(func)
     def traced(*args: P.args, **kwargs: P.kwargs) -> R:
         name, call_id, session, started = start_trace(args, kwargs)
+        token = _TRACE_CALL_ID.set(call_id)
         try:
-            result = func(*args, **kwargs)
-        except Exception as error:  # noqa: BLE001 - traced tool boundary
-            trace_error(error, name, call_id, session, started)
-        trace_result(result, name, call_id, session, started)
-        return result
+            try:
+                result = func(*args, **kwargs)
+            except Exception as error:  # noqa: BLE001 - traced tool boundary
+                trace_error(error, name, call_id, session, started)
+            trace_result(result, name, call_id, session, started)
+            return result
+        finally:
+            _TRACE_CALL_ID.reset(token)
 
     return mcp.tool(traced)
 

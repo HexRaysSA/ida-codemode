@@ -406,7 +406,8 @@ event. `mcp_started` records the optional `--agent` label, while
 `mcp_initialized` records the MCP client's `clientInfo` and `_meta`. Tool
 activity is represented by `tool_call`, `tool_result`, and `tool_error`, paired
 by `call_id`. Database binding events contain MCP-local and registry identity,
-including the worker operational log path.
+including the worker operational log path, and inherit the active `call_id`
+when emitted during a tool invocation.
 
 The Claude and Codex `PreToolUse` hooks and the Pi extension attach transcript
 paths as hidden `_meta` fields. The MCP adapter promotes those fields into
@@ -419,13 +420,18 @@ Semantic tracing remains at the MCP layer because only that layer can observe
 `reference`, list operations, resolution failures, and agent metadata. Worker
 logs are operational and correlate through `record_id` and timestamps.
 
-The dashboard reads the semantic session schema. It pairs calls and results,
-renders executed Python and reference output, lists all database targets and
-best-effort transcript model names, and interleaves non-IDA activity from
-referenced agent transcripts. It can also auto-detect the benchmark run layout,
-select Pi's active transcript branch, summarize available token/cost data, and
-export a self-contained session page. Its `/agent` route serves only transcript
-paths referenced by discoverable semantic sessions.
+The dashboard reads the semantic session schema. It correlates calls and
+results by ID while rendering each at its own timestamp, links enclosed legacy
+database events to their unambiguous call interval, renders executed Python and
+reference output, distinguishes MCP results and model-facing errors from
+internal diagnostic metadata, lists all database targets and best-effort
+transcript model names, and interleaves non-IDA activity from referenced agent
+transcripts. Timestamped agent records outside the recognized Claude, Codex, and
+Pi event shapes are retained as collapsed raw-JSON fallback events instead of
+being silently discarded. The dashboard can also auto-detect the benchmark run
+layout, select Pi's active transcript branch, summarize available token/cost
+data, and export a self-contained session page. Its `/agent` route serves only
+transcript paths referenced by discoverable semantic sessions.
 
 `ida-codemode-logs` packages all local semantic sessions by default, or only
 explicitly named session files, together with every available linked agent

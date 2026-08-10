@@ -66,6 +66,156 @@ class TranscriptTests(unittest.TestCase):
         )
         self.assertIn("ida · execute_python", "".join(item.html for item in items))
 
+    def test_claude_backgrounded_mcp_call_is_a_timed_status(self) -> None:
+        tool_name = "mcp__plugin_ida-mcp_ida__execute_python"
+        backgrounded = (
+            'MCP tool "plugin:ida-mcp:ida/execute_python" is still running after '
+            "120s. It was moved to the background as task task-123 and keeps running."
+        )
+        records = [
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "claude-call",
+                            "name": tool_name,
+                            "input": {"code": "result = 1"},
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:02:01Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "claude-call",
+                            "content": [{"type": "text", "text": backgrounded}],
+                        }
+                    ],
+                },
+            },
+        ]
+
+        items, _meta = dashboard._claude_items(records)
+
+        self.assertEqual([item.category for item in items], ["tool", "status"])
+        self.assertNotIn("moved to the background", items[0].html)
+        self.assertIn("moved to the background", items[1].html)
+        self.assertIn("backgrounded", items[1].html)
+        self.assertEqual(items[1].tool_name, tool_name)
+        self.assertEqual(items[1].ts, dashboard._parse_ts("2026-01-01T00:02:01Z"))
+
+    def test_claude_result_truncation_is_a_timed_status(self) -> None:
+        tool_name = "mcp__plugin_ida-mcp_ida__execute_python"
+        notice = (
+            "Error: result (235,663 characters) exceeds maximum allowed tokens. "
+            "Output has been saved to C:\\tmp\\execute_python.json."
+        )
+        records = [
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "claude-call",
+                            "name": tool_name,
+                            "input": {"code": "result = 1"},
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:02Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "claude-call",
+                            "content": notice,
+                        }
+                    ],
+                },
+            },
+        ]
+
+        items, _meta = dashboard._claude_items(records)
+
+        self.assertEqual([item.category for item in items], ["tool", "status"])
+        self.assertNotIn("maximum allowed tokens", items[0].html)
+        self.assertIn("maximum allowed tokens", items[1].html)
+        self.assertIn("truncated by agent", items[1].html)
+
+    def test_unknown_timestamped_events_render_for_supported_agents(self) -> None:
+        unknown_ts = "2026-01-01T00:00:02Z"
+        cases = [
+            (
+                dashboard._claude_items,
+                [
+                    {
+                        "type": "queue-operation",
+                        "operation": "enqueue",
+                        "timestamp": unknown_ts,
+                        "content": "claude queued notification",
+                    },
+                    {"type": "mode", "mode": "default"},
+                ],
+                "claude · queue-operation · enqueue",
+                "claude queued notification",
+            ),
+            (
+                dashboard._pi_items,
+                [
+                    {
+                        "type": "custom-pi-event",
+                        "timestamp": unknown_ts,
+                        "value": "pi unknown value",
+                    },
+                    {"type": "untimed-pi-event"},
+                ],
+                "pi · custom-pi-event",
+                "pi unknown value",
+            ),
+            (
+                dashboard._codex_items,
+                [
+                    {
+                        "type": "event_msg",
+                        "timestamp": unknown_ts,
+                        "payload": {
+                            "type": "custom_codex_event",
+                            "value": "codex unknown value",
+                        },
+                    },
+                    {"type": "untimed-codex-event"},
+                ],
+                "codex · event_msg · custom_codex_event",
+                "codex unknown value",
+            ),
+        ]
+
+        for parser, records, label, raw_value in cases:
+            with self.subTest(label=label):
+                items, _meta = parser(records)
+                self.assertEqual(len(items), 1)
+                self.assertEqual(items[0].category, "event")
+                self.assertEqual(items[0].ts, dashboard._parse_ts(unknown_ts))
+                self.assertIn("unsupported", items[0].html)
+                self.assertIn(label, items[0].html)
+                self.assertIn(raw_value, items[0].html)
+
     def test_transcript_cache_replaces_changed_file_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "pi.jsonl"
@@ -167,8 +317,278 @@ class SessionTimelineTests(unittest.TestCase):
         self.assertIn("some_future_event", events[0])
         self.assertIn("unhandled but should still show up", events[0])
 
+    def test_reference_query_renders_without_collapsed_arguments(self) -> None:
+        html = dashboard._render_tool_call_card(
+            {
+                "ts": "2026-01-01T00:00:00Z",
+                "event": "tool_call",
+                "call_id": "reference-call",
+                "tool": "reference",
+                "input": {"query": "EntryInfo attributes"},
+            },
+            pending=False,
+        )
+        self.assertIn('<div class="name mono">query</div>', html)
+        self.assertIn("EntryInfo attributes", html)
+        self.assertNotIn("<summary>arguments", html)
+
+    def test_database_lifecycle_event_links_to_enclosing_open_call(self) -> None:
+        call_id = "open-call-id"
+        events: list[str] = []
+        dashboard._add_session_timeline(
+            [
+                {
+                    "ts": "2026-01-01T00:00:00Z",
+                    "event": "tool_call",
+                    "call_id": call_id,
+                    "tool": "open_database",
+                    "input": {"path": "/tmp/sample"},
+                },
+                {
+                    "ts": "2026-01-01T00:00:01Z",
+                    "event": "database_opened",
+                    "target": {"instance_id": "instance-1"},
+                },
+                {
+                    "ts": "2026-01-01T00:00:02Z",
+                    "event": "tool_result",
+                    "call_id": call_id,
+                    "tool": "open_database",
+                    "output": {"instance_id": "instance-1"},
+                },
+            ],
+            lambda _ts, html: events.append(html),
+        )
+        self.assertEqual(len(events), 3)
+        lifecycle = next(event for event in events if "database_opened" in event)
+        self.assertIn(f'data-call-id="{call_id}"', lifecycle)
+
 
 class SemanticSessionTests(unittest.TestCase):
+    def test_partial_tool_target_merges_with_database_event_target(self) -> None:
+        summary = dashboard.SessionSummary(Path("trace.jsonl"), "trace", 0)
+        dashboard._add_target(
+            summary,
+            {
+                "instance_id": "instance-1",
+                "record_id": "record-1",
+                "idb_path": "/tmp/sample.i64",
+                "backend": "idalib",
+            },
+        )
+        dashboard._add_target(
+            summary,
+            {
+                "instance_id": "instance-1",
+                "backend": "idalib",
+                "status": "current",
+            },
+        )
+        self.assertEqual(len(summary.targets), 1)
+        self.assertEqual(summary.targets[0]["idb_path"], "/tmp/sample.i64")
+        self.assertEqual(summary.targets[0]["status"], "current")
+
+    def test_tool_completion_distinguishes_model_facing_and_internal_data(self) -> None:
+        result = {
+            "result": "line one\nline two",
+            "stdout": "seven\neight\n",
+            "stderr": "",
+        }
+        call = {
+            "event": "tool_call",
+            "tool": "execute_python",
+            "call_id": "call-id",
+            "ts": "2026-01-01T00:00:00Z",
+        }
+        success_html = dashboard._render_tool_response_card(
+            {
+                "event": "tool_result",
+                "tool": "execute_python",
+                "call_id": "call-id",
+                "ts": "2026-01-01T00:00:01Z",
+                "output": result,
+            },
+            call,
+        )
+        self.assertIn("MCP result", success_html)
+        self.assertIn("PythonExecutionResult fields", success_html)
+        for field in ("result", "stdout"):
+            self.assertIn(f'<div class="name mono">{field}</div>', success_html)
+        self.assertNotIn('<div class="name mono">stderr</div>', success_html)
+        self.assertIn("line one\nline two", success_html)
+        self.assertNotIn(r"line one\nline two", success_html)
+        self.assertIn("seven\neight\n", success_html)
+        self.assertNotIn(r"seven\neight\n", success_html)
+        self.assertNotIn("empty string", success_html)
+        self.assertNotIn("internal", success_html)
+
+        error = {
+            "type": "RemoteError",
+            "message": "user failure",
+            "traceback": "internal server traceback",
+            "code": "execution_failed",
+            "status": 400,
+            "details": {
+                "stdout": "partial output\n",
+                "traceback": "user-code traceback\n",
+            },
+        }
+        self.assertEqual(
+            dashboard._model_facing_error_payload(error),
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "user failure\n\nstdout:\npartial output\n\n"
+                            "traceback:\nuser-code traceback"
+                        ),
+                    }
+                ],
+                "isError": True,
+            },
+        )
+        error_html = dashboard._render_tool_response_card(
+            {
+                "event": "tool_error",
+                "tool": "execute_python",
+                "call_id": "call-id",
+                "ts": "2026-01-01T00:00:01Z",
+                "error": error,
+            },
+            call,
+        )
+        self.assertIn(
+            "MCP error JSON; no PythonExecutionResult was returned", error_html
+        )
+        self.assertIn("server diagnostic metadata", error_html)
+        self.assertIn("internal error diagnostic", error_html)
+        self.assertLess(error_html.index("model-facing"), error_html.index("internal"))
+
+    def test_session_timeline_interleaves_claude_background_status(self) -> None:
+        def write(path: Path, records: list[dict[str, object]]) -> None:
+            path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            sessions_dir = Path(directory)
+            transcript = sessions_dir / "claude.jsonl"
+            trace = sessions_dir / "trace.jsonl"
+            tool_name = "mcp__plugin_ida-mcp_ida__execute_python"
+            write(
+                transcript,
+                [
+                    {
+                        "type": "assistant",
+                        "timestamp": "2026-01-01T00:00:01Z",
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "claude-call",
+                                    "name": tool_name,
+                                    "input": {"code": "result = 1"},
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "type": "user",
+                        "timestamp": "2026-01-01T00:02:01Z",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "claude-call",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": (
+                                                "It was moved to the background as "
+                                                "task task-123 and keeps running."
+                                            ),
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "type": "queue-operation",
+                        "operation": "enqueue",
+                        "timestamp": "2026-01-01T00:02:31Z",
+                        "content": "queued failure notification",
+                    },
+                ],
+            )
+            session = {"claude_session_path": str(transcript)}
+            semantic_call_id = "0123456789abcdef0123456789abcdef"
+            write(
+                trace,
+                [
+                    {
+                        "schema": 1,
+                        "ts": "2026-01-01T00:00:00Z",
+                        "event": "mcp_started",
+                        "mcp_server_id": "trace",
+                        "agent": "claude",
+                        "session": session,
+                    },
+                    {
+                        "schema": 1,
+                        "ts": "2026-01-01T00:00:01Z",
+                        "event": "tool_call",
+                        "mcp_server_id": "trace",
+                        "call_id": semantic_call_id,
+                        "tool": "execute_python",
+                        "input": {"code": "result = 1"},
+                        "session": session,
+                    },
+                    {
+                        "schema": 1,
+                        "ts": "2026-01-01T00:03:01Z",
+                        "event": "tool_error",
+                        "mcp_server_id": "trace",
+                        "call_id": semantic_call_id,
+                        "tool": "execute_python",
+                        "duration_ms": 180000,
+                        "error": {"message": "late failure"},
+                        "session": session,
+                    },
+                ],
+            )
+
+            original = dashboard.SESSIONS_DIR
+            dashboard.SESSIONS_DIR = sessions_dir
+            dashboard._AGENT_ITEMS_CACHE.clear()
+            try:
+                page = dashboard.render_session(trace.name)
+            finally:
+                dashboard.SESSIONS_DIR = original
+                dashboard._AGENT_ITEMS_CACHE.clear()
+
+        assert page is not None
+        call_position = page.index(
+            'execute_python <span class="badge muted">started</span>'
+        )
+        background_position = page.index("moved to the background")
+        unsupported_position = page.index("queued failure notification")
+        result_position = page.index("late failure")
+        self.assertLess(call_position, background_position)
+        self.assertLess(background_position, unsupported_position)
+        self.assertLess(unsupported_position, result_position)
+        self.assertEqual(page.count(f'data-call-id="{semantic_call_id}"'), 2)
+        self.assertEqual(page.count("call 01234567…"), 2)
+        self.assertIn("MCP error JSON; no PythonExecutionResult was returned", page)
+        self.assertIn("server diagnostic metadata", page)
+        self.assertIn('type="checkbox" checked', page)
+        self.assertIn("transcript (", page)
+        self.assertIn("unsupported events (1)", page)
+
     def test_dashboard_host_policy_blocks_loopback_dns_rebinding(self) -> None:
         for host in ("localhost:8736", "127.0.0.1:8736", "[::1]:8736"):
             self.assertTrue(dashboard._dashboard_host_allowed("127.0.0.1", host))
