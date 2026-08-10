@@ -1882,9 +1882,7 @@ def render_agent_session(session_path: str) -> str | None:
         return None
     source_path = Path(session_path)
     path = (
-        ARCHIVE_PATH_MAP.get(session_path)
-        if ARCHIVE_PATH is not None
-        else source_path
+        ARCHIVE_PATH_MAP.get(session_path) if ARCHIVE_PATH is not None else source_path
     )
     if path is None or not path.is_file():
         body = (

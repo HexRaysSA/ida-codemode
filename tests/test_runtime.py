@@ -22,7 +22,10 @@ def test_execute_user_code_preserves_repl_namespace() -> None:
 
     assert _execute_user_code("offset = 40", namespace, runtime) is None
     assert _execute_user_code("offset + 2", namespace, runtime) == 42
-    assert _execute_user_code("def add(value): return offset + value", namespace, runtime) is None
+    assert (
+        _execute_user_code("def add(value): return offset + value", namespace, runtime)
+        is None
+    )
     assert _execute_user_code("offset = 41", namespace, runtime) is None
     assert _execute_user_code("add(1)", namespace, runtime) == 42
 

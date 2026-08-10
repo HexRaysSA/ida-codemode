@@ -231,9 +231,10 @@ def _write_file(
     digest = hashlib.sha256()
     size = 0
     try:
-        with source.open("rb") as input_file, archive.open(
-            _zip_info(archive_path), "w"
-        ) as output_file:
+        with (
+            source.open("rb") as input_file,
+            archive.open(_zip_info(archive_path), "w") as output_file,
+        ):
             while chunk := input_file.read(1024 * 1024):
                 output_file.write(chunk)
                 digest.update(chunk)
@@ -294,7 +295,9 @@ def create_log_archive(
         raise LogArchiveError("output path cannot be a linked agent session")
 
     missing = tuple(
-        MissingAgentSession(session.source_path, reference.kind, reference.recorded_path)
+        MissingAgentSession(
+            session.source_path, reference.kind, reference.recorded_path
+        )
         for session in session_sources
         for reference in session.agent_sessions
         if reference.source_path is None
@@ -304,9 +307,10 @@ def create_log_archive(
     file_entries: list[dict[str, Any]] = []
     try:
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w+b") as archive_file, zipfile.ZipFile(
-            archive_file, "w", allowZip64=True
-        ) as archive:
+        with (
+            os.fdopen(fd, "w+b") as archive_file,
+            zipfile.ZipFile(archive_file, "w", allowZip64=True) as archive,
+        ):
             for session in session_sources:
                 size, digest = _write_file(
                     archive, session.source_path, session.archive_path
@@ -425,9 +429,7 @@ def _load_toc(archive: zipfile.ZipFile) -> dict[str, Any]:
     if not isinstance(toc, dict):
         raise LogArchiveError(f"{TOC_NAME} must contain a JSON object")
     if toc.get("format") != ARCHIVE_FORMAT or toc.get("schema") != ARCHIVE_SCHEMA:
-        raise LogArchiveError(
-            f"unsupported log archive format/schema in {TOC_NAME}"
-        )
+        raise LogArchiveError(f"unsupported log archive format/schema in {TOC_NAME}")
     return toc
 
 
@@ -441,7 +443,9 @@ def _extract_member(
     try:
         info = archive.getinfo(member)
     except KeyError as exc:
-        raise LogArchiveError(f"archive is missing file listed in TOC: {member}") from exc
+        raise LogArchiveError(
+            f"archive is missing file listed in TOC: {member}"
+        ) from exc
     if info.is_dir() or info.file_size != expected_size:
         raise LogArchiveError(f"size mismatch for archive member: {member}")
 
@@ -497,7 +501,9 @@ def _extract_log_archive(archive_path: Path, root: Path) -> LogArchiveView:
                 raise LogArchiveError(f"invalid file size in {TOC_NAME}")
             if not isinstance(digest, str) or not _HASH_RE.fullmatch(digest):
                 raise LogArchiveError(f"invalid file checksum in {TOC_NAME}")
-            expected_parent = "sessions" if kind == "semantic_session" else "agent-sessions"
+            expected_parent = (
+                "sessions" if kind == "semantic_session" else "agent-sessions"
+            )
             member_path = PurePosixPath(member)
             if len(member_path.parts) != 2 or member_path.parts[0] != expected_parent:
                 raise LogArchiveError(f"invalid {kind} archive path: {member}")
@@ -541,7 +547,9 @@ def _extract_log_archive(archive_path: Path, root: Path) -> LogArchiveView:
                 or file_entry is None
                 or file_entry[0] != source
             ):
-                raise LogArchiveError(f"session table does not match files table: {member}")
+                raise LogArchiveError(
+                    f"session table does not match files table: {member}"
+                )
             listed_sessions.add(member)
             raw_agents = raw_session.get("agent_sessions")
             if not isinstance(raw_agents, list):
@@ -554,7 +562,9 @@ def _extract_log_archive(archive_path: Path, root: Path) -> LogArchiveView:
                 agent_source = raw_agent.get("source_path")
                 agent_member = raw_agent.get("archive_path")
                 if kind not in _AGENT_KINDS or not isinstance(recorded, str):
-                    raise LogArchiveError(f"invalid agent session reference in {TOC_NAME}")
+                    raise LogArchiveError(
+                        f"invalid agent session reference in {TOC_NAME}"
+                    )
                 if agent_source is None and agent_member is None:
                     continue
                 if not isinstance(agent_source, str):

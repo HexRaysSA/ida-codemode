@@ -26,9 +26,7 @@ class RecordingBackend:
         lease_id: str | None = None,
         persist_globals: bool = False,
     ):
-        self.calls.append(
-            ("execute_python", code, timeout, lease_id, persist_globals)
-        )
+        self.calls.append(("execute_python", code, timeout, lease_id, persist_globals))
         return {"code": code}
 
     def cancel_active(self) -> None:
@@ -280,9 +278,7 @@ def test_compressed_request_body(tmp_path: Path):
         assert response.status == 200
         response.read()
         connection.close()
-        assert backend.calls == [
-            ("execute_python", "lambda: 7", None, None, False)
-        ]
+        assert backend.calls == [("execute_python", "lambda: 7", None, None, False)]
     finally:
         server.stop()
         server.release_registration()
@@ -310,9 +306,7 @@ def test_chunked_framing_browser_gate_and_size_limit(tmp_path: Path):
         )
         assert status == 200
         assert json.loads(response_body)["result"] == {"code": "lambda: 9"}
-        assert backend.calls == [
-            ("execute_python", "lambda: 9", None, None, False)
-        ]
+        assert backend.calls == [("execute_python", "lambda: 9", None, None, False)]
 
         status, _ = raw_request(
             server,
@@ -463,12 +457,15 @@ def test_execute_state_is_scoped_to_and_released_with_lease(tmp_path: Path):
         )
         assert status == 200
         assert payload["result"] == {"lease_id": "scoped"}
-        assert request(
-            server,
-            "POST",
-            "/release_lease",
-            {"lease_id": "scoped"},
-        )[0] == 200
+        assert (
+            request(
+                server,
+                "POST",
+                "/release_lease",
+                {"lease_id": "scoped"},
+            )[0]
+            == 200
+        )
         deadline = time.monotonic() + 1
         while ("release_session", "scoped") not in backend.calls:
             assert time.monotonic() < deadline

@@ -101,7 +101,9 @@ def _dashboard_archive(view):
 
 
 class LogArchiveTests(unittest.TestCase):
-    def test_archive_contains_toc_selected_sessions_and_deduplicated_agent(self) -> None:
+    def test_archive_contains_toc_selected_sessions_and_deduplicated_agent(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             agent = root / "agent" / "pi.jsonl"
@@ -158,9 +160,7 @@ class LogArchiveTests(unittest.TestCase):
             self.assertEqual(result.operational_log_count, 2)
             with zipfile.ZipFile(output) as archive:
                 toc = json.loads(archive.read(TOC_NAME))
-                self.assertEqual(
-                    archive.read("logs/worker.log"), b"worker output\n"
-                )
+                self.assertEqual(archive.read("logs/worker.log"), b"worker output\n")
                 self.assertEqual(
                     archive.read("logs/legacy/bridge.log"), b"bridge output\n"
                 )
@@ -179,9 +179,7 @@ class LogArchiveTests(unittest.TestCase):
             _write_jsonl(second, _semantic_records("second"))
             _write_jsonl(sessions / "not-a-session.jsonl", [{"type": "session"}])
 
-            all_result = create_log_archive(
-                root / "all.zip", sessions_dir=sessions
-            )
+            all_result = create_log_archive(root / "all.zip", sessions_dir=sessions)
             selected_result = create_log_archive(root / "one.zip", [second])
 
             self.assertEqual(all_result.session_count, 2)
@@ -224,7 +222,9 @@ class LogArchiveTests(unittest.TestCase):
 
             with open_log_archive(output) as view, _dashboard_archive(view):
                 summaries = dashboard._scan_sessions()
-                self.assertEqual([summary.session_id for summary in summaries], ["portable"])
+                self.assertEqual(
+                    [summary.session_id for summary in summaries], ["portable"]
+                )
                 logical_agent_path = next(
                     path
                     for _kind, path in dashboard._summary_agent_sessions(summaries[0])
@@ -257,8 +257,7 @@ class LogArchiveTests(unittest.TestCase):
             with open_log_archive(output) as view, _dashboard_archive(view):
                 summary = dashboard._scan_sessions()[0]
                 logical_agent_path = next(
-                    path
-                    for _kind, path in dashboard._summary_agent_sessions(summary)
+                    path for _kind, path in dashboard._summary_agent_sessions(summary)
                 )
                 items, _meta, kind, _totals = dashboard._load_agent_items(
                     logical_agent_path
