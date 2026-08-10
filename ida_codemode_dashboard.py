@@ -933,6 +933,31 @@ def _render_tool_card(
     return _card(f"{_e(tool)} {badge}", call_ts, "".join(parts), extra_head)
 
 
+_LIFECYCLE_EVENTS = {
+    "mcp_started",
+    "mcp_initialized",
+    "mcp_stopped",
+    "database_opened",
+    "database_reused",
+    "database_disconnected",
+    "database_saved",
+    "database_released",
+    "database_release_error",
+    "plugin_install_started",
+    "plugin_install_succeeded",
+    "plugin_install_failed",
+}
+
+
+def _render_event_card(event: str, record: dict[str, Any], ts: datetime | None) -> str:
+    details = {
+        key: value
+        for key, value in record.items()
+        if key not in {"schema", "ts", "event", "session", "mcp_server_id"}
+    }
+    return _card(_e(event), ts, _json_block(details) if details else "")
+
+
 def _add_session_timeline(
     records: list[dict[str, Any]],
     add_event: Callable[[datetime | None, str], None],
@@ -955,25 +980,12 @@ def _add_session_timeline(
             add_event(ts, _render_tool_card(record, response, response_ts))
         elif event in {"tool_result", "tool_error"}:
             continue
-        elif event in {
-            "mcp_started",
-            "mcp_initialized",
-            "mcp_stopped",
-            "database_opened",
-            "database_reused",
-            "database_disconnected",
-            "database_saved",
-            "database_released",
-            "database_release_error",
-        }:
-            details = {
-                key: value
-                for key, value in record.items()
-                if key not in {"schema", "ts", "event", "session", "mcp_server_id"}
-            }
-            add_event(
-                ts, _card(_e(str(event)), ts, _json_block(details) if details else "")
-            )
+        elif event in _LIFECYCLE_EVENTS:
+            add_event(ts, _render_event_card(str(event), record, ts))
+        elif event is not None:
+            # Catch-all so an event type we don't explicitly know about yet
+            # still shows up on the timeline instead of being silently dropped.
+            add_event(ts, _render_event_card(str(event), record, ts))
 
 
 def _transcript_window(

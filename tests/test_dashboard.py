@@ -132,6 +132,42 @@ class TranscriptTests(unittest.TestCase):
         )
 
 
+class SessionTimelineTests(unittest.TestCase):
+    def test_plugin_install_events_are_rendered(self) -> None:
+        events: list[str] = []
+        dashboard._add_session_timeline(
+            [
+                {
+                    "ts": "2026-01-01T00:00:00Z",
+                    "event": "plugin_install_failed",
+                    "mcp_server_id": "s1",
+                    "error": {"type": "FileNotFoundError", "message": "not found"},
+                }
+            ],
+            lambda _ts, html: events.append(html),
+        )
+        self.assertEqual(len(events), 1)
+        self.assertIn("plugin_install_failed", events[0])
+        self.assertIn("FileNotFoundError", events[0])
+
+    def test_unknown_events_fall_through_generic_else_branch(self) -> None:
+        events: list[str] = []
+        dashboard._add_session_timeline(
+            [
+                {
+                    "ts": "2026-01-01T00:00:00Z",
+                    "event": "some_future_event",
+                    "mcp_server_id": "s1",
+                    "detail": "unhandled but should still show up",
+                }
+            ],
+            lambda _ts, html: events.append(html),
+        )
+        self.assertEqual(len(events), 1)
+        self.assertIn("some_future_event", events[0])
+        self.assertIn("unhandled but should still show up", events[0])
+
+
 class SemanticSessionTests(unittest.TestCase):
     def test_dashboard_host_policy_blocks_loopback_dns_rebinding(self) -> None:
         for host in ("localhost:8736", "127.0.0.1:8736", "[::1]:8736"):
