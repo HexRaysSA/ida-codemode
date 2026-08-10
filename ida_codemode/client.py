@@ -85,6 +85,27 @@ class DatabaseHandle:
         thread.start()
 
     @classmethod
+    def attach(
+        cls,
+        entry: RegistryEntry,
+        *,
+        path: str | None = None,
+        keepalive: float = 0.0,
+        on_disconnect: Callable[["DatabaseHandle", str], None] | None = None,
+    ) -> Self:
+        """Attach directly to one discovered registry entry without re-resolving it."""
+
+        requested_path = path or entry.exe_path or entry.idb_path
+        if not requested_path:
+            raise ValueError("registry entry has no attachable database path")
+        return cls(
+            requested_path,
+            entry,
+            keepalive=keepalive,
+            on_disconnect=on_disconnect,
+        )
+
+    @classmethod
     def open(
         cls,
         path: str,
@@ -161,9 +182,9 @@ class DatabaseHandle:
 
         entry = resolve()
         try:
-            return cls(
-                path,
+            return cls.attach(
                 entry,
+                path=path,
                 keepalive=keepalive,
                 on_disconnect=on_disconnect,
             )
@@ -173,9 +194,9 @@ class DatabaseHandle:
             # the instance lifecycle contract.
             time.sleep(0.05)
             replacement = resolve()
-            return cls(
-                path,
+            return cls.attach(
                 replacement,
+                path=path,
                 keepalive=keepalive,
                 on_disconnect=on_disconnect,
             )
@@ -352,6 +373,7 @@ class DatabaseHandle:
         endpoint: str,
         payload: dict[str, Any],
         *,
+        method: str = "POST",
         timeout: float | None = None,
         unwrap_result: bool = True,
         operation_id: str | None = None,
@@ -359,7 +381,7 @@ class DatabaseHandle:
         request_payload = {**payload, "lease_id": self._lease_id}
         if operation_id is not None:
             request_payload["operation_id"] = operation_id
-        body = json.dumps(request_payload).encode("utf-8")
+        body = json.dumps(request_payload).encode("utf-8") if method == "POST" else None
         with self._request_lock:
             if self._closed.is_set():
                 raise ClientError("database handle is closed")
@@ -374,7 +396,7 @@ class DatabaseHandle:
                     self._active_operation_id = operation_id
             try:
                 connection.request(
-                    "POST",
+                    method,
                     endpoint,
                     body=body,
                     headers={
@@ -390,7 +412,7 @@ class DatabaseHandle:
                 finally:
                     response.close()
             except (TimeoutError, OSError, http.client.HTTPException) as exc:
-                # Do not retry a POST: the server may have executed it before
+                # Do not retry automatically: a POST may have executed before
                 # the connection failed. The next operation gets a fresh socket.
                 self._discard_rpc_connection(connection)
                 raise ClientError(f"Code Mode request failed: {exc}") from exc
@@ -455,6 +477,19 @@ class DatabaseHandle:
             timeout=http_timeout,
             operation_id=operation_id or uuid.uuid4().hex,
         )
+
+    def poll_autoanalysis(self) -> dict[str, Any]:
+        """Return initial autoanalysis status without enabling or advancing it."""
+        result = self._request(
+            "/poll_autoanalysis",
+            {},
+            method="GET",
+            timeout=5.0,
+            unwrap_result=False,
+        )
+        if not isinstance(result, dict) or not isinstance(result.get("complete"), bool):
+            raise ClientError("poll_autoanalysis returned an invalid result")
+        return result
 
     def wait_autoanalysis(
         self,
@@ -547,6 +582,19 @@ class DatabaseHandle:
         result = self._request("/save_database", {}, timeout=305.0)
         if not isinstance(result, dict):
             raise ClientError("save_database returned an invalid result")
+        return result
+
+    def shutdown_database(self, *, save: bool = True) -> dict[str, Any]:
+        """Shut down an exclusively leased managed worker, saving or discarding it."""
+        if not isinstance(save, bool):
+            raise TypeError("save must be a boolean")
+        result = self._request("/shutdown_database", {"save": save}, timeout=5.0)
+        if (
+            not isinstance(result, dict)
+            or result.get("shutting_down") is not True
+            or result.get("save") is not save
+        ):
+            raise ClientError("shutdown_database returned an invalid result")
         return result
 
     def _release_remote_lease(self) -> None:

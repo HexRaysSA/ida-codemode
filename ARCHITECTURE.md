@@ -33,7 +33,7 @@ connection expresses one client's interest in an already-running database.
 | `ida_codemode/server.py` | Code Mode routes, instance publication, SSE lease/request accounting, and managed idle shutdown. |
 | `ida_codemode/registry.py` | Canonical identity, cross-platform file locks, atomic records, health classification, and stale-record cleanup. |
 | `ida_codemode/resolver.py` | GUI discovery, expected-IDB resolution, serialized worker spawning, import options, and startup diagnostics. |
-| `ida_codemode/client.py` | `DatabaseHandle`, SSE lease monitoring, reusable HTTP RPC connection, disconnection detection, execution, analysis waiting, and saving. |
+| `ida_codemode/client.py` | `DatabaseHandle`, direct registry-entry attachment, SSE lease monitoring, reusable HTTP RPC, execution, analysis polling/waiting, saving, and exclusive worker shutdown. |
 | `ida_codemode/database.py` | Protocol-agnostic database attachment, local selection, per-handle operation serialization, lease cleanup, and lifecycle events. |
 | `ida_codemode/runtime.py` | Serializes IDA operations onto IDA's main thread and provides the Code Mode Python runtime. |
 | `ida_codemode/reference.py` | Builds and searches an AST-based reference from the installed ida-domain package and examples without importing ida-domain in the MCP process. |
@@ -187,14 +187,16 @@ Important routes are:
 | `POST /execute_python` | Execute Code Mode Python against the open database. |
 | `POST /cancel_operation` | Cooperatively cancel one lease-owned operation without releasing the database handle. |
 | `POST /save_database` | Explicitly save a GUI or idalib database. |
-| `GET /poll_autoanalysis` | Observe initial IDA autoanalysis. |
+| `POST /shutdown_database` | Shut down an exclusively leased managed idalib worker, saving or discarding changes. |
+| `GET /poll_autoanalysis` | Observe initial IDA autoanalysis without enabling or advancing it. |
 | `GET` or `POST /wait_autoanalysis` | Wait for autoanalysis; POST accepts a timeout. |
 
-There is no remote database-close route. Closing a client handle uses a
-separate control connection to release only its identified lease, then closes
-its local connections. Ordinary RPCs carry that lease identity so orphaned
-execution can be cancelled. The reusable HTTP/1.1 RPC connection is replaced
-before the server's idle timeout. The listener uses the platform's maximum
+Closing a client handle uses a separate control connection to release only its
+identified lease, then closes its local connections. A separate low-level
+shutdown route is available only for a managed idalib worker whose requesting
+lease is exclusive; GUI and shared instances reject it. Ordinary RPCs carry
+that lease identity so orphaned execution can be cancelled. The reusable
+HTTP/1.1 RPC connection is replaced before the server's idle timeout. The listener uses the platform's maximum
 backlog and a small prewarmed cache of reusable daemon handler threads; this
 avoids paying Windows thread-start scheduling latency on every fresh loopback
 connection while still growing for long-lived SSE leases. A failed operation
@@ -218,14 +220,14 @@ poisoning the next operation.
 
 ## Protocol contract and versioning
 
-`PROTOCOL_VERSION` is currently `2`. It is an exact compatibility version for
+`PROTOCOL_VERSION` is currently `5`. It is an exact compatibility version for
 the private discovery registry and per-database HTTP API. There is no downgrade
 or highest-common-version negotiation: a scanner whose local version differs
 from a lock-held record marks that owner `BLOCKED` before probing HTTP. This is
 deliberate—starting a replacement could corrupt an IDB already owned by a peer
 that the scanner does not understand.
 
-Protocol version 4 consists of the following interoperable contracts.
+Protocol version 5 consists of the following interoperable contracts.
 
 ### Discovery contract
 
@@ -264,37 +266,40 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 | `POST /execute_python` | `{code, timeout?, lease_id?, operation_id?, persist_globals?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. Persistence defaults to false and requires an active lease. Execution does not implicitly wait for autoanalysis. |
 | `POST /cancel_operation` | `{lease_id, operation_id}`; success is `{"ok":true,"result":{"cancelled":bool}}`. Cancellation is lease-scoped and preserves the handle. |
 | `POST /save_database` | `{lease_id?}`; success is `{"ok":true,"result":{"saved":true,"idb_path":...}}`. |
-| `GET /poll_autoanalysis` | Raw `{status, complete}` analysis object. |
+| `POST /shutdown_database` | `{lease_id, save}`; the active lease must be exclusive and own a managed idalib worker. Success is `{"ok":true,"result":{"shutting_down":true,"save":bool}}`, after which teardown uses `Database.close(save=save)`. |
+| `GET /poll_autoanalysis` | Raw `{status, complete}` analysis object; observing it never enables or advances analysis. |
 | `GET` or `POST /wait_autoanalysis` | The same raw analysis object; POST accepts optional `timeout`, `lease_id`, and `operation_id` fields. An omitted timeout waits without a deadline. |
 
 Request-owned cancellation requires registry protocol version 3. Version 4 adds
-opt-in lease-scoped persistent Python namespaces. This prevents a new client from
-silently attaching to a GUI plugin or worker that cannot provide the lifecycle
-and execution semantics on which it relies.
+opt-in lease-scoped persistent Python namespaces. Version 5 requires execution
+results to be directly JSON-serializable and adds exclusive managed-worker
+shutdown. This prevents a new client from silently attaching to a GUI plugin or
+worker that cannot provide the lifecycle and execution semantics on which it
+relies.
 
 Operation failures use a non-2xx status and, once application dispatch has
 begun, `{"ok":false,"error":{"code":...,"message":...}}`; additional error
 details are optional. Authentication, framing, and unknown-route failures may
 use simpler non-2xx JSON bodies, so clients must not assume a structured error
-for every rejection. There is no remote database-close operation; lease release
-has only lease-scoped authority. Clients must not retry an operation POST whose
-execution outcome is unknown.
+for every rejection. Lease release has only lease-scoped authority. Shutdown
+requires an exclusive active lease on a managed worker and is unavailable for
+GUI instances. Clients must not retry an operation POST whose execution outcome
+is unknown.
 
 The execution rules (`db`/`ida_domain`, trailing-expression results, optional
-entry functions, JSON-compatible result conversion, output capture, and
-serialized IDA execution) and the SSE-driven managed shutdown semantics are
+entry functions, strict JSON-compatible results, output capture, and serialized
+IDA execution) and the SSE-driven managed shutdown semantics are
 also protocol behavior because clients observe them. Execution uses a fresh
 namespace by default. A stateless leased execution first discards any namespace
 previously retained by that lease. When `persist_globals` is true, imports,
 assignments, and definitions remain visible to later opted-in executions through
 the same lease. Runtime-owned globals are refreshed, previous
 `run`/`execute`/`main` functions are not invoked again implicitly, and `result`
-remains a consumed per-call output slot rather than durable state. JSON-safe
-results are encoded directly with the standard C-backed encoder after leaving
-IDA's main thread; uncommon unsupported values use a compatibility conversion
-fallback. Result conversion is recursive; notably, non-finite Python floats
-become the strings `nan`, `inf`, or `-inf` so the service never emits
-non-standard JSON numbers.
+remains a consumed per-call output slot rather than durable state. Results are
+encoded with the standard C-backed JSON encoder after leaving IDA's main thread.
+They must already be JSON-compatible; unsupported Python or IDA objects and
+non-finite floats fail with `invalid_result` rather than being coerced into
+lossy strings or containers.
 
 ### When to bump the version
 

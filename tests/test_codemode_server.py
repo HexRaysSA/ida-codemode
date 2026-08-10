@@ -9,7 +9,6 @@ from pathlib import Path
 from ida_codemode.http import POST_BODY_LIMIT
 from ida_codemode.registry import InstanceIdentity, load_registry_entry
 from ida_codemode.runtime import AnalysisState
-from ida_codemode.serialization import to_jsonable
 from ida_codemode.server import CodeModeHTTPServer
 
 
@@ -27,6 +26,8 @@ class RecordingBackend:
         persist_globals: bool = False,
     ):
         self.calls.append(("execute_python", code, timeout, lease_id, persist_globals))
+        if code == "return-bytes":
+            return {"bytes": b"not-json"}
         return {"code": code}
 
     def cancel_active(self) -> None:
@@ -148,14 +149,6 @@ def test_server_rejects_nonfinite_lifecycle_intervals(tmp_path: Path):
             raise AssertionError(f"accepted invalid {name}")
 
 
-def test_result_conversion_emits_standard_json_for_nonfinite_floats():
-    converted = to_jsonable(
-        {"nan": float("nan"), "positive": float("inf"), "negative": -float("inf")}
-    )
-    assert converted == {"nan": "nan", "positive": "inf", "negative": "-inf"}
-    assert json.loads(json.dumps(converted, allow_nan=False)) == converted
-
-
 def test_health_registry_and_authentication(tmp_path: Path):
     server, _ = make_server(tmp_path)
     try:
@@ -210,6 +203,23 @@ def test_execute_wait_and_save_routes(tmp_path: Path):
             ("wait", 4.0),
             ("save",),
         ]
+    finally:
+        server.stop()
+        server.release_registration()
+
+
+def test_execute_rejects_non_json_result(tmp_path: Path):
+    server, _ = make_server(tmp_path)
+    try:
+        status, payload, _ = request(
+            server,
+            "POST",
+            "/execute_python",
+            {"code": "return-bytes"},
+        )
+        assert status == 500
+        assert payload["error"]["code"] == "invalid_result"
+        assert "must be valid JSON" in payload["error"]["message"]
     finally:
         server.stop()
         server.release_registration()

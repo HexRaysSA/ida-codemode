@@ -133,7 +133,8 @@ making one request per row or symbol. Each request requires one IDA main-thread
 handoff, though the handoff itself is normally only a few microseconds in an
 idle idalib worker. Return ordinary JSON-compatible dictionaries, lists, and
 scalars: they are encoded directly off IDA's main thread. Unsupported Python or
-IDA objects retain a slower compatibility-conversion fallback.
+IDA objects, bytes, and non-finite floats are rejected with `invalid_result`;
+convert them explicitly in the executed code.
 
 ## Performance benchmark
 
@@ -172,8 +173,10 @@ The fixed grace period applies only before the first lease. Crashed clients are
 detected by SSE heartbeats. Hard-killed workers are detected by lifetime file
 locks and reaped on the next scan.
 
-There are no client process refcounts and no remote database-close endpoint;
-the lease-scoped release route cannot close another client's lease.
+There are no client process refcounts. The lease-scoped release route cannot
+close another client's lease. A low-level client may request managed idalib
+shutdown with `DatabaseHandle.shutdown_database(save=...)`, but only while its
+lease is exclusive; GUI and shared instances reject the request.
 
 ## Local state
 
