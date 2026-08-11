@@ -43,6 +43,12 @@ codex plugin add ida-mcp@HexRaysSA
 pi install git:github.com/HexRaysSA/ida-codemode
 ```
 
+### [oh-my-pi](https://github.com/can1357/oh-my-pi)
+
+```bash
+omp plugin install github:HexRaysSA/ida-codemode
+```
+
 ### IDA GUI Support
 
 To support IDA GUI instances when using ida-codemode, install the plugin:

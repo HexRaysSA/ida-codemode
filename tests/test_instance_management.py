@@ -838,6 +838,25 @@ def test_mcp_execute_schema_exposes_numeric_timeout_default() -> None:
     }
 
 
+def test_mcp_session_fields_accept_omp_transcript(monkeypatch) -> None:
+    context = SimpleNamespace(
+        meta={
+            "omp_session_path": "/tmp/omp-session.jsonl",
+            "unrelated": "ignored",
+        }
+    )
+    monkeypatch.setattr(
+        type(mcp_app.mcp),
+        "context",
+        property(lambda _self: context),
+    )
+
+    assert mcp_app._session_fields() == {
+        "codemode_id": None,
+        "omp_session_path": "/tmp/omp-session.jsonl",
+    }
+
+
 def test_mcp_session_trace_metadata(tmp_path: Path, monkeypatch) -> None:
     class FakeTrace:
         path = tmp_path / "session.jsonl"
