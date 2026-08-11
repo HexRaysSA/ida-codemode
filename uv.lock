@@ -114,7 +114,7 @@ dev = [
 requires-dist = [
     { name = "httpx", specifier = "<1" },
     { name = "ida-domain", specifier = ">=0.5.1" },
-    { name = "ida-hcli", specifier = ">=0.19.0" },
+    { name = "ida-hcli", specifier = ">=0.19.1" },
     { name = "idapro" },
     { name = "packaging" },
     { name = "zeromcp", specifier = ">=1.6.0" },
@@ -142,7 +142,7 @@ wheels = [
 
 [[package]]
 name = "ida-hcli"
-version = "0.19.0"
+version = "0.19.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -158,9 +158,9 @@ dependencies = [
     { name = "semantic-version" },
     { name = "tenacity" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c6/e5/82bfc42bc6ebf6362ba4500cedcba106f539a4ad2715447ec5955a423dea/ida_hcli-0.19.0.tar.gz", hash = "sha256:b5a8c7ea42d94e102aabe745d3f6ee713a22cf0c26f07f9011cd1fa72322ead5", size = 199068, upload-time = "2026-08-05T18:52:31.034Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/83/6d/48f990df50239f9dbdee040b4dce2ec21091d0408bbedd90d34a4393b21d/ida_hcli-0.19.1.tar.gz", hash = "sha256:467239e23e3983b5ecbc723067332422eb686b9302260dc0225173f6f097757c", size = 189448, upload-time = "2026-08-11T09:19:04.883Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ba/fa/4c96f510ba700ee20f31397e4a172eed12ca5727533d18b624ca89e77055/ida_hcli-0.19.0-py3-none-any.whl", hash = "sha256:f06fa036bc52e669e739a57a01c541ec225b3938a712171083e9bd213de802ed", size = 248463, upload-time = "2026-08-05T18:52:32.304Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/6b/db6864f576e33fb744f504dde194385ba131526087966ab739a4461157f8/ida_hcli-0.19.1-py3-none-any.whl", hash = "sha256:e4a60337cd993538843ac2f4c029d19e414fc9a0d1b44ab3a0f22b139d646e11", size = 237487, upload-time = "2026-08-11T09:19:06.271Z" },
 ]
 
 [[package]]
