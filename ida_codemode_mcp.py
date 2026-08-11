@@ -558,120 +558,6 @@ def _gui_plugin_installed() -> bool:
         return False
 
 
-def _collect_hcli_environment_diagnostics(hcli: str) -> Any:
-    """Best-effort `hcli ida python explain-environment --json` for failure diagnostics."""
-    command = [hcli, "ida", "python", "explain-environment", "--json"]
-    try:
-        completed = subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        return {"command": command, "error": _error_fields(error)}
-
-    try:
-        return {"command": command, "environment": json.loads(completed.stdout)}
-    except (json.JSONDecodeError, ValueError):
-        return {
-            "command": command,
-            "returncode": completed.returncode,
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
-        }
-
-
-def _emit_plugin_install_failure(project_dir: Path, error: Exception) -> None:
-    """Best-effort logging for an optional operation that must not stop MCP."""
-    try:
-        TRACE.emit(
-            "plugin_install_failed",
-            session=_session_fields(),
-            project_dir=str(project_dir),
-            error=_error_fields(error),
-        )
-    except Exception:  # noqa: BLE001 - optional logging must not affect MCP startup
-        return
-
-
-def _install_gui_plugin(project_dir: Path) -> None:
-    """Install the GUI plugin from *project_dir* without raising to the caller."""
-    try:
-        lock_path = get_idausr_dir() / "codemode" / "plugin-install.lock"
-        with FileLock(lock_path):
-            # Another MCP may have completed installation while this one waited.
-            if _gui_plugin_installed():
-                return
-
-            # Use the mandatory hcli dependency from this Python environment.
-            # find_console_script raises FileNotFoundError (caught below) if
-            # it cannot be found.
-            hcli = find_console_script("hcli")
-
-            command = [hcli, "plugin", "install", str(project_dir)]
-            TRACE.emit(
-                "plugin_install_started",
-                session=_session_fields(),
-                command=command,
-                project_dir=str(project_dir),
-            )
-            try:
-                completed = subprocess.run(
-                    command,
-                    cwd=project_dir,
-                    env={**os.environ, "HCLI_DEBUG": "1"},
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-            except (OSError, subprocess.CalledProcessError) as error:
-                fields: dict[str, Any] = {
-                    "session": _session_fields(),
-                    "command": command,
-                    "project_dir": str(project_dir),
-                    "error": _error_fields(error),
-                }
-                if isinstance(error, subprocess.CalledProcessError):
-                    fields.update(stdout=error.stdout, stderr=error.stderr)
-                fields["environment_diagnostics"] = _collect_hcli_environment_diagnostics(hcli)
-                TRACE.emit("plugin_install_failed", **fields)
-                return
-
-            TRACE.emit(
-                "plugin_install_succeeded",
-                session=_session_fields(),
-                command=command,
-                project_dir=str(project_dir),
-                stdout=completed.stdout,
-                stderr=completed.stderr,
-            )
-    except Exception as error:  # noqa: BLE001 - plugin installation is optional
-        _emit_plugin_install_failure(project_dir, error)
-
-
-def _schedule_gui_plugin_install() -> threading.Thread | None:
-    """Start eventual GUI plugin installation without delaying MCP startup."""
-    project_dir = Path(__file__).resolve().parent
-    try:
-        if _gui_plugin_installed():
-            return None
-
-        thread = threading.Thread(
-            target=_install_gui_plugin,
-            args=(project_dir,),
-            name="plugin-install",
-            daemon=True,
-        )
-        thread.start()
-        return thread
-    except Exception as error:  # noqa: BLE001 - MCP must start without the plugin
-        _emit_plugin_install_failure(project_dir, error)
-        return None
-
-
 class ListDatabasesToolResult(ListDatabasesResult):
     hint: NotRequired[str]
 
@@ -682,7 +568,7 @@ def list_databases() -> ListDatabasesToolResult:
     result = ListDatabasesToolResult(**DATABASE_MANAGER.list_databases())
     if not _gui_plugin_installed():
         result["hint"] = (
-            "To enable GUI database discovery, install the ida-codemode plugin: hcli plugin install https://github.com/HexRaysSA/ida-codemode"
+            "To enable GUI database discovery: uvx ida-hcli plugin install https://github.com/HexRaysSA/ida-codemode"
         )
     return result
 
@@ -754,14 +640,10 @@ def _serve(
     transport: str,
     database: str | None = None,
     agent: str | None = None,
-    install_plugin: bool = False,
 ) -> None:
     _unset_empty_environment_variables()
     _install_server_shutdown_handlers()
     _start_mcp_trace(transport, agent)
-
-    if install_plugin:
-        _schedule_gui_plugin_install()
 
     if database:
         DATABASE_MANAGER.schedule_startup_open(database)
@@ -918,11 +800,6 @@ def cli() -> int:
         help="Agent name to record in the MCP session trace.",
     )
     parser.add_argument(
-        "--install-plugin",
-        action="store_true",
-        help="Install the IDA GUI plugin in the background if it is not installed.",
-    )
-    parser.add_argument(
         "--report-session",
         choices=["claude", "codex"],
         help=argparse.SUPPRESS,
@@ -937,7 +814,6 @@ def cli() -> int:
         args.transport,
         database=args.database,
         agent=args.agent,
-        install_plugin=args.install_plugin,
     )
     return 0
 

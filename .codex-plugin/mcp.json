@@ -3,10 +3,9 @@
     "command": "uv",
     "args": [
       "run",
+      "--with=ida-hcli",
       "ida-codemode-mcp",
-      "--agent",
-      "codex",
-      "--install-plugin"
+      "--agent=codex"
     ],
     "cwd": ".",
     "env_vars": ["IDA_CODEMODE_ID", "IDAUSR", "IDA_CODEMODE_STATE_DIR"]

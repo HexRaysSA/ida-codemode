@@ -145,6 +145,15 @@ def _updated_files(old: str, new: str) -> dict[str, str]:
         f'server_version = "ida-codemode/{new}"',
         "ida_codemode/http.py",
     )
+
+    # The plugin archive ships only the entry point; ida_codemode itself is
+    # installed from PyPI as a pythonDependency, pinned to this same release.
+    texts["ida-plugin.json"] = _replace_exact(
+        texts["ida-plugin.json"],
+        f'"ida-codemode=={old}"',
+        f'"ida-codemode=={new}"',
+        "ida-plugin.json",
+    )
     return texts
 
 

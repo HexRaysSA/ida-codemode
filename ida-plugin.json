@@ -19,7 +19,7 @@
       "repository": "https://github.com/HexRaysSA/ida-codemode"
     },
     "pythonDependencies": [
-      "ida-domain>=0.5.1"
+      "ida-codemode==0.5.1"
     ]
   }
 }

@@ -80,7 +80,7 @@ jobs:
           mkdir -p release-assets
           uv run --no-project python -m zipfile -c \
             "release-assets/ida-codemode-plugin-$VERSION.zip" \
-            ida-plugin.json ida_codemode_plugin.py ida_codemode README.md
+            ida-plugin.json ida_codemode_plugin.py README.md
         env:
           VERSION: ${{ steps.version.outputs.version }}
 

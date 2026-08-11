@@ -43,6 +43,14 @@ codex plugin add ida-mcp@HexRaysSA
 pi install git:github.com/HexRaysSA/ida-codemode
 ```
 
+### IDA GUI Support
+
+To support IDA GUI instances when using ida-codemode, install the plugin:
+
+```bash
+uvx ida-hcli plugin install https://github.com/HexRaysSA/ida-codemode
+```
+
 ### Other agents
 
 Configure a regular stdio MCP server in your `mcp.json`:
@@ -53,12 +61,10 @@ Configure a regular stdio MCP server in your `mcp.json`:
     "ida": {
       "command": "uvx",
       "args": [
-        "--from",
-        "ida-codemode@latest",
+        "--with=ida-hcli",
+        "--from=ida-codemode",
         "ida-codemode-mcp",
-        "--agent",
-        "my-agent",
-        "--install-plugin"
+        "--agent=my-agent"
       ]
     }
   }
