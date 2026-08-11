@@ -558,6 +558,31 @@ def _gui_plugin_installed() -> bool:
         return False
 
 
+def _collect_hcli_environment_diagnostics(hcli: str) -> Any:
+    """Best-effort `hcli ida python explain-environment --json` for failure diagnostics."""
+    command = [hcli, "ida", "python", "explain-environment", "--json"]
+    try:
+        completed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {"command": command, "error": _error_fields(error)}
+
+    try:
+        return {"command": command, "environment": json.loads(completed.stdout)}
+    except (json.JSONDecodeError, ValueError):
+        return {
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
+
+
 def _emit_plugin_install_failure(project_dir: Path, error: Exception) -> None:
     """Best-effort logging for an optional operation that must not stop MCP."""
     try:
@@ -611,6 +636,7 @@ def _install_gui_plugin(project_dir: Path) -> None:
                 }
                 if isinstance(error, subprocess.CalledProcessError):
                     fields.update(stdout=error.stdout, stderr=error.stderr)
+                fields["environment_diagnostics"] = _collect_hcli_environment_diagnostics(hcli)
                 TRACE.emit("plugin_install_failed", **fields)
                 return
 
