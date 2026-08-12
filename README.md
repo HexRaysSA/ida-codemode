@@ -21,7 +21,8 @@ closing a handle releases its namespace and retained IDA objects.
 - Installed in your PATH
   - [Git](https://git-scm.com/)
   - [uv](https://github.com/astral-sh/uv)
-- IDA 9.4 or higher with Python 3.11+
+- IDA 9.4 or higher with idalib and Python 3.11+
+- Other IDA MCP servers must be disabled to reduce agent confusion
 
 ### [Claude Code](https://claude.com/product/claude-code)
 
@@ -54,8 +55,32 @@ omp plugin install github:HexRaysSA/ida-codemode
 To support IDA GUI instances when using ida-codemode, install the plugin:
 
 ```bash
-uvx ida-hcli plugin install https://github.com/HexRaysSA/ida-codemode
+hcli plugin install ida-codemode
+# or:
+uvx ida-hcli plugin install ida-codemode
 ```
+
+### [Antigravity](https://coder.google.com/)
+
+`Settings > Customizations > Installed MCP Servers > Open MCP Config` then add:
+
+```json
+{
+  "mcpServers": {
+    "ida": {
+      "command": "uvx",
+      "args": [
+        "--with=ida-hcli",
+        "--from=ida-codemode",
+        "ida-codemode-mcp",
+        "--agent=antigravity"
+      ]
+    }
+  }
+}
+```
+
+Then `refresh` in the MCP config view.
 
 ### Other agents
 
@@ -81,3 +106,16 @@ Configure a regular stdio MCP server in your `mcp.json`:
 configuration does not need to be updated for each release. Pre-release
 dependency resolution is currently required because `ida-domain` is published
 as a development release.
+
+`--agent=my-agent` is a human-chosen label (like `claude-code`, `cursor`,
+`my-custom-agent`, etc.) used to differentiate sessions in a metrics dashboard.
+
+## Usage
+
+Start your agent harness and ask it something like:
+
+> Reverse /path/to/sample.elf for me
+
+To test the GUI integration, open something in IDA and ask your harness:
+
+> What do I have open in the IDA GUI?
