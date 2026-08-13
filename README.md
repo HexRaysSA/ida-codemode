@@ -108,16 +108,23 @@ To test the GUI integration, open something in IDA and ask your harness:
 The package installs one `ida-codemode` command with subcommands:
 
 ```bash
+# MCP server (stdio/http)
 ida-codemode mcp --agent=my-agent
+
+# Inspect MCP session logs
 ida-codemode dashboard --open
-ida-codemode exec /path/to/sample.elf -c 'db.functions.get_all()'
+
+# Export MCP session logs to ZIP
 ida-codemode logs
-ida-codemode benchmark /path/to/sample.elf
+
+# IDA Domain API reference
+ida-codemode reference "decompile function"
+
+# Execute Python against an IDB (command, script, repl)
+ida-codemode exec tests/crackme03/elf -c 'db.functions.get_all()'
 ```
 
-Run `ida-codemode COMMAND --help` for command-specific options. The internal
-`worker` subcommand is used automatically when a managed idalib database is
-needed.
+Run `ida-codemode COMMAND --help` for command-specific options.
 
 ## Python Package (Developers)
 

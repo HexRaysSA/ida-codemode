@@ -8,9 +8,10 @@ from collections.abc import Callable, Sequence
 
 _COMMAND_HELP = {
     "mcp": "run the MCP server",
-    "dashboard": "browse semantic session traces",
+    "dashboard": "inspect MCP session logs",
+    "logs": "export MCP session logs to ZIP",
+    "reference": "query the ida-domain API reference",
     "exec": "execute Python against an IDA database",
-    "logs": "create a portable session log archive",
 }
 
 _COMMAND_HIDDEN = (
@@ -19,10 +20,22 @@ _COMMAND_HIDDEN = (
 )
 
 
+class _HelpFormatter(argparse.HelpFormatter):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # argparse does not include subcommand names when calculating the help
+        # column, causing longer names to put their descriptions on a new line.
+        self._action_max_length = max(
+            self._action_max_length,
+            max(map(len, _COMMAND_HELP)) + 4,
+        )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ida-codemode",
         description="IDA Code Mode command-line tools",
+        formatter_class=_HelpFormatter,
     )
     commands = parser.add_subparsers(dest="command", metavar="COMMAND")
     for name, help_text in _COMMAND_HELP.items():
@@ -35,6 +48,10 @@ def _command(name: str) -> Callable[[list[str] | None], int]:
     # the MCP server, dashboard, or idalib-facing modules unnecessarily.
     if name == "mcp":
         from .mcp import cli
+
+        return cli
+    if name == "reference":
+        from ida_codemode.reference import cli
 
         return cli
     if name == "dashboard":
@@ -72,5 +89,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     command = arguments.pop(0)
     if command not in _COMMAND_HELP and command not in _COMMAND_HIDDEN:
-        parser.error(f"argument COMMAND: invalid choice: {command!r}")
+        parser.print_help(sys.stderr)
+        parser.exit(
+            2,
+            f"\n{parser.prog}: error: argument COMMAND: invalid choice: {command!r}\n",
+        )
     return _command(command)(arguments)

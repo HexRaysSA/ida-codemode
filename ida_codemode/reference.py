@@ -1,9 +1,11 @@
 """MVP API reference function, needs to be improved"""
 
+import argparse
 import ast
 import importlib.metadata
 import importlib.util
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -333,3 +335,19 @@ def reference(query: str) -> str:
             "Try a class, method, or concept such as functions, strings, imports, or xrefs."
         )
     return "\n\n".join(sections)
+
+
+def cli(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="ida-codemode reference",
+        description="Look up the active ida-domain API reference.",
+    )
+    parser.add_argument(
+        "query",
+        nargs="+",
+        help="Class, method, or reverse-engineering concept to look up.",
+    )
+    args = parser.parse_args(argv)
+
+    print(reference(" ".join(args.query)))
+    return 0
