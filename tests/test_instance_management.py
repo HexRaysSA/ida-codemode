@@ -1907,6 +1907,51 @@ def test_cancel_active_preserves_database_handle(tmp_path: Path) -> None:
     server.release_registration()
 
 
+def test_manager_close_waits_for_final_managed_idb_close(tmp_path: Path) -> None:
+    executable = tmp_path / "test.exe"
+    idb = tmp_path / "test.i64"
+    executable.write_bytes(b"binary")
+    idb.write_bytes(b"idb")
+    shutdown_started = threading.Event()
+    idb_closed = threading.Event()
+
+    def finish_shutdown() -> None:
+        shutdown_started.set()
+        assert idb_closed.wait(2)
+        server.release_registration()
+
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
+        AnalysisState(),
+        REGISTRY_DIR,
+        lease_grace=30,
+        on_shutdown=finish_shutdown,
+    )
+    server.start()
+    manager = DatabaseManager()
+    opened = manager.open_database(str(idb), set_current=True)
+    failures: list[Exception] = []
+
+    def close_database() -> None:
+        try:
+            manager.close_database(opened["instance_id"])
+        except Exception as exc:  # noqa: BLE001 - asserted below
+            failures.append(exc)
+
+    thread = threading.Thread(target=close_database)
+    thread.start()
+    assert shutdown_started.wait(1)
+    assert thread.is_alive()
+    idb_closed.set()
+    thread.join(2)
+
+    assert not thread.is_alive()
+    assert failures == []
+    server.stop()
+    server.release_registration()
+
+
 def test_database_close_cancels_its_active_execution(tmp_path: Path) -> None:
     class BlockingBackend(StaticBackend):
         def __init__(self) -> None:
@@ -1941,7 +1986,8 @@ def test_database_close_cancels_its_active_execution(tmp_path: Path) -> None:
         AnalysisState(),
         REGISTRY_DIR,
         lease_grace=30,
-        on_shutdown=lambda: None,
+        # Model the worker's lifetime-lock release after its IDB closes.
+        on_shutdown=lambda: server.release_registration(),
     )
     server.start()
     manager = DatabaseManager()

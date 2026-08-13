@@ -255,29 +255,58 @@ class CodeModeHTTPServer:
             self._activity.notify_all()
             return lease
 
-    def _lease_closed(self, lease_id: str) -> None:
+    def _detach_lease(self, lease_id: str) -> tuple[bool, bool]:
+        """Detach a lease and report whether final managed shutdown is committed."""
+
         with self._activity:
             lease = self._leases.pop(lease_id, None)
             if lease is None:
-                return
+                # Preserve the final-shutdown result if the SSE disconnect
+                # raced an idempotent explicit release of the same lease.
+                shutdown_pending = bool(
+                    self.identity.managed
+                    and self._shutdown_requested
+                    and self._active_leases == 0
+                )
+                return False, shutdown_pending
             lease.stop.set()
             self._active_leases = len(self._leases)
-            if self._running_lease_id == lease_id:
-                # Keep operation handoff blocked until cancellation reaches the
-                # backend; otherwise a successor can become active and receive
-                # cancellation intended for the released lease.
+            # Treat cancellation and session cleanup like an active request so
+            # managed shutdown cannot close the IDB before cleanup completes.
+            self._active_requests += 1
+            shutdown_pending = False
+            if self._active_leases == 0:
+                self._shutdown_at = time.monotonic() + lease.keepalive
+                if self.identity.managed and lease.keepalive == 0:
+                    # Make a zero-keepalive final release deterministic: reject
+                    # a racing replacement lease while existing work unwinds.
+                    self._shutdown_requested = True
+                    shutdown_pending = True
+            self._activity.notify_all()
+            return True, shutdown_pending
+
+    def _finish_lease_close(self, lease_id: str) -> None:
+        try:
+            with self._activity:
+                owns_running_operation = self._running_lease_id == lease_id
+            if owns_running_operation:
+                # The backend lock keeps operation handoff blocked until this
+                # cancellation reaches the operation owned by the released lease.
                 try:
                     self.backend.cancel_active()
                 except Exception:
                     logger.exception("Code Mode operation cancellation failed")
-            if self._active_leases == 0:
-                self._shutdown_at = time.monotonic() + lease.keepalive
-            self._activity.notify_all()
+            try:
+                self.backend.release_session(lease_id)
+            except Exception:
+                logger.exception("Code Mode lease session cleanup failed")
+        finally:
+            self._request_finished()
 
-        try:
-            self.backend.release_session(lease_id)
-        except Exception:
-            logger.exception("Code Mode lease session cleanup failed")
+    def _lease_closed(self, lease_id: str) -> None:
+        released, _shutdown_pending = self._detach_lease(lease_id)
+        if released:
+            self._finish_lease_close(lease_id)
 
     def _request_started(self, lease_id: str | None) -> None:
         with self._activity:
@@ -608,14 +637,22 @@ class CodeModeHTTPServer:
                 if lease_id is None:
                     raise APIError("invalid_lease", "lease_id is required")
                 release_id: str = lease_id
+                released, shutdown_pending = self._detach_lease(release_id)
 
-                def release() -> None:
-                    self._lease_closed(release_id)
+                def finish_release() -> None:
+                    if released:
+                        self._finish_lease_close(release_id)
 
                 return json_response(
                     200,
-                    {"ok": True, "result": {"released": True}},
-                    after_send=release,
+                    {
+                        "ok": True,
+                        "result": {
+                            "released": True,
+                            "shutdown_pending": shutdown_pending,
+                        },
+                    },
+                    after_send=finish_release,
                 )
 
             payload = (
