@@ -55,36 +55,14 @@ omp plugin install github:HexRaysSA/ida-codemode
 To support IDA GUI instances when using ida-codemode, install the plugin:
 
 ```bash
-hcli plugin install ida-codemode
-# or:
 uvx ida-hcli plugin install ida-codemode
+# or if you have hcli installed:
+hcli plugin install ida-codemode
 ```
-
-### [Antigravity](https://coder.google.com/)
-
-`Settings > Customizations > Installed MCP Servers > Open MCP Config` then add:
-
-```json
-{
-  "mcpServers": {
-    "ida": {
-      "command": "uvx",
-      "args": [
-        "--with=ida-hcli",
-        "--from=ida-codemode",
-        "ida-codemode-mcp",
-        "--agent=antigravity"
-      ]
-    }
-  }
-}
-```
-
-Then `refresh` in the MCP config view.
 
 ### Other agents
 
-Configure a regular stdio MCP server in your `mcp.json`:
+Configure a regular stdio MCP server in your MCP JSON configuration:
 
 ```json
 {
@@ -109,6 +87,11 @@ as a development release.
 
 `--agent=my-agent` is a human-chosen label (like `claude-code`, `cursor`,
 `my-custom-agent`, etc.) used to differentiate sessions in a metrics dashboard.
+
+We tested the following clients, but any MCP client should work similarly:
+
+- [Antigravity](https://coder.google.com/)
+- [LM Studio](https://lmstudio.ai/)
 
 ## Usage
 
