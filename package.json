@@ -1,6 +1,6 @@
 {
   "name": "ida-codemode",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "description": "IDA Code Mode extension",
   "license": "MIT",
   "type": "module",
