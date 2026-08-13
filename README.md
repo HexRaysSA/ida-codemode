@@ -102,3 +102,64 @@ Start your agent harness and ask it something like:
 To test the GUI integration, open something in IDA and ask your harness:
 
 > What do I have open in the IDA GUI?
+
+## Python Package (Developers)
+
+You can build on `ida-codemode` as a library and reuse the database management
+functionality. Doing so will transparently allow other `ida-codemode` users
+to use IDBs concurrently and work together.
+
+### Example scenarios
+
+Below are a few scenarios enabled by the `ida-codemode` library:
+
+- You have an executable open in the IDA GUI and would like to use the MCP without closing IDA.
+- Your main agent spawns 5 subagents to work on different parts of the IDB concurrently.
+- A headless database is created by the MCP, you want to access it with a CLI tool.
+- You develop a web application to look at all the open IDA databases at once.
+
+### API
+
+`DatabaseHandle` is the primary API. One handle owns one lease on an exact GUI
+or idalib database; closing it releases only that lease.
+
+```python
+from ida_codemode import DatabaseHandle, DatabaseOpenOptions
+
+options = DatabaseOpenOptions(
+    startup_timeout=300,
+    processor="arm",
+    image_base=0x08000000,
+)
+with DatabaseHandle.open("firmware.bin", options=options) as handle:
+    handle.wait_autoanalysis()
+    execution = handle.execute_python(
+        "len(list(db.functions.get_all()))",
+        timeout=60,
+    )
+    print(execution["result"])
+```
+
+IDA import settings in `DatabaseOpenOptions` apply only when Code Mode imports a
+new source file. They do not reconfigure a reused GUI, worker, or existing IDB.
+`execute_python()` is stateless by default; pass `persist_globals=True` to keep
+a lease-scoped Python namespace between calls.
+
+Discovery returns public instance descriptors that support exact attachment:
+
+```python
+from ida_codemode import DatabaseHandle, InstanceState, discover_databases
+
+ready = [
+    item.instance for item in discover_databases() if item.state is InstanceState.READY
+]
+with DatabaseHandle.attach(ready[0]) as handle:
+    print(handle.instance.record_id, handle.instance.idb_path)
+```
+
+`find_database_owner()` and `wait_database_released()` support clients that must
+safely replace an executable or IDB. `DatabaseManager` is the secondary API for
+MCP-style adapters that manage several handles and a current target. All
+supported Python names are exported directly from `ida_codemode`; underscore
+modules and non-exported implementation modules are private.
+See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for more details.

@@ -4,9 +4,7 @@ import unittest
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
-from unittest import mock
 
-import ida_codemode.logs as logs_module
 import ida_codemode_dashboard as dashboard
 from ida_codemode.logs import (
     ARCHIVE_FORMAT,
@@ -152,8 +150,7 @@ class LogArchiveTests(unittest.TestCase):
             (logs / "legacy" / "bridge.log").write_bytes(b"bridge output\n")
 
             output = root / "logs.zip"
-            with mock.patch.object(logs_module, "DEFAULT_LOGS_DIR", logs):
-                result = create_log_archive(output, [session])
+            result = create_log_archive(output, [session], logs_dir=logs)
 
             self.assertEqual(result.operational_log_count, 2)
             with zipfile.ZipFile(output) as archive:

@@ -348,5 +348,5 @@ token from the private registry:
 uv run python tests/test_live.py http://127.0.0.1:PORT --save
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for lifecycle invariants, state
+See [../docs/ARCHITECTURE.md](ARCHITECTURE.md) for lifecycle invariants, state
 transitions, failure handling, and trace design.

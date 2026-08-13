@@ -17,7 +17,6 @@ import ipaddress
 import json
 import os
 import signal
-import subprocess
 import sys
 import threading
 import time
@@ -62,26 +61,26 @@ def _unset_empty_environment_variables() -> None:
 
 from zeromcp import McpServer, McpToolError
 
-from ida_codemode.client import ClientError, RemoteError
-from ida_codemode.database import (
+from ida_codemode import (
     CloseDatabaseResult,
-    DatabaseError,
+    CodeModeError,
     DatabaseManager,
+    DatabaseSelectionError,
     ListDatabasesResult,
     OpenDatabaseResult,
+    PythonExecutionResult,
+    RemoteError,
     SaveDatabaseResult,
-)
-from ida_codemode.paths import STATE_DIR, find_console_script, get_idausr_dir
-from ida_codemode.reference import (
-    find_ida_domain_package_path,
     get_ida_domain_version,
-    render_reference,
+    get_state_dir,
 )
-from ida_codemode.registry import FileLock
-from ida_codemode.resolver import ResolveError
-from ida_codemode.runtime import PythonExecutionResult
+from ida_codemode import (
+    reference as lookup_reference,
+)
+from ida_codemode.paths import _get_idausr_dir
+from ida_codemode.reference import _find_ida_domain_package_path
 
-SESSIONS_DIR = STATE_DIR / "sessions"
+SESSIONS_DIR = get_state_dir() / "sessions"
 OPEN_TIMEOUT_SECONDS = 300
 EXECUTE_TIMEOUT_SECONDS = 360
 
@@ -153,12 +152,7 @@ _TRACE_CALL_ID: ContextVar[str | None] = ContextVar(
 )
 
 
-def _session_fields() -> dict[str, Any]:
-    try:
-        meta = mcp.context.meta or {}
-    except (AttributeError, LookupError, RuntimeError):
-        # Shutdown and asynchronous database events may have no MCP request.
-        meta = {}
+def _session_fields_from_meta(meta: dict[str, Any]) -> dict[str, Any]:
     fields: dict[str, Any] = {
         "codemode_id": os.environ.get("IDA_CODEMODE_ID") or None,
     }
@@ -172,6 +166,15 @@ def _session_fields() -> dict[str, Any]:
         if isinstance(value, str) and value:
             fields[name] = value
     return fields
+
+
+def _session_fields() -> dict[str, Any]:
+    try:
+        meta = mcp.context.meta or {}
+    except (AttributeError, LookupError, RuntimeError):
+        # Shutdown and asynchronous database events may have no MCP request.
+        meta = {}
+    return _session_fields_from_meta(meta)
 
 
 def _install_initialize_trace_adapter() -> None:
@@ -246,10 +249,7 @@ def _as_tool_error(error: Exception) -> McpToolError:
             if isinstance(value, str) and value:
                 sections.append(f"{label}:\n{value.rstrip()}")
         return McpToolError("\n\n".join(sections))
-    if isinstance(
-        error,
-        (DatabaseError, ClientError, ResolveError, FileNotFoundError, ValueError),
-    ):
+    if isinstance(error, (CodeModeError, FileNotFoundError, ValueError)):
         return McpToolError(str(error))
     return McpToolError(str(error) or type(error).__name__)
 
@@ -419,7 +419,7 @@ def reference(
 ) -> str:
     """Look up the active ida-domain API and return a plain-text IDA reference."""
 
-    return render_reference(query)
+    return lookup_reference(query)
 
 
 class OpenDatabaseToolResult(OpenDatabaseResult):
@@ -501,7 +501,7 @@ async def execute_python(
         # race successful analysis completion, so do not start user code after
         # the encompassing MCP request has been cancelled.
         if cancel_requested.is_set():
-            raise DatabaseError("operation cancelled")
+            raise DatabaseSelectionError("operation cancelled")
         return DATABASE_MANAGER.execute_python(
             code,
             target_id,
@@ -534,9 +534,8 @@ async def execute_python(
         raise
 
 
-def _gui_plugin_installed() -> bool:
-    """Check whether a compatible ida-codemode GUI plugin is installed."""
-    plugin_dir = get_idausr_dir() / "plugins" / "ida-codemode"
+def _compatible_gui_plugin(plugin_dir: Path, required_version: str) -> bool:
+    """Check one plugin directory for a compatible ida-codemode install."""
     plugin_manifest = plugin_dir / "ida-plugin.json"
     plugin_entrypoint = plugin_dir / "ida_codemode_plugin.py"
     if not plugin_entrypoint.is_file():
@@ -547,7 +546,7 @@ def _gui_plugin_installed() -> bool:
         plugin_version = document["plugin"]["version"]
         if not isinstance(plugin_version, str):
             return False
-        return Version(plugin_version) >= Version(PACKAGE_VERSION)
+        return Version(plugin_version) >= Version(required_version)
     except (
         OSError,
         UnicodeError,
@@ -557,6 +556,11 @@ def _gui_plugin_installed() -> bool:
         InvalidVersion,
     ):
         return False
+
+
+def _gui_plugin_installed() -> bool:
+    plugin_dir = _get_idausr_dir() / "plugins" / "ida-codemode"
+    return _compatible_gui_plugin(plugin_dir, PACKAGE_VERSION)
 
 
 class ListDatabasesToolResult(ListDatabasesResult):
@@ -679,7 +683,7 @@ def _serve(
 
     print("Starting IDA Code Mode MCP server...")
     print(
-        f"Using ida-domain {get_ida_domain_version()} from {find_ida_domain_package_path()}"
+        f"Using ida-domain {get_ida_domain_version()} from {_find_ida_domain_package_path()}"
     )
     print(f"Writing semantic trace to {TRACE.path}")
     print("Available tools:")

@@ -8,7 +8,7 @@ import socket
 import sys
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import TracebackType
@@ -180,12 +180,20 @@ class InstanceIdentity:
 
 
 @dataclass(frozen=True)
-class RegistryEntry:
+class DatabaseInstance:
+    """One published Code Mode database instance.
+
+    ``port``, ``_token``, ``version``, and ``idb_key`` are private transport and
+    discovery details. They remain present because exact attachment uses the
+    same simple value object; clients should build behavior only on the public
+    identity, backend, process, path, management, and start-time fields.
+    """
+
     record_id: str
     backend: BackendName
     pid: int
     port: int
-    token: str
+    _token: str = field(repr=False)
     version: int
     idb_path: str
     idb_key: str
@@ -194,15 +202,21 @@ class RegistryEntry:
     started_at: float
 
     def health_identity(self) -> dict[str, Any]:
-        payload = asdict(self)
+        payload = self._registry_payload()
         payload.pop("port")
         payload.pop("token")
         return payload
 
+    def _registry_payload(self) -> dict[str, Any]:
+        """Return the private on-disk/wire representation."""
+        payload = asdict(self)
+        payload["token"] = payload.pop("_token")
+        return payload
+
 
 @dataclass(frozen=True)
-class DiscoveredInstance:
-    entry: RegistryEntry
+class DiscoveredDatabase:
+    instance: DatabaseInstance
     state: InstanceState
     detail: str | None = None
     registry_file: str | None = None
@@ -234,10 +248,10 @@ class InstanceRegistration:
         self.lock = FileLock(self.directory / f"{self.record_id}.lock")
         self.lock.acquire(timeout=0)
         _KEEP_ALIVE.append(self.lock)
-        self.entry: RegistryEntry | None = None
+        self.entry: DatabaseInstance | None = None
         self.registry_path: Path | None = None
 
-    def publish(self, port: int) -> RegistryEntry:
+    def publish(self, port: int) -> DatabaseInstance:
         """Atomically publish the instance record with private permissions."""
 
         if self.entry is not None:
@@ -248,12 +262,12 @@ class InstanceRegistration:
         exe_path = (
             canonical_path(self.identity.exe_path) if self.identity.exe_path else ""
         )
-        entry = RegistryEntry(
+        entry = DatabaseInstance(
             record_id=self.record_id,
             backend=self.identity.backend,
             pid=os.getpid(),
             port=port,
-            token=self.token,
+            _token=self.token,
             version=PROTOCOL_VERSION,
             idb_path=idb_path,
             idb_key=idb_key(idb_path),
@@ -276,7 +290,7 @@ class InstanceRegistration:
                     raise
             with os.fdopen(fd, "w", encoding="utf-8") as file:
                 fd = -1
-                json.dump(asdict(entry), file, separators=(",", ":"))
+                json.dump(entry._registry_payload(), file, separators=(",", ":"))
                 file.write("\n")
                 file.flush()
                 os.fsync(file.fileno())
@@ -313,7 +327,7 @@ class InstanceRegistration:
             pass
 
 
-def load_registry_entry(path: str | os.PathLike[str]) -> RegistryEntry:
+def load_registry_entry(path: str | os.PathLike[str]) -> DatabaseInstance:
     entry_path = Path(path)
     payload = json.loads(entry_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -382,7 +396,8 @@ def load_registry_entry(path: str | os.PathLike[str]) -> RegistryEntry:
     # Protocol v1 readers ignore additive fields. This lets records gain
     # optional metadata without making older clients classify a live owner as
     # absent and potentially spawn over it.
-    return RegistryEntry(**{name: payload[name] for name in required})
+    values = {name: payload[name] for name in required if name != "token"}
+    return DatabaseInstance(_token=payload["token"], **values)
 
 
 def _is_timeout(error: BaseException) -> bool:
@@ -391,7 +406,7 @@ def _is_timeout(error: BaseException) -> bool:
 
 
 def probe_health(
-    entry: RegistryEntry, timeout: float = DEFAULT_TIMEOUT
+    entry: DatabaseInstance, timeout: float = DEFAULT_TIMEOUT
 ) -> tuple[bool, str | None]:
     if entry.version != PROTOCOL_VERSION:
         return (
@@ -403,7 +418,7 @@ def probe_health(
         f"http://{HOST}:{entry.port}/health",
         headers={
             "Accept": "application/json",
-            "Authorization": f"Bearer {entry.token}",
+            "Authorization": f"Bearer {entry._token}",
         },
         method="GET",
     )
@@ -464,7 +479,7 @@ def scan_instances(
     timeout: float = DEFAULT_TIMEOUT,
     *,
     deadline: float | None = None,
-) -> list[DiscoveredInstance]:
+) -> list[DiscoveredDatabase]:
     """Return live records, reaping only records whose lock is acquirable.
 
     When ``deadline`` is supplied, it is an absolute monotonic deadline for the
@@ -474,7 +489,7 @@ def scan_instances(
     directory = ensure_private_directory(
         REGISTRY_DIR if registry_dir is None else registry_dir
     )
-    discovered: list[DiscoveredInstance] = []
+    discovered: list[DiscoveredDatabase] = []
     for name in sorted(glob.glob(str(directory / "*.json"))):
         path = Path(name)
         lock = FileLock(directory / f"{path.stem}.lock")
@@ -497,7 +512,7 @@ def scan_instances(
         except OSError as exc:
             lock.close()
             discovered.append(
-                DiscoveredInstance(entry, InstanceState.BLOCKED, str(exc), str(path))
+                DiscoveredDatabase(entry, InstanceState.BLOCKED, str(exc), str(path))
             )
             continue
         lock.close()
@@ -510,7 +525,7 @@ def scan_instances(
             probe_timeout = min(probe_timeout, remaining)
         valid, detail = probe_health(entry, probe_timeout)
         discovered.append(
-            DiscoveredInstance(
+            DiscoveredDatabase(
                 entry,
                 InstanceState.READY if valid else InstanceState.BLOCKED,
                 detail,
@@ -521,31 +536,9 @@ def scan_instances(
     return discovered
 
 
-def discover_instances(
-    registry_dir: str | os.PathLike[str] | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Compatibility wrapper returning ready and blocked instance dictionaries."""
-
-    ready: list[dict[str, Any]] = []
-    blocked: list[dict[str, Any]] = []
-    for instance in scan_instances(registry_dir, timeout):
-        payload = asdict(instance.entry)
-        payload.update(
-            registry_file=instance.registry_file,
-            availability=instance.state.value,
-        )
-        if instance.state is InstanceState.READY:
-            ready.append(payload)
-        else:
-            payload["error"] = instance.detail or "instance is unavailable"
-            blocked.append(payload)
-    return ready, blocked
-
-
 def read_records(
     registry_dir: str | os.PathLike[str] | None = None,
-) -> list[RegistryEntry]:
+) -> list[DatabaseInstance]:
     """Return published registry records without probing health or acquiring locks.
 
     Much cheaper than :func:`scan_instances` (no HTTP health probe, no lock
@@ -557,7 +550,7 @@ def read_records(
     directory = ensure_private_directory(
         REGISTRY_DIR if registry_dir is None else registry_dir
     )
-    records: list[RegistryEntry] = []
+    records: list[DatabaseInstance] = []
     for name in sorted(glob.glob(str(directory / "*.json"))):
         try:
             records.append(load_registry_entry(name))
@@ -569,7 +562,7 @@ def read_records(
 def find_gui_owner(
     idb_path: str | os.PathLike[str],
     registry_dir: str | os.PathLike[str] | None = None,
-) -> RegistryEntry | None:
+) -> DatabaseInstance | None:
     """Return a live registered GUI record that owns ``idb_path``, or None.
 
     Cheaply lists records with :func:`read_records`, then confirms liveness for
@@ -577,7 +570,7 @@ def find_gui_owner(
     authority :func:`scan_instances` and the resolver use - instead of
     health-probing every instance. A held lock means the owner is running
     (READY or BLOCKED), so a second GUI server would make
-    :func:`resolve_instance` raise ``AmbiguousInstance`` and the caller should
+    :func:`resolve_instance` raise ``AmbiguousDatabaseError`` and the caller should
     back off and attach instead. An acquirable lock means the record is stale
     and is ignored (unlike a health probe, this never gives a false negative on
     a transient blip, which would otherwise create a persistent duplicate owner).

@@ -9,9 +9,9 @@ import ida_loader
 import ida_nalt
 import idaapi
 
-from ida_codemode.registry import REGISTRY_DIR, InstanceIdentity, find_gui_owner
-from ida_codemode.runtime import AnalysisState, IDARuntime, create_autoanalysis_hook
-from ida_codemode.server import CodeModeHTTPServer
+from ida_codemode._registry import REGISTRY_DIR, InstanceIdentity, find_gui_owner
+from ida_codemode._runtime import AnalysisState, IDARuntime, create_autoanalysis_hook
+from ida_codemode._server import CodeModeHTTPServer
 
 
 class ReadyToRunHook(ida_kernwin.UI_Hooks):
@@ -89,8 +89,9 @@ class CodeModePlugin(idaapi.plugin_t):
         # Back off if another plugin already registered this GUI database. IDA
         # runs ready_to_run callbacks sequentially on its UI thread, and
         # server.start() publishes synchronously, so the next plugin sees it.
-        # A second owner would make the resolver raise AmbiguousInstance.
+        # A second owner would make the resolver raise AmbiguousDatabaseError.
         if idb_path and find_gui_owner(idb_path) is not None:
+            ida_kernwin.msg("[ida-codemode] Database already registered, skipping...\n")
             return
 
         from ida_domain import Database
@@ -121,10 +122,13 @@ class CodeModePlugin(idaapi.plugin_t):
             raise
         self._runtime = runtime
         self._server = server
+        ida_kernwin.msg("[ida-codemode] Database registered successfully!\n")
 
     def run(self, arg: int) -> None:
         if self._server is not None:
-            ida_kernwin.msg(f"[ida-codemode] {self._server.url}\n")
+            ida_kernwin.msg(f"[ida-codemode] Server running at {self._server.url}\n")
+        else:
+            ida_kernwin.msg("[ida-codemode] Server not running...\n")
 
     def term(self) -> None:
         if self._ui_hook is not None:

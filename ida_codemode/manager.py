@@ -13,23 +13,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict
 
-from ida_codemode.client import MAX_KEEPALIVE_SECONDS, ClientError, DatabaseHandle
-from ida_codemode.registry import (
+from ida_codemode._registry import (
     LOG_DIR,
-    RegistryEntry,
+    DatabaseInstance,
     canonical_path,
     idb_key,
     scan_instances,
 )
-from ida_codemode.resolver import expected_idb_path
-from ida_codemode.runtime import PythonExecutionResult
+from ida_codemode._resolver import expected_idb_path
+from ida_codemode.errors import CodeModeConnectionError, DatabaseSelectionError
+from ida_codemode.handle import DatabaseHandle
+from ida_codemode.models import PythonExecutionResult
+from ida_codemode.options import MAX_KEEPALIVE_SECONDS, DatabaseOpenOptions
 
 DEFAULT_OPEN_TIMEOUT_SECONDS = 300.0
 DEFAULT_EXECUTE_TIMEOUT_SECONDS = 360.0
-
-
-class DatabaseError(Exception):
-    """Error raised by database session management."""
 
 
 DatabaseEventCallback = Callable[[str, dict[str, Any]], None]
@@ -39,7 +37,7 @@ def _resolve_user_path(path: str) -> str:
     return canonical_path(path)
 
 
-def _entry_target_fields(entry: RegistryEntry) -> dict[str, Any]:
+def _entry_target_fields(entry: DatabaseInstance) -> dict[str, Any]:
     return {
         "record_id": entry.record_id,
         "backend": entry.backend,
@@ -97,7 +95,7 @@ class CloseDatabaseResult(TypedDict):
 
 @dataclass(frozen=True)
 class _AttachedDatabase:
-    entry: RegistryEntry
+    entry: DatabaseInstance
     instance_id: str
     current: bool
 
@@ -159,7 +157,7 @@ class DatabaseManager:
         return {
             "instance_id": session.instance_id,
             "requested_path": session.requested_path,
-            **_entry_target_fields(session.handle.entry),
+            **_entry_target_fields(session.handle.instance),
         }
 
     def _handle_disconnected(self, handle: DatabaseHandle, reason: str) -> None:
@@ -199,7 +197,7 @@ class DatabaseManager:
         with self._open_lock:
             with self._lock:
                 if self._shutdown_started:
-                    raise DatabaseError("database manager is shutting down")
+                    raise DatabaseSelectionError("database manager is shutting down")
                 candidate = next(
                     (
                         session
@@ -224,16 +222,18 @@ class DatabaseManager:
             if existing is None:
                 handle = DatabaseHandle.open(
                     resolved_path,
-                    timeout=self._open_timeout,
-                    keepalive=self._keepalive,
+                    options=DatabaseOpenOptions(
+                        startup_timeout=self._open_timeout,
+                        keepalive=self._keepalive,
+                    ),
                 )
                 if not handle.connected:
                     reason = handle.disconnect_reason or "database connection closed"
                     handle.close()
-                    raise DatabaseError(
+                    raise DatabaseSelectionError(
                         f"database disconnected while opening: {reason}"
                     )
-                entry = handle.entry
+                entry = handle.instance
                 with self._lock:
                     # shutdown() may have run while DatabaseHandle.open() was
                     # resolving or establishing its lease. Never install a
@@ -247,7 +247,7 @@ class DatabaseManager:
                                 session
                                 for session in self._instances.values()
                                 if session.handle.connected
-                                and session.handle.entry.record_id == entry.record_id
+                                and session.handle.instance.record_id == entry.record_id
                             ),
                             None,
                         )
@@ -271,7 +271,7 @@ class DatabaseManager:
 
                 if shutting_down:
                     handle.close()
-                    raise DatabaseError("database manager is shutting down")
+                    raise DatabaseSelectionError("database manager is shutting down")
                 assert existing is not None
                 if existing.handle is not handle:
                     handle.close()
@@ -282,7 +282,7 @@ class DatabaseManager:
                         reason = (
                             handle.disconnect_reason or "database connection closed"
                         )
-                        raise DatabaseError(
+                        raise DatabaseSelectionError(
                             f"database disconnected while opening: {reason}"
                         )
                     event = "database_opened"
@@ -296,13 +296,13 @@ class DatabaseManager:
             )
             return OpenDatabaseResult(
                 instance_id=existing.instance_id,
-                backend=existing.handle.entry.backend,
+                backend=existing.handle.instance.backend,
                 status="current" if current == existing.instance_id else "attached",
             )
 
     @staticmethod
-    def _disconnected_error(instance_id: str) -> DatabaseError:
-        return DatabaseError(
+    def _disconnected_error(instance_id: str) -> DatabaseSelectionError:
+        return DatabaseSelectionError(
             f"database instance {instance_id} disconnected since it was last used "
             "and is no longer valid; call list_databases() and open_database() again"
         )
@@ -354,14 +354,16 @@ class DatabaseManager:
             self._await_startup_open()
             target_id = self._resolve_target_id(instance_id)
         if target_id is None:
-            raise DatabaseError("no open database instance; call open_database() first")
+            raise DatabaseSelectionError(
+                "no open database instance; call open_database() first"
+            )
         with self._lock:
             session = self._instances.get(target_id)
             disconnected = self._disconnected_instances.get(target_id)
         if session is None and disconnected is not None:
             raise self._disconnected_error(target_id)
         if session is None:
-            raise DatabaseError(f"unknown database instance: {target_id}")
+            raise DatabaseSelectionError(f"unknown database instance: {target_id}")
         return target_id, session
 
     def resolve_instance_id(self, instance_id: str | None) -> str:
@@ -384,7 +386,7 @@ class DatabaseManager:
                 return
             result = self.wait_autoanalysis(target_id, operation_id=operation_id)
             if not result["complete"]:
-                raise DatabaseError(
+                raise DatabaseSelectionError(
                     "autoanalysis did not complete; Python was not executed"
                 )
 
@@ -416,7 +418,7 @@ class DatabaseManager:
                     operation_id=operation_id,
                     persist_globals=persist_globals,
                 )
-            except ClientError:
+            except CodeModeConnectionError:
                 if not session.handle.connected:
                     raise self._disconnected_error(target_id) from None
                 raise
@@ -451,7 +453,7 @@ class DatabaseManager:
                     timeout,
                     operation_id=operation_id,
                 )
-            except ClientError:
+            except CodeModeConnectionError:
                 if not session.handle.connected:
                     raise self._disconnected_error(target_id) from None
                 raise
@@ -470,7 +472,7 @@ class DatabaseManager:
                 raise self._disconnected_error(target_id)
             try:
                 result = session.handle.save_database()
-            except ClientError:
+            except CodeModeConnectionError:
                 if not session.handle.connected:
                     raise self._disconnected_error(target_id) from None
                 raise
@@ -482,11 +484,11 @@ class DatabaseManager:
             )
             path = result.get("idb_path")
             if not isinstance(path, str):
-                raise DatabaseError("save_database returned an invalid path")
+                raise DatabaseSelectionError("save_database returned an invalid path")
             return SaveDatabaseResult(path=path)
 
     @staticmethod
-    def _listing_path(entry: RegistryEntry) -> str:
+    def _listing_path(entry: DatabaseInstance) -> str:
         """Return a path that open_database() can use to reach this instance."""
         if (
             entry.exe_path
@@ -507,7 +509,7 @@ class DatabaseManager:
         attached: dict[str, _AttachedDatabase] = {}
         for session in sessions:
             with session.operation_lock:
-                entry = session.handle.entry
+                entry = session.handle.instance
                 attached[entry.record_id] = _AttachedDatabase(
                     entry=entry,
                     instance_id=session.instance_id,
@@ -516,7 +518,7 @@ class DatabaseManager:
 
         instances: list[DatabaseListing] = []
         for discovered in scan_instances():
-            entry = discovered.entry
+            entry = discovered.instance
             local = attached.pop(entry.record_id, None)
             if discovered.state.value != "ready":
                 status: DatabaseStatus = "unavailable"
@@ -565,7 +567,7 @@ class DatabaseManager:
         with self._lock:
             current_session = self._instances.get(target_id)
             if current_session is not session:
-                raise DatabaseError(f"unknown database instance: {target_id}")
+                raise DatabaseSelectionError(f"unknown database instance: {target_id}")
             self._instances.pop(target_id)
             if self._current_instance_id == target_id:
                 self._current_instance_id = next(iter(self._instances), None)

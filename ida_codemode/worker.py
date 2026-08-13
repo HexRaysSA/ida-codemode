@@ -7,9 +7,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .registry import LOG_DIR, REGISTRY_DIR, InstanceIdentity, ensure_private_directory
-from .runtime import AnalysisState, IDARuntime, create_autoanalysis_hook
-from .server import DEFAULT_LEASE_GRACE_SECONDS, CodeModeHTTPServer
+from ._registry import LOG_DIR, REGISTRY_DIR, InstanceIdentity, ensure_private_directory
+from ._runtime import AnalysisState, IDARuntime, create_autoanalysis_hook
+from ._server import DEFAULT_LEASE_GRACE_SECONDS, CodeModeHTTPServer
 
 
 def _parse_non_negative_int(value: str) -> int:

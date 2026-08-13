@@ -253,6 +253,7 @@ def create_log_archive(
     session_files: Sequence[Path] | None = None,
     *,
     sessions_dir: Path = DEFAULT_SESSIONS_DIR,
+    logs_dir: Path = DEFAULT_LOGS_DIR,
     overwrite: bool = False,
 ) -> LogArchiveResult:
     """Create a ZIP containing semantic sessions and their linked transcripts."""
@@ -264,7 +265,7 @@ def create_log_archive(
     if output in sessions:
         raise LogArchiveError("output path cannot be one of the selected sessions")
     output.parent.mkdir(parents=True, exist_ok=True)
-    operational_logs = _operational_logs(DEFAULT_LOGS_DIR, output)
+    operational_logs = _operational_logs(logs_dir, output)
 
     session_sources: list[_SessionSource] = []
     for index, path in enumerate(sessions, start=1):

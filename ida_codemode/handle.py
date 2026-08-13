@@ -5,42 +5,24 @@ import socket
 import threading
 import time
 import uuid
-from collections.abc import Callable, Sequence
-from pathlib import Path
+from collections.abc import Callable
 from types import TracebackType
 from typing import Any, Self
 
-from .registry import HOST, RegistryEntry
-from .resolver import resolve_instance
-
-
-class ClientError(RuntimeError):
-    pass
-
-
-class InstanceDisconnectedError(ClientError):
-    pass
-
+from ._registry import HOST, DatabaseInstance
+from ._resolver import resolve_instance
+from .errors import (
+    CodeModeConnectionError,
+    DatabaseDisconnectedError,
+    RemoteError,
+)
+from .models import AnalysisResult, PythonExecutionResult, SaveResult, ShutdownResult
+from .options import MAX_KEEPALIVE_SECONDS, DatabaseOpenOptions
 
 # The server reaps an idle HTTP/1.1 connection after 30 seconds. Reconnect
 # proactively with headroom rather than discovering the close during a POST,
 # which cannot safely be retried after its execution status becomes ambiguous.
 RPC_CONNECTION_MAX_IDLE_SECONDS = 20.0
-MAX_KEEPALIVE_SECONDS = 3600.0
-
-
-class RemoteError(ClientError):
-    def __init__(
-        self,
-        code: str,
-        message: str,
-        status: int,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.code = code
-        self.status = status
-        self.details = details or {}
 
 
 class DatabaseHandle:
@@ -49,7 +31,7 @@ class DatabaseHandle:
     def __init__(
         self,
         path: str,
-        entry: RegistryEntry,
+        instance: DatabaseInstance,
         *,
         keepalive: float = 0.0,
         on_disconnect: Callable[["DatabaseHandle", str], None] | None = None,
@@ -67,7 +49,7 @@ class DatabaseHandle:
         self._closed = threading.Event()
         self._disconnected = threading.Event()
         self._disconnect_reason: str | None = None
-        self._entry = entry
+        self._instance = instance
         self._rpc_connection: http.client.HTTPConnection | None = None
         self._rpc_last_used: float | None = None
         self._active_operation_id: str | None = None
@@ -75,10 +57,10 @@ class DatabaseHandle:
         self._lease_response: http.client.HTTPResponse | None = None
         self._lease_socket: socket.socket | None = None
         self._lease_thread: threading.Thread | None = None
-        self._install_lease(entry)
+        self._install_lease(instance)
         thread = threading.Thread(
             target=self._monitor_lease,
-            name=f"ida-codemode-lease-{entry.pid}",
+            name=f"ida-codemode-lease-{instance.pid}",
             daemon=True,
         )
         self._lease_thread = thread
@@ -87,20 +69,20 @@ class DatabaseHandle:
     @classmethod
     def attach(
         cls,
-        entry: RegistryEntry,
+        instance: DatabaseInstance,
         *,
         path: str | None = None,
         keepalive: float = 0.0,
         on_disconnect: Callable[["DatabaseHandle", str], None] | None = None,
     ) -> Self:
-        """Attach directly to one discovered registry entry without re-resolving it."""
+        """Attach directly to one discovered instance without re-resolving it."""
 
-        requested_path = path or entry.exe_path or entry.idb_path
+        requested_path = path or instance.exe_path or instance.idb_path
         if not requested_path:
-            raise ValueError("registry entry has no attachable database path")
+            raise ValueError("instance has no attachable database path")
         return cls(
             requested_path,
-            entry,
+            instance,
             keepalive=keepalive,
             on_disconnect=on_disconnect,
         )
@@ -110,85 +92,54 @@ class DatabaseHandle:
         cls,
         path: str,
         *,
-        spawn: bool = True,
-        timeout: float = 120.0,
-        output_database: str | Path | None = None,
-        auto_analysis: bool = False,
-        image_base: int | None = None,
-        new_database: bool = False,
-        compiler: str | None = None,
-        first_pass_directives: Sequence[str] = (),
-        second_pass_directives: Sequence[str] = (),
-        disable_fpp: bool = False,
-        entry_point: int | None = None,
-        jit_debugger: bool | None = None,
-        log_file: str | Path | None = None,
-        disable_mouse: bool = False,
-        plugin_options: str | None = None,
-        processor: str | None = None,
-        db_compression: str | None = None,
-        run_debugger: str | None = None,
-        load_resources: bool = False,
-        script_file: str | Path | None = None,
-        script_args: Sequence[str] = (),
-        file_type: str | None = None,
-        file_member: str | None = None,
-        empty_database: bool = False,
-        windows_dir: str | Path | None = None,
-        no_segmentation: bool = False,
-        debug_flags: int | Sequence[str] = 0,
-        keepalive: float = 0.0,
+        options: DatabaseOpenOptions | None = None,
         on_disconnect: Callable[["DatabaseHandle", str], None] | None = None,
     ) -> Self:
-        """Attach to a shared instance, spawning a configured worker if needed.
+        """Attach to a shared instance, spawning a configured worker if needed."""
 
-        IDA command options are spawn-only: they configure a newly imported
-        idalib database and cannot reconfigure a reused GUI or worker. ``image_base``
-        is a byte address and must be 16-byte aligned; the worker converts it to
-        IDA's paragraph-based ``-b`` value.
-        """
+        options = options or DatabaseOpenOptions()
 
-        def resolve() -> RegistryEntry:
+        def resolve() -> DatabaseInstance:
             return resolve_instance(
                 path,
-                spawn=spawn,
-                timeout=timeout,
-                output_database=output_database,
-                auto_analysis=auto_analysis,
-                image_base=image_base,
-                new_database=new_database,
-                compiler=compiler,
-                first_pass_directives=first_pass_directives,
-                second_pass_directives=second_pass_directives,
-                disable_fpp=disable_fpp,
-                entry_point=entry_point,
-                jit_debugger=jit_debugger,
-                log_file=log_file,
-                disable_mouse=disable_mouse,
-                plugin_options=plugin_options,
-                processor=processor,
-                db_compression=db_compression,
-                run_debugger=run_debugger,
-                load_resources=load_resources,
-                script_file=script_file,
-                script_args=script_args,
-                file_type=file_type,
-                file_member=file_member,
-                empty_database=empty_database,
-                windows_dir=windows_dir,
-                no_segmentation=no_segmentation,
-                debug_flags=debug_flags,
+                spawn=options.spawn,
+                timeout=options.startup_timeout,
+                output_database=options.output_database,
+                auto_analysis=options.auto_analysis,
+                image_base=options.image_base,
+                new_database=options.new_database,
+                compiler=options.compiler,
+                first_pass_directives=options.first_pass_directives,
+                second_pass_directives=options.second_pass_directives,
+                disable_fpp=options.disable_fpp,
+                entry_point=options.entry_point,
+                jit_debugger=options.jit_debugger,
+                log_file=options.log_file,
+                disable_mouse=options.disable_mouse,
+                plugin_options=options.plugin_options,
+                processor=options.processor,
+                db_compression=options.db_compression,
+                run_debugger=options.run_debugger,
+                load_resources=options.load_resources,
+                script_file=options.script_file,
+                script_args=options.script_args,
+                file_type=options.file_type,
+                file_member=options.file_member,
+                empty_database=options.empty_database,
+                windows_dir=options.windows_dir,
+                no_segmentation=options.no_segmentation,
+                debug_flags=options.debug_flags,
             )
 
-        entry = resolve()
+        instance = resolve()
         try:
             return cls.attach(
-                entry,
+                instance,
                 path=path,
-                keepalive=keepalive,
+                keepalive=options.keepalive,
                 on_disconnect=on_disconnect,
             )
-        except ClientError:
+        except CodeModeConnectionError:
             # The worker may cross its zero-lease shutdown boundary between
             # resolve and the SSE handshake. Resolve once more as promised by
             # the instance lifecycle contract.
@@ -197,14 +148,15 @@ class DatabaseHandle:
             return cls.attach(
                 replacement,
                 path=path,
-                keepalive=keepalive,
+                keepalive=options.keepalive,
                 on_disconnect=on_disconnect,
             )
 
     @property
-    def entry(self) -> RegistryEntry:
+    def instance(self) -> DatabaseInstance:
+        """The exact Code Mode instance leased by this handle."""
         with self._lock:
-            return self._entry
+            return self._instance
 
     @property
     def connected(self) -> bool:
@@ -223,7 +175,7 @@ class DatabaseHandle:
             callback(self, self._disconnect_reason or "database connection closed")
 
     def _open_lease(
-        self, entry: RegistryEntry
+        self, entry: DatabaseInstance
     ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse, socket.socket]:
         connection = http.client.HTTPConnection(HOST, entry.port, timeout=10.0)
         try:
@@ -232,17 +184,19 @@ class DatabaseHandle:
                 f"/health?sse=1&lease_id={self._lease_id}&keepalive={self.keepalive:g}",
                 headers={
                     "Accept": "text/event-stream",
-                    "Authorization": f"Bearer {entry.token}",
+                    "Authorization": f"Bearer {entry._token}",
                 },
             )
             response = connection.getresponse()
         except (OSError, http.client.HTTPException) as exc:
             connection.close()
-            raise ClientError(f"failed to establish instance lease: {exc}") from exc
+            raise CodeModeConnectionError(
+                f"failed to establish instance lease: {exc}"
+            ) from exc
         if response.status != 200:
             body = response.read(4096).decode("utf-8", errors="replace")
             connection.close()
-            raise ClientError(
+            raise CodeModeConnectionError(
                 f"failed to establish instance lease: HTTP {response.status}: {body}"
             )
         # The 10-second timeout bounds only the handshake. A lease is an
@@ -256,21 +210,23 @@ class DatabaseHandle:
         if lease_socket is None:
             response.close()
             connection.close()
-            raise ClientError("failed to establish instance lease: socket unavailable")
+            raise CodeModeConnectionError(
+                "failed to establish instance lease: socket unavailable"
+            )
         lease_socket.settimeout(None)
         return connection, response, lease_socket
 
-    def _install_lease(self, entry: RegistryEntry) -> None:
+    def _install_lease(self, entry: DatabaseInstance) -> None:
         connection, response, lease_socket = self._open_lease(entry)
         with self._lock:
             if self._closed.is_set():
                 response.close()
                 connection.close()
-                raise ClientError("database handle is closed")
+                raise CodeModeConnectionError("database handle is closed")
             old_response = self._lease_response
             old_connection = self._lease_connection
             old_socket = self._lease_socket
-            self._entry = entry
+            self._instance = entry
             self._lease_connection = connection
             self._lease_response = response
             self._lease_socket = lease_socket
@@ -323,14 +279,14 @@ class DatabaseHandle:
 
     def _rpc_connection_for(
         self,
-        entry: RegistryEntry,
+        entry: DatabaseInstance,
         timeout: float | None,
     ) -> http.client.HTTPConnection:
         now = time.monotonic()
         stale: http.client.HTTPConnection | None = None
         with self._lock:
             if self._closed.is_set():
-                raise ClientError("database handle is closed")
+                raise CodeModeConnectionError("database handle is closed")
             connection = self._rpc_connection
             if connection is not None and (
                 connection.port != entry.port
@@ -384,12 +340,12 @@ class DatabaseHandle:
         body = json.dumps(request_payload).encode("utf-8") if method == "POST" else None
         with self._request_lock:
             if self._closed.is_set():
-                raise ClientError("database handle is closed")
+                raise CodeModeConnectionError("database handle is closed")
             if self._disconnected.is_set():
-                raise InstanceDisconnectedError(
+                raise DatabaseDisconnectedError(
                     self._disconnect_reason or "database instance disconnected"
                 )
-            entry = self.entry
+            entry = self.instance
             connection = self._rpc_connection_for(entry, timeout)
             if operation_id is not None:
                 with self._lock:
@@ -402,7 +358,7 @@ class DatabaseHandle:
                     headers={
                         "Accept": "application/json",
                         "Content-Type": "application/json",
-                        "Authorization": f"Bearer {entry.token}",
+                        "Authorization": f"Bearer {entry._token}",
                     },
                 )
                 response = connection.getresponse()
@@ -415,7 +371,9 @@ class DatabaseHandle:
                 # Do not retry automatically: a POST may have executed before
                 # the connection failed. The next operation gets a fresh socket.
                 self._discard_rpc_connection(connection)
-                raise ClientError(f"Code Mode request failed: {exc}") from exc
+                raise CodeModeConnectionError(
+                    f"Code Mode request failed: {exc}"
+                ) from exc
             finally:
                 if operation_id is not None:
                     with self._lock:
@@ -429,12 +387,14 @@ class DatabaseHandle:
             response_payload = json.loads(response_body)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             if status != 200:
-                raise ClientError(
+                raise CodeModeConnectionError(
                     f"Code Mode request failed with HTTP {status}"
                 ) from exc
-            raise ClientError("Code Mode response was not valid JSON") from exc
+            raise CodeModeConnectionError(
+                "Code Mode response was not valid JSON"
+            ) from exc
         if not isinstance(response_payload, dict):
-            raise ClientError("Code Mode response was not a JSON object")
+            raise CodeModeConnectionError("Code Mode response was not a JSON object")
         if status != 200 or (unwrap_result and not response_payload.get("ok")):
             error = response_payload.get("error")
             if isinstance(error, dict):
@@ -449,7 +409,9 @@ class DatabaseHandle:
                     status,
                     details,
                 )
-            raise ClientError(f"Code Mode request failed with HTTP {status}")
+            raise CodeModeConnectionError(
+                f"Code Mode request failed with HTTP {status}"
+            )
         return response_payload.get("result") if unwrap_result else response_payload
 
     def execute_python(
@@ -459,7 +421,7 @@ class DatabaseHandle:
         *,
         operation_id: str | None = None,
         persist_globals: bool = False,
-    ) -> Any:
+    ) -> PythonExecutionResult:
         """Execute Python; stateless execution resets this handle's namespace."""
 
         payload: dict[str, Any] = {
@@ -478,7 +440,7 @@ class DatabaseHandle:
             operation_id=operation_id or uuid.uuid4().hex,
         )
 
-    def poll_autoanalysis(self) -> dict[str, Any]:
+    def poll_autoanalysis(self) -> AnalysisResult:
         """Return initial autoanalysis status without enabling or advancing it."""
         result = self._request(
             "/poll_autoanalysis",
@@ -488,7 +450,9 @@ class DatabaseHandle:
             unwrap_result=False,
         )
         if not isinstance(result, dict) or not isinstance(result.get("complete"), bool):
-            raise ClientError("poll_autoanalysis returned an invalid result")
+            raise CodeModeConnectionError(
+                "poll_autoanalysis returned an invalid result"
+            )
         return result
 
     def wait_autoanalysis(
@@ -496,7 +460,7 @@ class DatabaseHandle:
         timeout: float | None = None,
         *,
         operation_id: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> AnalysisResult:
         """Wait for initial autoanalysis through the public Code Mode route."""
         payload: dict[str, Any] = {}
         if timeout is not None:
@@ -510,7 +474,9 @@ class DatabaseHandle:
             operation_id=operation_id or uuid.uuid4().hex,
         )
         if not isinstance(result, dict) or not isinstance(result.get("complete"), bool):
-            raise ClientError("wait_autoanalysis returned an invalid result")
+            raise CodeModeConnectionError(
+                "wait_autoanalysis returned an invalid result"
+            )
         return result
 
     def cancel_operation(self, operation_id: str) -> bool:
@@ -518,7 +484,7 @@ class DatabaseHandle:
         with self._lock:
             if self._active_operation_id != operation_id:
                 return False
-            entry = self._entry
+            entry = self._instance
 
         connection = http.client.HTTPConnection(HOST, entry.port, timeout=2.0)
         try:
@@ -535,7 +501,7 @@ class DatabaseHandle:
                 headers={
                     "Accept": "application/json",
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {entry.token}",
+                    "Authorization": f"Bearer {entry._token}",
                 },
             )
             response = connection.getresponse()
@@ -578,13 +544,13 @@ class DatabaseHandle:
                 return False
             time.sleep(0.01)
 
-    def save_database(self) -> dict[str, Any]:
+    def save_database(self) -> SaveResult:
         result = self._request("/save_database", {}, timeout=305.0)
         if not isinstance(result, dict):
-            raise ClientError("save_database returned an invalid result")
+            raise CodeModeConnectionError("save_database returned an invalid result")
         return result
 
-    def shutdown_database(self, *, save: bool = True) -> dict[str, Any]:
+    def shutdown_database(self, *, save: bool = True) -> ShutdownResult:
         """Shut down an exclusively leased managed worker, saving or discarding it."""
         if not isinstance(save, bool):
             raise TypeError("save must be a boolean")
@@ -594,13 +560,15 @@ class DatabaseHandle:
             or result.get("shutting_down") is not True
             or result.get("save") is not save
         ):
-            raise ClientError("shutdown_database returned an invalid result")
+            raise CodeModeConnectionError(
+                "shutdown_database returned an invalid result"
+            )
         return result
 
     def _release_remote_lease(self) -> None:
         """Best-effort lease release over a connection independent of RPC work."""
 
-        entry = self.entry
+        entry = self.instance
         connection = http.client.HTTPConnection(HOST, entry.port, timeout=2.0)
         try:
             body = json.dumps({"lease_id": self._lease_id}).encode("utf-8")
@@ -611,7 +579,7 @@ class DatabaseHandle:
                 headers={
                     "Accept": "application/json",
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {entry.token}",
+                    "Authorization": f"Bearer {entry._token}",
                 },
             )
             response = connection.getresponse()
@@ -671,8 +639,6 @@ class DatabaseHandle:
                 pass
         if connection is not None:
             connection.close()
-
-    disconnect = close
 
     def __enter__(self) -> Self:
         return self

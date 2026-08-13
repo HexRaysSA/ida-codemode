@@ -18,8 +18,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ida_codemode.client import DatabaseHandle
-from ida_codemode.registry import HOST
+from ida_codemode import DatabaseHandle, DatabaseOpenOptions
+from ida_codemode._registry import HOST
 
 TRIVIAL_CODE = "result = 1"
 IDA_CALL_CODE = """\
@@ -162,14 +162,16 @@ def benchmark(args: argparse.Namespace) -> dict[str, Any]:
     opened_at = time.perf_counter_ns()
     handle = DatabaseHandle.open(
         str(args.target),
-        spawn=not args.no_spawn,
-        timeout=args.open_timeout,
-        keepalive=args.keepalive,
+        options=DatabaseOpenOptions(
+            spawn=not args.no_spawn,
+            startup_timeout=args.open_timeout,
+            keepalive=args.keepalive,
+        ),
     )
     handle_open_ms = (time.perf_counter_ns() - opened_at) / 1_000_000
     try:
-        entry = handle.entry
-        endpoint = Endpoint(entry.port, entry.token, args.request_timeout)
+        entry = handle.instance
+        endpoint = Endpoint(entry.port, entry._token, args.request_timeout)
         health, _ = endpoint.fresh_request("GET", "/health")
         worker_environment = handle.execute_python(ENVIRONMENT_CODE)["result"]
 

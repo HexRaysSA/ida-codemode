@@ -37,7 +37,7 @@ MANAGED_FILES = (
     "pyproject.toml",
     "uv.lock",
     "ida-plugin.json",
-    "ida_codemode/http.py",
+    "ida_codemode/_http.py",
     ".claude-plugin/plugin.json",
     ".codex-plugin/plugin.json",
 )
@@ -139,11 +139,11 @@ def _updated_files(old: str, new: str) -> dict[str, str]:
         )
     texts["uv.lock"] = uv_text
 
-    texts["ida_codemode/http.py"] = _replace_exact(
-        texts["ida_codemode/http.py"],
+    texts["ida_codemode/_http.py"] = _replace_exact(
+        texts["ida_codemode/_http.py"],
         f'server_version = "ida-codemode/{old}"',
         f'server_version = "ida-codemode/{new}"',
-        "ida_codemode/http.py",
+        "ida_codemode/_http.py",
     )
 
     # The plugin archive ships only the entry point; ida_codemode itself is
