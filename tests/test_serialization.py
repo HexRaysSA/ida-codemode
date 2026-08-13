@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from ida_codemode.serialization import dumps_json
+from ida_codemode._serialization import dumps_json
 
 
 def test_json_compatible_result_is_encoded_without_conversion() -> None:

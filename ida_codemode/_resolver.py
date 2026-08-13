@@ -6,40 +6,27 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .paths import find_console_script
-from .registry import (
+from ._registry import (
     DEFAULT_TIMEOUT,
     LOG_DIR,
     SPAWN_DIR,
-    DiscoveredInstance,
+    DatabaseInstance,
+    DiscoveredDatabase,
     FileLock,
     InstanceState,
-    RegistryEntry,
     canonical_path,
     ensure_private_directory,
     idb_key,
     scan_instances,
 )
-
-
-class ResolveError(RuntimeError):
-    pass
-
-
-class NoInstance(ResolveError):
-    pass
-
-
-class IdbBusy(ResolveError):
-    pass
-
-
-class AmbiguousInstance(ResolveError):
-    pass
-
-
-class WorkerStartError(ResolveError):
-    pass
+from .errors import (
+    AmbiguousDatabaseError,
+    DatabaseBusyError,
+    DatabaseOpenError,
+    NoDatabaseInstanceError,
+    WorkerStartError,
+)
+from .paths import _find_console_script
 
 
 @dataclass(frozen=True)
@@ -114,24 +101,24 @@ def expected_idb_path(path: str | os.PathLike[str]) -> str:
 
 
 def _single(
-    instances: list[DiscoveredInstance],
+    instances: list[DiscoveredDatabase],
     description: str,
-) -> DiscoveredInstance | None:
+) -> DiscoveredDatabase | None:
     if not instances:
         return None
     if len(instances) > 1:
-        records = ", ".join(item.entry.record_id for item in instances)
-        raise AmbiguousInstance(
+        records = ", ".join(item.instance.record_id for item in instances)
+        raise AmbiguousDatabaseError(
             f"multiple live instances match {description}: {records}"
         )
     return instances[0]
 
 
 def _resolve_existing(
-    instances: list[DiscoveredInstance],
+    instances: list[DiscoveredDatabase],
     source: str,
     expected_idb: str,
-) -> RegistryEntry | None:
+) -> DatabaseInstance | None:
     # Match on the case-insensitive identity key, never the real (case-preserving)
     # path string: a GUI instance registered as Foo.exe.i64 must still match a
     # lookup spelled foo.exe.i64 on case-insensitive volumes.
@@ -141,45 +128,47 @@ def _resolve_existing(
             [
                 item
                 for item in instances
-                if item.entry.backend == "gui"
-                and item.entry.exe_path
-                and idb_key(item.entry.exe_path) == source_key
+                if item.instance.backend == "gui"
+                and item.instance.exe_path
+                and idb_key(item.instance.exe_path) == source_key
             ],
             f"executable {source}",
         )
         if gui is not None:
             if gui.state is InstanceState.READY:
-                return gui.entry
-            raise IdbBusy(
-                f"GUI instance {gui.entry.record_id} for {source} is unavailable: "
+                return gui.instance
+            raise DatabaseBusyError(
+                f"GUI instance {gui.instance.record_id} for {source} is unavailable: "
                 f"{gui.detail or 'health probe failed'}"
             )
 
     expected_key = idb_key(expected_idb)
     owner = _single(
-        [item for item in instances if item.entry.idb_key == expected_key],
+        [item for item in instances if item.instance.idb_key == expected_key],
         f"IDB {expected_idb}",
     )
     if owner is None:
         return None
     if owner.state is InstanceState.READY:
-        return owner.entry
-    raise IdbBusy(
-        f"instance {owner.entry.record_id} owns {expected_idb} but is unavailable: "
+        return owner.instance
+    raise DatabaseBusyError(
+        f"instance {owner.instance.record_id} owns {expected_idb} but is unavailable: "
         f"{owner.detail or 'health probe failed'}"
     )
 
 
-def spawn_worker(
+def _build_worker_command(
     source: str,
     expected_idb: str,
     lease_grace: float,
-    options: WorkerLaunchOptions | None = None,
-) -> tuple[subprocess.Popen[bytes], Path]:
+    options: WorkerLaunchOptions,
+    *,
+    worker: str,
+    record_suffix: str,
+) -> list[str]:
+    """Build a worker command without starting a subprocess."""
     if not math.isfinite(lease_grace) or lease_grace < 0:
         raise ValueError("lease_grace must be a finite non-negative number")
-    options = options or WorkerLaunchOptions()
-    suffix = os.urandom(3).hex()
     # A fresh database must be created from the original input, never by
     # reopening the old IDB that is about to be replaced.
     input_path = (
@@ -189,16 +178,18 @@ def spawn_worker(
         if os.path.exists(expected_idb)
         else source
     )
-    try:
-        worker = find_console_script("ida-codemode-worker")
-    except FileNotFoundError as error:
-        raise ResolveError(str(error)) from error
+    if input_path == expected_idb and input_path != source:
+        # Loader/import switches are baked into an existing IDB. Passing them
+        # again can make IDA terminate with a fatal error (for example, -b may
+        # be used only while loading a new file), so an existing database is
+        # reopened without source-import configuration.
+        options = WorkerLaunchOptions()
     command = [
         worker,
         input_path,
         "--managed",
         "--record-suffix",
-        suffix,
+        record_suffix,
         "--lease-grace",
         str(lease_grace),
     ]
@@ -261,6 +252,29 @@ def spawn_worker(
     else:
         command.extend(f"--debug-flag={flag}" for flag in options.debug_flags)
 
+    return command
+
+
+def spawn_worker(
+    source: str,
+    expected_idb: str,
+    lease_grace: float,
+    options: WorkerLaunchOptions | None = None,
+) -> tuple[subprocess.Popen[bytes], Path]:
+    suffix = os.urandom(3).hex()
+    try:
+        worker = _find_console_script("ida-codemode-worker")
+    except FileNotFoundError as error:
+        raise DatabaseOpenError(str(error)) from error
+    command = _build_worker_command(
+        source,
+        expected_idb,
+        lease_grace,
+        options or WorkerLaunchOptions(),
+        worker=worker,
+        record_suffix=suffix,
+    )
+
     process: subprocess.Popen[bytes]
     if os.name == "nt":
         process = subprocess.Popen(
@@ -301,7 +315,7 @@ def _scan_until(
     deadline: float,
     *,
     probe_timeout: float = DEFAULT_TIMEOUT,
-) -> list[DiscoveredInstance]:
+) -> list[DiscoveredDatabase]:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("timed out scanning Code Mode instances")
@@ -322,7 +336,7 @@ def _await_ready(
     expected_idb: str,
     log_path: Path,
     deadline: float,
-) -> RegistryEntry:
+) -> DatabaseInstance:
     expected_key = idb_key(expected_idb)
     # Windows console-script launchers may keep a wrapper PID while Python runs
     # the worker as a child. The random suffix is passed explicitly to that
@@ -352,7 +366,7 @@ def _await_ready(
             continue
         matched_record = False
         for instance in instances:
-            entry = instance.entry
+            entry = instance.instance
             launched_by_us = entry.pid == process.pid or entry.record_id.endswith(
                 f"-{record_suffix}"
             )
@@ -422,7 +436,7 @@ def resolve_instance(
     no_segmentation: bool = False,
     debug_flags: int | Sequence[str] = 0,
     spawner: WorkerSpawner = spawn_worker,
-) -> RegistryEntry:
+) -> DatabaseInstance:
     """Resolve one database owner, applying IDA options only when spawning.
 
     ``image_base`` uses byte units and must be 16-byte aligned. All remaining
@@ -481,7 +495,7 @@ def resolve_instance(
     )
     if instance is not None:
         if new_database:
-            raise IdbBusy(
+            raise DatabaseBusyError(
                 f"cannot create a fresh database while instance "
                 f"{instance.record_id} owns {expected_idb}"
             )
@@ -502,13 +516,13 @@ def resolve_instance(
         )
         if instance is not None:
             if new_database:
-                raise IdbBusy(
+                raise DatabaseBusyError(
                     f"cannot create a fresh database while instance "
                     f"{instance.record_id} owns {expected_idb}"
                 )
             return instance
         if not spawn:
-            raise NoInstance(expected_idb)
+            raise NoDatabaseInstanceError(expected_idb)
         if not os.path.exists(source):
             raise FileNotFoundError(source)
         remaining = deadline - time.monotonic()

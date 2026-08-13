@@ -6,10 +6,10 @@ import time
 from http.client import HTTPConnection
 from pathlib import Path
 
-from ida_codemode.http import POST_BODY_LIMIT
-from ida_codemode.registry import InstanceIdentity, load_registry_entry
-from ida_codemode.runtime import AnalysisState
-from ida_codemode.server import CodeModeHTTPServer
+from ida_codemode._http import POST_BODY_LIMIT
+from ida_codemode._registry import InstanceIdentity, load_registry_entry
+from ida_codemode._runtime import AnalysisState
+from ida_codemode._server import CodeModeHTTPServer
 
 
 class RecordingBackend:
@@ -160,7 +160,7 @@ def test_health_registry_and_authentication(tmp_path: Path):
 
         entry = load_registry_entry(tmp_path / f"{server.entry.record_id}.json")
         assert entry.backend == "idalib"
-        assert entry.token == "test-token"
+        assert entry._token == "test-token"
 
         status, payload, _ = request(server, "GET", "/health", token="wrong")
         assert status == 401

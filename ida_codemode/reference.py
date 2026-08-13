@@ -82,14 +82,14 @@ def _public_or_private(name: str) -> str:
     return "private" if name.startswith("_") else "public"
 
 
-def find_ida_domain_package_path() -> Path:
+def _find_ida_domain_package_path() -> Path:
     spec = importlib.util.find_spec("ida_domain")
     if spec is None or spec.origin is None:
         raise FileNotFoundError("Installed ida-domain package not found")
     return Path(spec.origin).resolve().parent
 
 
-def find_ida_domain_examples_path() -> Path | None:
+def _find_ida_domain_examples_path() -> Path | None:
     """Locate the ida-domain examples directory.
 
     Mirrors ``ida_domain.examples_path()`` without importing the package (an
@@ -98,7 +98,7 @@ def find_ida_domain_examples_path() -> Path | None:
     examples under ``ida_domain/_examples``; editable/source checkouts fall back
     to the repository's top-level ``examples`` directory.
     """
-    package_root = find_ida_domain_package_path()
+    package_root = _find_ida_domain_package_path()
     packaged_examples = package_root / "_examples"
     if packaged_examples.is_dir():
         return packaged_examples
@@ -119,7 +119,7 @@ def _build_reference_spec() -> dict[str, Any]:
     if _REFERENCE_SPEC_CACHE is not None:
         return _REFERENCE_SPEC_CACHE
 
-    package_root = find_ida_domain_package_path()
+    package_root = _find_ida_domain_package_path()
     source_root = package_root.parent
 
     entries: list[dict[str, Any]] = []
@@ -199,7 +199,7 @@ def _build_reference_spec() -> dict[str, Any]:
                     entries.append(method_info)
 
     examples: list[dict[str, Any]] = []
-    examples_root = find_ida_domain_examples_path()
+    examples_root = _find_ida_domain_examples_path()
     if examples_root is not None:
         for path in sorted(examples_root.rglob("*.py")):
             if "__pycache__" in path.parts:
@@ -274,7 +274,7 @@ def _format_reference_entry(entry: dict[str, Any]) -> str:
     return f"{prefix}{heading}\n{doc}\nSource: {location}".strip()
 
 
-def render_reference(query: str) -> str:
+def reference(query: str) -> str:
     query = query.strip()
     if not query:
         raise ValueError("reference query must not be empty")

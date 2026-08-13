@@ -3,37 +3,42 @@ import asyncio
 import json
 import os
 import subprocess
-import sys
 import threading
 import time
-from dataclasses import asdict, replace
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
-import ida_codemode.client as client_mod
-import ida_codemode.resolver as resolver_mod
-import ida_codemode.worker as worker_mod
+import ida_codemode._resolver as resolver_mod
+import ida_codemode.handle as client_mod
 import ida_codemode_mcp as mcp_app
-from ida_codemode.client import DatabaseHandle
-from ida_codemode.database import DatabaseError, DatabaseManager
-from ida_codemode.http import RequestHandler
-from ida_codemode.registry import (
+from ida_codemode import (
+    DatabaseHandle,
+    DatabaseManager,
+    DatabaseOpenOptions,
+    DatabaseSelectionError,
+    discover_databases,
+    find_database_owner,
+    wait_database_released,
+)
+from ida_codemode._http import RequestHandler
+from ida_codemode._registry import (
     PROTOCOL_VERSION,
     REGISTRY_DIR,
+    DatabaseInstance,
     FileLock,
     InstanceIdentity,
     InstanceRegistration,
     InstanceState,
-    RegistryEntry,
     canonical_path,
     find_gui_owner,
     scan_instances,
 )
-from ida_codemode.resolver import resolve_instance
-from ida_codemode.runtime import AnalysisState
-from ida_codemode.server import CodeModeHTTPServer
+from ida_codemode._resolver import resolve_instance
+from ida_codemode._runtime import AnalysisState
+from ida_codemode._server import CodeModeHTTPServer
 from ida_codemode.worker import (
     _build_ida_options,
     _image_base_to_paragraphs,
@@ -162,7 +167,9 @@ def test_scan_blocks_an_unsupported_protocol_version(tmp_path: Path) -> None:
     unsupported = replace(server.entry, version=PROTOCOL_VERSION + 1)
     server._entry = unsupported
     record_path = registry_dir / f"{unsupported.record_id}.json"
-    record_path.write_text(json.dumps(asdict(unsupported)), encoding="utf-8")
+    record_path.write_text(
+        json.dumps(unsupported._registry_payload()), encoding="utf-8"
+    )
 
     try:
         discovered = scan_instances(registry_dir)
@@ -171,7 +178,7 @@ def test_scan_blocks_an_unsupported_protocol_version(tmp_path: Path) -> None:
         server.release_registration()
 
     assert len(discovered) == 1
-    assert discovered[0].entry == unsupported
+    assert discovered[0].instance == unsupported
     assert discovered[0].state is InstanceState.BLOCKED
     assert discovered[0].detail == (
         f"unsupported protocol version {PROTOCOL_VERSION + 1}; "
@@ -179,7 +186,7 @@ def test_scan_blocks_an_unsupported_protocol_version(tmp_path: Path) -> None:
     )
 
 
-def test_scan_accepts_additive_protocol_fields(tmp_path: Path, monkeypatch) -> None:
+def test_scan_accepts_additive_protocol_fields() -> None:
     registry_dir = REGISTRY_DIR
     server = CodeModeHTTPServer(
         StaticBackend(),
@@ -194,13 +201,6 @@ def test_scan_accepts_additive_protocol_fields(tmp_path: Path, monkeypatch) -> N
     payload = json.loads(record_path.read_text(encoding="utf-8"))
     payload["future_registry_field"] = {"optional": True}
     record_path.write_text(json.dumps(payload), encoding="utf-8")
-    original_health_payload = server._health_payload
-
-    def health_payload() -> dict[str, Any]:
-        return {**original_health_payload(), "future_health_field": True}
-
-    monkeypatch.setattr(server, "_health_payload", health_payload)
-
     try:
         discovered = scan_instances(registry_dir)
     finally:
@@ -208,7 +208,7 @@ def test_scan_accepts_additive_protocol_fields(tmp_path: Path, monkeypatch) -> N
         server.release_registration()
 
     assert len(discovered) == 1
-    assert discovered[0].entry == entry
+    assert discovered[0].instance == entry
     assert discovered[0].state is InstanceState.READY
 
 
@@ -236,7 +236,7 @@ def test_resolver_timeout_is_shared_across_registry_probes(
         time.sleep(timeout)
         return False, "timeout"
 
-    monkeypatch.setattr("ida_codemode.registry.probe_health", slow_probe)
+    monkeypatch.setattr("ida_codemode._registry.probe_health", slow_probe)
     started = time.monotonic()
     try:
         try:
@@ -272,31 +272,33 @@ def test_database_handle_forwards_import_options(monkeypatch) -> None:
     monkeypatch.setattr(client_mod, "resolve_instance", fake_resolve)
     handle = CapturingHandle.open(
         "firmware.bin",
-        output_database="firmware.i64",
-        auto_analysis=True,
-        image_base=0x8000,
-        new_database=True,
-        compiler="gcc",
-        first_pass_directives=("FIRST=1",),
-        second_pass_directives=("SECOND=1",),
-        disable_fpp=True,
-        entry_point=0x8010,
-        jit_debugger=False,
-        log_file="ida.log",
-        disable_mouse=True,
-        plugin_options="sample:option",
-        processor="arm",
-        db_compression="pack",
-        run_debugger="linux",
-        load_resources=True,
-        script_file="startup.py",
-        script_args=("arg",),
-        file_type="ZIP",
-        file_member="nested.bin",
-        empty_database=True,
-        windows_dir="windows",
-        no_segmentation=True,
-        debug_flags=("ldr",),
+        options=DatabaseOpenOptions(
+            output_database="firmware.i64",
+            auto_analysis=True,
+            image_base=0x8000,
+            new_database=True,
+            compiler="gcc",
+            first_pass_directives=("FIRST=1",),
+            second_pass_directives=("SECOND=1",),
+            disable_fpp=True,
+            entry_point=0x8010,
+            jit_debugger=False,
+            log_file="ida.log",
+            disable_mouse=True,
+            plugin_options="sample:option",
+            processor="arm",
+            db_compression="pack",
+            run_debugger="linux",
+            load_resources=True,
+            script_file="startup.py",
+            script_args=("arg",),
+            file_type="ZIP",
+            file_member="nested.bin",
+            empty_database=True,
+            windows_dir="windows",
+            no_segmentation=True,
+            debug_flags=("ldr",),
+        ),
     )
 
     assert handle.opened[:2] == ("firmware.bin", entry)
@@ -332,12 +334,12 @@ def test_database_handle_forwards_import_options(monkeypatch) -> None:
     }
 
 
-def test_resolver_builds_worker_import_options(tmp_path: Path, monkeypatch) -> None:
+def test_resolver_builds_worker_import_options(tmp_path: Path) -> None:
     source = tmp_path / "firmware.bin"
     output = tmp_path / "analysis" / "firmware.i64"
     source.write_bytes(b"binary")
     captured = {}
-    entry = SimpleNamespace(record_id="worker")
+    servers: list[CodeModeHTTPServer] = []
 
     def fake_spawner(
         source_path: str,
@@ -351,47 +353,56 @@ def test_resolver_builds_worker_import_options(tmp_path: Path, monkeypatch) -> N
             lease_grace=lease_grace,
             options=options,
         )
-        process = cast(subprocess.Popen[bytes], SimpleNamespace(pid=1))
+        server = CodeModeHTTPServer(
+            StaticBackend(),
+            InstanceIdentity(expected_idb, source_path, "idalib"),
+            AnalysisState(),
+            REGISTRY_DIR,
+        )
+        server.start()
+        servers.append(server)
+        process = cast(
+            subprocess.Popen[bytes],
+            SimpleNamespace(pid=os.getpid(), poll=lambda: None),
+        )
         return process, tmp_path / "worker.log"
 
-    monkeypatch.setattr(resolver_mod, "_scan_until", lambda *args, **kwargs: [])
-    monkeypatch.setattr(
-        resolver_mod,
-        "_await_ready",
-        lambda *args, **kwargs: entry,
-    )
+    try:
+        result = resolve_instance(
+            source,
+            output_database=output,
+            auto_analysis=True,
+            image_base=0x8000,
+            new_database=True,
+            compiler="gcc",
+            first_pass_directives="FIRST=1",
+            second_pass_directives=["SECOND=1"],
+            disable_fpp=True,
+            entry_point=0x8010,
+            jit_debugger=False,
+            log_file=tmp_path / "ida.log",
+            disable_mouse=True,
+            plugin_options="sample:option",
+            processor="arm",
+            db_compression="no_pack",
+            run_debugger="linux",
+            load_resources=True,
+            script_file=tmp_path / "startup.py",
+            script_args="argument",
+            file_type="ZIP",
+            file_member="nested.bin",
+            empty_database=True,
+            windows_dir=tmp_path / "windows",
+            no_segmentation=True,
+            debug_flags="ldr",
+            spawner=fake_spawner,
+        )
+        assert servers[0].entry == result
+    finally:
+        for server in servers:
+            server.stop()
+            server.release_registration()
 
-    result = resolve_instance(
-        source,
-        output_database=output,
-        auto_analysis=True,
-        image_base=0x8000,
-        new_database=True,
-        compiler="gcc",
-        first_pass_directives="FIRST=1",
-        second_pass_directives=["SECOND=1"],
-        disable_fpp=True,
-        entry_point=0x8010,
-        jit_debugger=False,
-        log_file=tmp_path / "ida.log",
-        disable_mouse=True,
-        plugin_options="sample:option",
-        processor="arm",
-        db_compression="no_pack",
-        run_debugger="linux",
-        load_resources=True,
-        script_file=tmp_path / "startup.py",
-        script_args="argument",
-        file_type="ZIP",
-        file_member="nested.bin",
-        empty_database=True,
-        windows_dir=tmp_path / "windows",
-        no_segmentation=True,
-        debug_flags="ldr",
-        spawner=fake_spawner,
-    )
-
-    assert result is entry
     assert captured["source"] == str(source.resolve())
     assert captured["expected_idb"] == str(output.resolve())
     assert captured["options"] == resolver_mod.WorkerLaunchOptions(
@@ -438,7 +449,7 @@ def test_handle_close_does_not_wait_for_sse_heartbeat(tmp_path: Path) -> None:
     server.start()
     handle = DatabaseHandle.open(
         str(executable),
-        spawn=False,
+        options=DatabaseOpenOptions(spawn=False),
     )
     try:
         # Let the monitor consume the initial event and block waiting for the
@@ -452,6 +463,32 @@ def test_handle_close_does_not_wait_for_sse_heartbeat(tmp_path: Path) -> None:
         handle.close()
         server.stop()
         server.release_registration()
+
+
+def test_public_discovery_owner_and_release_api(tmp_path: Path) -> None:
+    executable = tmp_path / "sample.exe"
+    idb_path = tmp_path / "sample.exe.i64"
+    executable.write_bytes(b"binary")
+    idb_path.write_bytes(b"idb")
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity(str(idb_path), str(executable), "gui"),
+        AnalysisState(),
+        REGISTRY_DIR,
+    )
+    server.start()
+    assert server.entry is not None
+    instance = server.entry
+    try:
+        discovered = discover_databases()
+        assert [item.instance for item in discovered] == [instance]
+        assert find_database_owner(executable) == instance
+        assert find_database_owner(idb_path) == instance
+        assert not wait_database_released(instance, timeout=0)
+    finally:
+        server.stop()
+        server.release_registration()
+    assert wait_database_released(instance, timeout=1)
 
 
 def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
@@ -479,7 +516,7 @@ def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
                 spawn=False,
                 new_database=True,
             )
-        except resolver_mod.IdbBusy as exc:
+        except resolver_mod.DatabaseBusyError as exc:
             assert "cannot create a fresh database" in str(exc)
         else:
             raise AssertionError("fresh open reused a live GUI owner")
@@ -500,16 +537,11 @@ def test_mcp_unsets_empty_forwarded_environment_variables(monkeypatch) -> None:
     assert "IDA_CODEMODE_STATE_DIR" not in mcp_app.os.environ
 
 
-def test_mcp_gui_plugin_requires_current_or_newer_version(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_mcp_gui_plugin_requires_current_or_newer_version(tmp_path: Path) -> None:
     plugin_dir = tmp_path / "plugins" / "ida-codemode"
     plugin_dir.mkdir(parents=True)
     (plugin_dir / "ida_codemode_plugin.py").touch()
     manifest = plugin_dir / "ida-plugin.json"
-
-    monkeypatch.setattr(mcp_app, "get_idausr_dir", lambda: tmp_path)
-    monkeypatch.setattr(mcp_app, "PACKAGE_VERSION", "1.2.3.dev2")
 
     cases = {
         "1.2.2": False,
@@ -522,24 +554,19 @@ def test_mcp_gui_plugin_requires_current_or_newer_version(
         manifest.write_text(
             json.dumps({"plugin": {"version": plugin_version}}), encoding="utf-8"
         )
-        assert mcp_app._gui_plugin_installed() is expected
+        assert mcp_app._compatible_gui_plugin(plugin_dir, "1.2.3.dev2") is expected
 
 
-def test_mcp_gui_plugin_rejects_missing_or_invalid_version(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_mcp_gui_plugin_rejects_missing_or_invalid_version(tmp_path: Path) -> None:
     plugin_dir = tmp_path / "plugins" / "ida-codemode"
     plugin_dir.mkdir(parents=True)
     (plugin_dir / "ida_codemode_plugin.py").touch()
     manifest = plugin_dir / "ida-plugin.json"
 
-    monkeypatch.setattr(mcp_app, "get_idausr_dir", lambda: tmp_path)
-    monkeypatch.setattr(mcp_app, "PACKAGE_VERSION", "1.2.3")
-
-    assert mcp_app._gui_plugin_installed() is False
+    assert mcp_app._compatible_gui_plugin(plugin_dir, "1.2.3") is False
     for contents in ("not json", "{}", '{"plugin":{"version":"invalid"}}'):
         manifest.write_text(contents, encoding="utf-8")
-        assert mcp_app._gui_plugin_installed() is False
+        assert mcp_app._compatible_gui_plugin(plugin_dir, "1.2.3") is False
 
 
 def test_pi_package_includes_runtime_peers_and_gui_manifest() -> None:
@@ -838,20 +865,13 @@ def test_mcp_execute_schema_exposes_numeric_timeout_default() -> None:
     }
 
 
-def test_mcp_session_fields_accept_omp_transcript(monkeypatch) -> None:
-    context = SimpleNamespace(
-        meta={
+def test_mcp_session_fields_accept_omp_transcript() -> None:
+    assert mcp_app._session_fields_from_meta(
+        {
             "omp_session_path": "/tmp/omp-session.jsonl",
             "unrelated": "ignored",
         }
-    )
-    monkeypatch.setattr(
-        type(mcp_app.mcp),
-        "context",
-        property(lambda _self: context),
-    )
-
-    assert mcp_app._session_fields() == {
+    ) == {
         "codemode_id": None,
         "omp_session_path": "/tmp/omp-session.jsonl",
     }
@@ -983,7 +1003,7 @@ def test_paths_preserve_case_but_matching_is_case_insensitive(tmp_path: Path) ->
     # executable or the .i64 path.
     import sys
 
-    from ida_codemode.resolver import expected_idb_path, resolve_instance
+    from ida_codemode._resolver import expected_idb_path, resolve_instance
 
     idb_path = tmp_path / "MixedCase.exe.i64"
     executable = tmp_path / "MixedCase.exe"
@@ -1027,7 +1047,7 @@ def test_resolves_live_instance_when_idb_not_on_disk(tmp_path: Path) -> None:
     # saved. Attaching to that live instance must work via either the .i64 path
     # (which does not exist yet) or the executable path, without a premature
     # "database path does not exist" rejection.
-    from ida_codemode.resolver import resolve_instance
+    from ida_codemode._resolver import resolve_instance
 
     executable = tmp_path / "Fresh.exe"
     executable.write_bytes(b"binary")
@@ -1074,21 +1094,18 @@ def test_get_session_waits_for_in_flight_startup_open(tmp_path: Path) -> None:
     assert session is sentinel
 
 
-def test_shutdown_during_open_releases_the_late_handle(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+def test_shutdown_during_open_releases_the_late_handle(monkeypatch) -> None:
     open_started = threading.Event()
     finish_open = threading.Event()
     handle_closed = threading.Event()
     failures: list[Exception] = []
 
-    entry = RegistryEntry(
+    entry = DatabaseInstance(
         record_id="123-abcdef",
         backend="gui",
         pid=123,
         port=12345,
-        token="token",
+        _token="token",
         version=1,
         idb_path="/tmp/test.i64",
         idb_key="test-key",
@@ -1099,19 +1116,13 @@ def test_shutdown_during_open_releases_the_late_handle(
 
     class SlowHandle:
         def __init__(self) -> None:
-            self.entry = entry
+            self.instance = entry
             self.disconnect_reason = None
             self._connected = True
 
         @property
         def connected(self) -> bool:
             return self._connected
-
-        @classmethod
-        def open(cls, *_args, **_kwargs):
-            open_started.set()
-            assert finish_open.wait(2)
-            return cls()
 
         def set_disconnect_callback(self, _callback) -> None:
             pass
@@ -1120,7 +1131,14 @@ def test_shutdown_during_open_releases_the_late_handle(
             self._connected = False
             handle_closed.set()
 
-    monkeypatch.setattr("ida_codemode.database.DatabaseHandle", SlowHandle)
+    @classmethod
+    def slow_open(cls, path: str, **_kwargs) -> SlowHandle:
+        assert path.endswith("/tmp/test")
+        open_started.set()
+        assert finish_open.wait(2)
+        return SlowHandle()
+
+    monkeypatch.setattr(DatabaseHandle, "open", slow_open)
     manager = DatabaseManager()
 
     def open_database() -> None:
@@ -1141,7 +1159,7 @@ def test_shutdown_during_open_releases_the_late_handle(
     assert not thread.is_alive()
     assert handle_closed.is_set()
     assert len(failures) == 1
-    assert isinstance(failures[0], DatabaseError)
+    assert isinstance(failures[0], DatabaseSelectionError)
     assert "shutting down" in str(failures[0])
     assert manager._instances == {}
 
@@ -1150,10 +1168,10 @@ def test_get_session_raises_without_startup_open(tmp_path: Path) -> None:
     manager = DatabaseManager()
     try:
         manager._get_session(None)
-    except DatabaseError as exc:
+    except DatabaseSelectionError as exc:
         assert "no open database instance" in str(exc)
     else:  # pragma: no cover
-        raise AssertionError("expected DatabaseError")
+        raise AssertionError("expected DatabaseSelectionError")
 
 
 def test_get_session_raises_after_failed_startup_open(tmp_path: Path) -> None:
@@ -1165,10 +1183,10 @@ def test_get_session_raises_after_failed_startup_open(tmp_path: Path) -> None:
     thread.start()
     try:
         manager._get_session(None)
-    except DatabaseError as exc:
+    except DatabaseSelectionError as exc:
         assert "no open database instance" in str(exc)
     else:  # pragma: no cover
-        raise AssertionError("expected DatabaseError")
+        raise AssertionError("expected DatabaseSelectionError")
 
 
 def test_mcp_execution_waits_for_autoanalysis_once_per_database(
@@ -1221,13 +1239,15 @@ def test_mcp_execution_waits_for_autoanalysis_once_per_database(
 
         manager.ensure_autoanalysis(opened["instance_id"])
         assert manager.execute_python("lambda: 1", opened["instance_id"]) == {
-            "code": "lambda: 1",
-            "timeout": 7.0,
+            "result": {"code": "lambda: 1", "timeout": 7.0},
+            "stdout": "",
+            "stderr": "",
         }
         manager.ensure_autoanalysis(opened["instance_id"])
         assert manager.execute_python("lambda: 2", opened["instance_id"], 9) == {
-            "code": "lambda: 2",
-            "timeout": 9.0,
+            "result": {"code": "lambda: 2", "timeout": 9.0},
+            "stdout": "",
+            "stderr": "",
         }
         assert backend.calls == [
             ("wait", None),
@@ -1267,7 +1287,7 @@ def test_gui_disconnect_invalidates_mcp_instance_without_spawning(
     assert manager.list_databases() == {"instances": []}
     try:
         manager.execute_python("lambda: 1", opened["instance_id"])
-    except DatabaseError as exc:
+    except DatabaseSelectionError as exc:
         assert "disconnected since it was last used" in str(exc)
     else:
         raise AssertionError("disconnected instance remained executable")
@@ -1286,13 +1306,15 @@ def test_database_handle_reuses_http11_rpc_connection(tmp_path: Path) -> None:
     assert server.entry is not None
     handle = DatabaseHandle("/tmp/test", server.entry)
     try:
-        assert handle.execute_python("lambda: 1", 1)["code"] == "lambda: 1"
+        first = handle.execute_python("lambda: 1", 1)
+        assert first["result"] == {"code": "lambda: 1", "timeout": 1}
         connection = handle._rpc_connection
         assert connection is not None
         sock = connection.sock
         assert sock is not None
 
-        assert handle.execute_python("lambda: 2", 1)["code"] == "lambda: 2"
+        second = handle.execute_python("lambda: 2", 1)
+        assert second["result"] == {"code": "lambda: 2", "timeout": 1}
         assert handle._rpc_connection is connection
         assert connection.sock is sock
         assert RequestHandler.disable_nagle_algorithm is True
@@ -1320,104 +1342,6 @@ def test_worker_uses_primary_idausr_entry_for_idapro(
     assert os.environ["IDAUSR"] == str(primary)
 
 
-def test_worker_hook_lifetime_surrounds_database_lifetime(
-    tmp_path: Path, monkeypatch
-) -> None:
-    events: list[str] = []
-    input_path = tmp_path / "input.bin"
-    input_path.write_bytes(b"binary")
-    monkeypatch.delenv("IDAUSR", raising=False)
-    monkeypatch.setattr(worker_mod, "_redirect_output", lambda _record_id: tmp_path)
-    monkeypatch.setattr(worker_mod, "probe", lambda: None)
-    monkeypatch.setattr(worker_mod.signal, "signal", lambda _signum, _handler: None)
-
-    class FakeHook:
-        def hook(self) -> None:
-            events.append("hook")
-
-        def unhook(self) -> None:
-            events.append("unhook")
-
-    class FakeDatabaseHandle:
-        def close(self, save: bool) -> None:
-            assert save is True
-            events.append("close")
-
-    database_handle = FakeDatabaseHandle()
-
-    class FakeDatabase:
-        @classmethod
-        def open(cls, path: str, *, args, save_on_close: bool):
-            assert path == str(input_path)
-            assert save_on_close is True
-            events.append("open")
-            return database_handle
-
-    class FakeOptions:
-        def __init__(self, **_kwargs) -> None:
-            pass
-
-    class FakeRuntime:
-        def __init__(self, *, backend: str, database, analysis_state) -> None:
-            assert backend == "idalib"
-            self.database = database
-
-    class FakeServer:
-        url = "http://127.0.0.1:1"
-
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        def start(self) -> None:
-            events.append("server-start")
-
-        def stop(self) -> None:
-            events.append("server-stop")
-
-        def release_registration(self) -> None:
-            events.append("release")
-
-    fake_kernwin = SimpleNamespace(
-        serve=lambda: events.append("serve"),
-        stop_serving=lambda: None,
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "ida_auto",
-        SimpleNamespace(auto_is_ok=lambda: True),
-    )
-    monkeypatch.setitem(sys.modules, "ida_kernwin", fake_kernwin)
-    monkeypatch.setitem(
-        sys.modules,
-        "ida_loader",
-        SimpleNamespace(
-            PATH_TYPE_IDB=1, get_path=lambda _kind: str(tmp_path / "x.i64")
-        ),
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "ida_nalt",
-        SimpleNamespace(get_input_file_path=lambda: str(input_path)),
-    )
-    monkeypatch.setitem(
-        sys.modules, "ida_domain", SimpleNamespace(Database=FakeDatabase)
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "ida_domain.database",
-        SimpleNamespace(IdaCommandOptions=FakeOptions),
-    )
-    monkeypatch.setattr(
-        worker_mod, "create_autoanalysis_hook", lambda _state: FakeHook()
-    )
-    monkeypatch.setattr(worker_mod, "IDARuntime", FakeRuntime)
-    monkeypatch.setattr(worker_mod, "CodeModeHTTPServer", FakeServer)
-
-    assert worker_mod.main([str(input_path)]) == 0
-    assert events.index("open") < events.index("hook")
-    assert events.index("unhook") < events.index("close")
-
-
 def test_image_base_uses_byte_units_and_requires_paragraph_alignment() -> None:
     assert _parse_image_base("0x8000") == 0x8000
     assert _image_base_to_paragraphs(0x8000) == 0x800
@@ -1439,22 +1363,13 @@ def test_image_base_uses_byte_units_and_requires_paragraph_alignment() -> None:
         raise AssertionError("unaligned API image base accepted")
 
 
-def test_fresh_worker_opens_source_instead_of_existing_idb(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_fresh_worker_opens_source_instead_of_existing_idb(tmp_path: Path) -> None:
     source = tmp_path / "sample.exe"
     expected_idb = tmp_path / "sample.exe.i64"
     source.write_bytes(b"binary")
     expected_idb.write_bytes(b"old idb")
-    captured = {}
 
-    def fake_popen(command, **kwargs):
-        captured.update(command=command, **kwargs)
-        return SimpleNamespace(pid=123)
-
-    monkeypatch.setattr(resolver_mod, "find_console_script", lambda name: "worker")
-    monkeypatch.setattr(resolver_mod.subprocess, "Popen", fake_popen)
-    _process, _log = resolver_mod.spawn_worker(
+    command = resolver_mod._build_worker_command(
         str(source),
         str(expected_idb),
         20.0,
@@ -1462,38 +1377,50 @@ def test_fresh_worker_opens_source_instead_of_existing_idb(
             image_base=0x8000,
             new_database=True,
         ),
+        worker="worker",
+        record_suffix="abcdef",
     )
 
-    command = captured["command"]
     assert command[1] == str(source)
     assert command[command.index("--output-database") + 1] == str(expected_idb)
     assert command[command.index("--image-base") + 1] == "0x8000"
     assert "--new-database" in command
-    if resolver_mod.os.name == "nt":
-        create_no_window = resolver_mod.subprocess.CREATE_NO_WINDOW
-        detached_process = resolver_mod.subprocess.DETACHED_PROCESS
-        assert captured["creationflags"] & create_no_window
-        assert not captured["creationflags"] & detached_process
 
 
-def test_worker_launch_forwards_all_ida_command_options(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_existing_idb_drops_source_import_options(tmp_path: Path) -> None:
+    source = tmp_path / "firmware.bin"
+    expected_idb = tmp_path / "firmware.bin.i64"
+    source.write_bytes(b"binary")
+    expected_idb.write_bytes(b"database")
+
+    command = resolver_mod._build_worker_command(
+        str(source),
+        str(expected_idb),
+        7.5,
+        resolver_mod.WorkerLaunchOptions(
+            image_base=0x8000,
+            processor="arm",
+            file_type="Raw",
+        ),
+        worker="worker",
+        record_suffix="abcdef",
+    )
+
+    assert command[1] == str(expected_idb)
+    assert "--image-base" not in command
+    assert "--processor" not in command
+    assert "--file-type" not in command
+
+
+def test_worker_launch_forwards_all_ida_command_options(tmp_path: Path) -> None:
     source = tmp_path / "firmware.bin"
     expected_idb = tmp_path / "firmware.i64"
     source.write_bytes(b"binary")
     log_file = tmp_path / "ida kernel.log"
     script_file = tmp_path / "startup.py"
     windows_dir = tmp_path / "windows"
-    captured = {}
 
-    def fake_popen(command, **kwargs):
-        captured.update(command=command, **kwargs)
-        return SimpleNamespace(pid=456)
-
-    monkeypatch.setattr(resolver_mod, "find_console_script", lambda name: "worker")
-    monkeypatch.setattr(resolver_mod.subprocess, "Popen", fake_popen)
-    resolver_mod.spawn_worker(
+    command = resolver_mod._build_worker_command(
         str(source),
         str(expected_idb),
         7.5,
@@ -1523,9 +1450,10 @@ def test_worker_launch_forwards_all_ida_command_options(
             no_segmentation=True,
             debug_flags=("ldr", "debugger"),
         ),
+        worker="worker",
+        record_suffix="abcdef",
     )
 
-    command = captured["command"]
     assert "--auto-analysis" in command
     assert command[command.index("--image-base") + 1] == "0x8000"
     assert "--new-database" in command
@@ -1585,34 +1513,31 @@ def test_worker_launch_forwards_all_ida_command_options(
     }
 
 
-def test_await_ready_accepts_console_launcher_child_pid(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_await_ready_accepts_console_launcher_child_pid(tmp_path: Path) -> None:
     expected_idb = str(tmp_path / "sample.i64")
-    entry = SimpleNamespace(
-        pid=222,
-        record_id="222-abcdef",
-        idb_key=resolver_mod.idb_key(expected_idb),
-        idb_path=expected_idb,
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity(expected_idb, str(tmp_path / "sample"), "idalib"),
+        AnalysisState(),
+        REGISTRY_DIR,
+        record_suffix="abcdef",
     )
-    discovered = SimpleNamespace(
-        entry=entry,
-        state=resolver_mod.InstanceState.READY,
-        detail=None,
-    )
+    server.start()
+    assert server.entry is not None
+    entry = server.entry
     process = cast(subprocess.Popen[bytes], SimpleNamespace(pid=111, poll=lambda: None))
-    monkeypatch.setattr(
-        resolver_mod, "scan_instances", lambda *args, **kwargs: [discovered]
-    )
+    try:
+        result = resolver_mod._await_ready(
+            process,
+            expected_idb,
+            tmp_path / "111-abcdef.log",
+            time.monotonic() + 1,
+        )
+    finally:
+        server.stop()
+        server.release_registration()
 
-    result = resolver_mod._await_ready(
-        process,
-        expected_idb,
-        tmp_path / "111-abcdef.log",
-        time.monotonic() + 1,
-    )
-
-    assert result is entry
+    assert result == entry
 
 
 def test_database_handle_attach_and_poll_use_exact_entry(tmp_path: Path) -> None:
@@ -1629,7 +1554,7 @@ def test_database_handle_attach_and_poll_use_exact_entry(tmp_path: Path) -> None
     handle = DatabaseHandle.attach(server.entry)
     try:
         assert handle.path == server.entry.exe_path
-        assert handle.entry.record_id == server.entry.record_id
+        assert handle.instance.record_id == server.entry.record_id
         assert handle.poll_autoanalysis() == {
             "status": "running",
             "complete": False,
@@ -1665,8 +1590,9 @@ def test_multiple_leases_share_one_managed_server(tmp_path: Path) -> None:
         time.sleep(0.15)
         assert not stopped.is_set()
         assert second.execute_python("lambda: 1", 1) == {
-            "code": "lambda: 1",
-            "timeout": 1.0,
+            "result": {"code": "lambda: 1", "timeout": 1.0},
+            "stdout": "",
+            "stderr": "",
         }
         assert second.wait_autoanalysis(1) == {
             "status": "complete",
@@ -1794,7 +1720,7 @@ def test_draining_owner_remains_discoverable_until_database_close(
             timeout=1,
             spawner=unexpected_spawner,
         )
-    except resolver_mod.IdbBusy:
+    except resolver_mod.DatabaseBusyError:
         pass
     else:
         raise AssertionError("draining owner was not reported as busy")
@@ -1963,8 +1889,9 @@ def test_cancel_active_preserves_database_handle(tmp_path: Path) -> None:
     assert not thread.is_alive()
     assert failures
     assert manager.execute_python("second", opened["instance_id"], 1) == {
-        "code": "second",
-        "timeout": 1.0,
+        "result": {"code": "second", "timeout": 1.0},
+        "stdout": "",
+        "stderr": "",
     }
     manager.shutdown()
     server.stop()

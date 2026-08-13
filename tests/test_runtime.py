@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from ida_codemode.runtime import (
+from ida_codemode._runtime import (
     IDARuntime,
     PythonExecutionResult,
     _execute_user_code,

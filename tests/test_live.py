@@ -11,7 +11,7 @@ import time
 from http.client import HTTPConnection
 from urllib.parse import urlsplit
 
-from ida_codemode.registry import discover_instances
+from ida_codemode import InstanceState, discover_databases
 
 
 class CheckFailed(RuntimeError):
@@ -45,11 +45,14 @@ def request(endpoint, token, method, path, payload=None, *, compressed=False):
 
 def discover_token(endpoint):
     port = urlsplit(endpoint).port
-    valid, _unavailable = discover_instances()
-    matches = [entry for entry in valid if entry["port"] == port]
+    matches = [
+        item.instance
+        for item in discover_databases()
+        if item.state is InstanceState.READY and item.instance.port == port
+    ]
     if len(matches) != 1:
         raise CheckFailed(f"expected one valid registry entry for port {port}")
-    return matches[0]["token"]
+    return matches[0]._token
 
 
 def run(endpoint, token, *, save=False):

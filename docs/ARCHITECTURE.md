@@ -29,13 +29,13 @@ connection expresses one client's interest in an already-running database.
 |---|---|
 | `ida_codemode_plugin.py` | Starts the Code Mode service inside interactive IDA, prevents duplicate GUI registration, and detaches without closing the GUI database. |
 | `ida_codemode/worker.py` | Opens an executable or IDB with idalib, starts the service, and closes/saves the database when its lifecycle ends. Resolver-spawned workers are managed; directly launched workers are unmanaged unless `--managed` is passed. |
-| `ida_codemode/http.py` | Loopback HTTP/1.1 listener, bearer/host/browser checks, bounded framing and decompression, and streamed responses. |
-| `ida_codemode/server.py` | Code Mode routes, instance publication, SSE lease/request accounting, and managed idle shutdown. |
-| `ida_codemode/registry.py` | Canonical identity, cross-platform file locks, atomic records, health classification, and stale-record cleanup. |
-| `ida_codemode/resolver.py` | GUI discovery, expected-IDB resolution, serialized worker spawning, import options, and startup diagnostics. |
-| `ida_codemode/client.py` | `DatabaseHandle`, direct registry-entry attachment, SSE lease monitoring, reusable HTTP RPC, execution, analysis polling/waiting, saving, and exclusive worker shutdown. |
-| `ida_codemode/database.py` | Protocol-agnostic database attachment, local selection, per-handle operation serialization, lease cleanup, and lifecycle events. |
-| `ida_codemode/runtime.py` | Serializes IDA operations onto IDA's main thread and provides the Code Mode Python runtime. |
+| `ida_codemode/_http.py` | Loopback HTTP/1.1 listener, bearer/host/browser checks, bounded framing and decompression, and streamed responses. |
+| `ida_codemode/_server.py` | Code Mode routes, instance publication, SSE lease/request accounting, and managed idle shutdown. |
+| `ida_codemode/_registry.py` | Canonical identity, cross-platform file locks, atomic records, health classification, and stale-record cleanup. |
+| `ida_codemode/_resolver.py` | GUI discovery, expected-IDB resolution, serialized worker spawning, import options, and startup diagnostics. |
+| `ida_codemode/handle.py` | Public `DatabaseHandle`, exact instance attachment, SSE lease monitoring, reusable HTTP RPC, execution, analysis polling/waiting, saving, and exclusive worker shutdown. |
+| `ida_codemode/manager.py` | Protocol-agnostic database attachment, local selection, per-handle operation serialization, lease cleanup, and lifecycle events. |
+| `ida_codemode/_runtime.py` | Serializes IDA operations onto IDA's main thread and provides the Code Mode Python runtime. |
 | `ida_codemode/reference.py` | Builds and searches an AST-based reference from the installed ida-domain package and examples without importing ida-domain in the MCP process. |
 | `ida_codemode/paths.py` | Resolves the shared state root from the environment and IDA defaults. |
 | `ida_codemode_mcp.py` | ZeroMCP tools/transports, error mapping, startup attachment, agent metadata, and semantic session tracing. |
@@ -145,7 +145,7 @@ disk permanently to avoid split-inode locking races.
    PID is sufficient; on Windows the console launcher can hand off to a Python
    child, so the random record suffix is authoritative across both processes.
 
-The low-level handle/resolver exposes the complete `IdaCommandOptions` import
+Public `DatabaseOpenOptions` exposes the complete `IdaCommandOptions` import
 surface to managed workers: analysis mode, image base, fresh/output database,
 compiler, first/second-pass directives, FPP handling, entry point, JIT setting,
 kernel log, mouse/plugin/processor options, database compression, debugger and
@@ -156,9 +156,10 @@ paragraph-based `-b` value.
 
 An explicit output database resolves by that IDB identity rather than attaching
 to a GUI that merely has the same executable open. A fresh-database request
-never reuses a live owner. All launch options are spawn-only and cannot
-reconfigure a reused instance. These controls are currently low-level
-`DatabaseHandle`/resolver/worker APIs, not arguments of the six-tool MCP surface.
+never reuses a live owner. All launch options are spawn/import-only and cannot
+reconfigure a reused instance. When a worker reopens an existing IDB, Code Mode
+drops source-import options instead of passing invalid loader switches to IDA.
+These controls belong to `DatabaseOpenOptions`, not the six-tool MCP surface.
 
 The spawn lock is held until the child becomes ready or fails. Startup waiting
 checks `Popen.poll()` without mistaking a successful Windows launcher handoff

@@ -13,9 +13,10 @@ import warnings
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 
-from .registry import BackendName
+from ._registry import BackendName
+from .models import PythonExecutionResult
 
 DEFAULT_TIMEOUT_SECONDS = 60.0
 SAVE_TIMEOUT_SECONDS = 300.0
@@ -39,12 +40,6 @@ class APIError(RuntimeError):
 
 class CodeValidationError(ValueError):
     """The supplied code cannot be invoked with the available runtime values."""
-
-
-class PythonExecutionResult(TypedDict):
-    result: Any
-    stdout: str
-    stderr: str
 
 
 class AnalysisState:

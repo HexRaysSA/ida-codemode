@@ -1293,8 +1293,9 @@ def render_session(name: str, *, export: bool = False) -> str | None:
     """Render one semantic MCP session, optionally as self-contained HTML."""
     if "\\" in name or not name.endswith(".jsonl"):
         return None
-    path = (SESSIONS_DIR / name).resolve()
-    if not path.is_relative_to(SESSIONS_DIR) or not path.is_file():
+    sessions_dir = SESSIONS_DIR.resolve()
+    path = (sessions_dir / name).resolve()
+    if not path.is_relative_to(sessions_dir) or not path.is_file():
         return None
     summary = _summarize_session(path)
     records = _read_jsonl(path)

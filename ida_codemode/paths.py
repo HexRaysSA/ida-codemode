@@ -4,7 +4,7 @@ import sysconfig
 from pathlib import Path
 
 
-def get_idausr_dir() -> Path:
+def _get_idausr_dir() -> Path:
     """Return IDA's main user directory."""
     idausr = os.environ.get("IDAUSR")
     if idausr:
@@ -22,10 +22,10 @@ def get_state_dir() -> Path:
     state_dir = os.environ.get("IDA_CODEMODE_STATE_DIR")
     if state_dir:
         return Path(state_dir).expanduser()
-    return get_idausr_dir() / "codemode"
+    return _get_idausr_dir() / "codemode"
 
 
-def find_console_script(name: str) -> str:
+def _find_console_script(name: str) -> str:
     """Locate a pip-installed console script for the current interpreter.
 
     Inside IDA, ``sys.executable`` is the IDA binary, not a Python interpreter,

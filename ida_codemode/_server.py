@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qs
 
-from .http import HOST, HTTPResponse, LocalHTTPServer, json_response
-from .registry import InstanceIdentity, InstanceRegistration, RegistryEntry
-from .runtime import AnalysisState, APIError
+from ._http import HOST, HTTPResponse, LocalHTTPServer, json_response
+from ._registry import DatabaseInstance, InstanceIdentity, InstanceRegistration
+from ._runtime import AnalysisState, APIError
 
 logger = logging.getLogger(__name__)
 DEFAULT_LEASE_GRACE_SECONDS = 20.0
@@ -83,7 +83,7 @@ class CodeModeHTTPServer:
         self._thread: threading.Thread | None = None
         self._watchdog: threading.Thread | None = None
         self._registration: InstanceRegistration | None = None
-        self._entry: RegistryEntry | None = None
+        self._entry: DatabaseInstance | None = None
         self._draining = False
         self._shutdown_requested = False
         self._save_on_shutdown = True
@@ -107,7 +107,7 @@ class CodeModeHTTPServer:
         return f"http://{HOST}:{self.port}" if self.port is not None else None
 
     @property
-    def entry(self) -> RegistryEntry | None:
+    def entry(self) -> DatabaseInstance | None:
         return self._entry
 
     @property
