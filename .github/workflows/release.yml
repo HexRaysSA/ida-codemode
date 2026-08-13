@@ -75,6 +75,15 @@ jobs:
       - name: Build distributions
         run: uv build
 
+      - name: Verify wheel entry points
+        run: |
+          uv run --no-project python scripts/check_wheel.py dist/*.whl
+          wheel=(dist/*.whl)
+          uvx --from "${wheel[0]}" ida-codemode --help >/dev/null
+          for command in mcp dashboard exec logs benchmark worker; do
+            uvx --from "${wheel[0]}" ida-codemode "$command" --help >/dev/null
+          done
+
       - name: Build IDA plugin archive
         run: |
           mkdir -p release-assets

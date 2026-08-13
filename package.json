@@ -17,8 +17,7 @@
     "ida-codemode.ts",
     "ida-plugin.json",
     "ida_codemode/*.py",
-    "ida_codemode_dashboard.py",
-    "ida_codemode_mcp.py",
+    "ida_codemode/cli/*.py",
     "ida_codemode_plugin.py",
     "pyproject.toml",
     "uv.lock"

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project ${PLUGIN_ROOT} ida-codemode-mcp --report-session=codex",
+            "command": "uv run --project ${PLUGIN_ROOT} ida-codemode mcp --report-session=codex",
             "statusMessage": "Linking IDA trace to Codex session"
           }
         ]

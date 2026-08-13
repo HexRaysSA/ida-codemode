@@ -4,7 +4,8 @@
     "args": [
       "run",
       "--with=ida-hcli",
-      "ida-codemode-mcp",
+      "ida-codemode",
+      "mcp",
       "--agent=codex"
     ],
     "cwd": ".",

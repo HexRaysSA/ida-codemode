@@ -10,7 +10,8 @@
         "--with=ida-hcli",
         "--project",
         "${CLAUDE_PLUGIN_ROOT}",
-        "ida-codemode-mcp",
+        "ida-codemode",
+        "mcp",
         "--agent=claude"
       ],
       "env": {
@@ -27,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT} ida-codemode-mcp --report-session=claude"
+            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT} ida-codemode mcp --report-session=claude"
           }
         ]
       }

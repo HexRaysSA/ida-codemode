@@ -783,9 +783,9 @@ def _report_session_main(platform: str) -> int:
     return 0
 
 
-def cli() -> int:
+def cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="ida-codemode-mcp",
+        prog="ida-codemode mcp",
         description="IDA Domain Code Mode MCP server",
     )
     parser.add_argument(
@@ -810,7 +810,7 @@ def cli() -> int:
         help=argparse.SUPPRESS,
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.report_session is not None:
         return _report_session_main(args.report_session)

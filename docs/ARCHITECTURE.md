@@ -28,7 +28,7 @@ connection expresses one client's interest in an already-running database.
 | Component | Responsibility |
 |---|---|
 | `ida_codemode_plugin.py` | Starts the Code Mode service inside interactive IDA, prevents duplicate GUI registration, and detaches without closing the GUI database. |
-| `ida_codemode/worker.py` | Opens an executable or IDB with idalib, starts the service, and closes/saves the database when its lifecycle ends. Resolver-spawned workers are managed; directly launched workers are unmanaged unless `--managed` is passed. |
+| `ida_codemode/cli/worker.py` | Opens an executable or IDB with idalib, starts the service, and closes/saves the database when its lifecycle ends. Resolver-spawned workers are managed; directly launched workers are unmanaged unless `--managed` is passed. |
 | `ida_codemode/_http.py` | Loopback HTTP/1.1 listener, bearer/host/browser checks, bounded framing and decompression, and streamed responses. |
 | `ida_codemode/_server.py` | Code Mode routes, instance publication, SSE lease/request accounting, and managed idle shutdown. |
 | `ida_codemode/_registry.py` | Canonical identity, cross-platform file locks, atomic records, health classification, and stale-record cleanup. |
@@ -38,10 +38,11 @@ connection expresses one client's interest in an already-running database.
 | `ida_codemode/_runtime.py` | Serializes IDA operations onto IDA's main thread and provides the Code Mode Python runtime. |
 | `ida_codemode/reference.py` | Builds and searches an AST-based reference from the installed ida-domain package and examples without importing ida-domain in the MCP process. |
 | `ida_codemode/paths.py` | Resolves the shared state root from the environment and IDA defaults. |
-| `ida_codemode_mcp.py` | ZeroMCP tools/transports, error mapping, startup attachment, agent metadata, and semantic session tracing. |
+| `ida_codemode/cli/` | Implements the single `ida-codemode` entry point and its MCP, dashboard, execution, logs, benchmark, and internal worker subcommands. |
+| `ida_codemode/cli/mcp.py` | ZeroMCP tools/transports, error mapping, startup attachment, agent metadata, and semantic session tracing. |
 | `ida-codemode.ts` | Shared Pi/oh-my-pi extension that starts MCP asynchronously from `session_start`, mirrors its tools with `ida_` names, attaches compatible transcript metadata, and applies host output truncation. Both hosts can enter the session immediately; their lifecycle runners publish late tool registrations before the first model turn. |
-| `ida_codemode_dashboard.py` | Renders semantic session traces and linked Claude, Codex, Pi, or oh-my-pi transcripts from the local state directory or a portable log ZIP. |
-| `ida_codemode/logs.py` | Builds and validates portable log ZIPs containing selected semantic sessions, linked agent transcripts, operational logs, and a JSON path-mapping TOC. |
+| `ida_codemode/cli/dashboard.py` | Renders semantic session traces and linked Claude, Codex, Pi, or oh-my-pi transcripts from the local state directory or a portable log ZIP. |
+| `ida_codemode/cli/logs.py` | Builds and validates portable log ZIPs containing selected semantic sessions, linked agent transcripts, operational logs, and a JSON path-mapping TOC. |
 | `scripts/migrate_logs.py` | One-shot conversion of pre-0.2 operational/bridge logs into schema-1 semantic sessions. |
 
 ## State layout
@@ -140,7 +141,7 @@ disk permanently to avoid split-inode locking races.
 4. Return a `READY` owner or report a lock-held `BLOCKED` owner.
 5. Acquire `spawn/<idb-key>.lock` and repeat the scan.
 6. If still absent, validate the source path and start the
-   `ida-codemode-worker` console script as a hidden, detached managed worker.
+   `ida-codemode worker` as a hidden, detached managed worker.
 7. Wait for a record with the expected IDB key and launch identity. Normally the
    PID is sufficient; on Windows the console launcher can hand off to a Python
    child, so the random record suffix is authoritative across both processes.
@@ -439,7 +440,7 @@ layout, select Pi's active transcript branch, summarize available token/cost
 data, and export a self-contained session page. Its `/agent` route serves only
 transcript paths referenced by discoverable semantic sessions.
 
-`ida-codemode-logs` packages all local semantic sessions by default, or only
+`ida-codemode logs` packages all local semantic sessions by default, or only
 explicitly named session files, together with every available linked agent
 transcript and every file under the operational `logs/` directory. The root
 `ida-codemode-logs.json` TOC records schema/version, checksums,

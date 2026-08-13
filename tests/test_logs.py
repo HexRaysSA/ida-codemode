@@ -5,8 +5,8 @@ import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 
-import ida_codemode_dashboard as dashboard
-from ida_codemode.logs import (
+from ida_codemode.cli import dashboard
+from ida_codemode.cli.logs import (
     ARCHIVE_FORMAT,
     ARCHIVE_SCHEMA,
     TOC_NAME,

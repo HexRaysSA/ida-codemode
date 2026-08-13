@@ -57,6 +57,7 @@ def _inline_runtime(monkeypatch: pytest.MonkeyPatch) -> IDARuntime:
         timeout: float | None,
         batch: bool = True,
         capture_output: bool = False,
+        trace_filename: str | None = None,
     ) -> Any:
         result = function()
         if capture_output:

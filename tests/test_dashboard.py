@@ -7,7 +7,7 @@ from http.client import HTTPConnection
 from pathlib import Path
 from unittest import mock
 
-import ida_codemode_dashboard as dashboard
+from ida_codemode.cli import dashboard
 
 
 class TranscriptTests(unittest.TestCase):

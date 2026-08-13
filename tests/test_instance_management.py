@@ -13,7 +13,6 @@ from typing import Any, cast
 
 import ida_codemode._resolver as resolver_mod
 import ida_codemode.handle as client_mod
-import ida_codemode_mcp as mcp_app
 from ida_codemode import (
     DatabaseHandle,
     DatabaseManager,
@@ -40,13 +39,14 @@ from ida_codemode._registry import (
 from ida_codemode._resolver import resolve_instance
 from ida_codemode._runtime import AnalysisState
 from ida_codemode._server import CodeModeHTTPServer
-from ida_codemode.worker import (
+from ida_codemode.cli import mcp as mcp_app
+from ida_codemode.cli.worker import (
     _build_ida_options,
     _image_base_to_paragraphs,
     _parse_image_base,
     _work_around_idapro_idausr_path_list,
 )
-from ida_codemode.worker import (
+from ida_codemode.cli.worker import (
     _parser as worker_parser,
 )
 
@@ -1384,11 +1384,11 @@ def test_fresh_worker_opens_source_instead_of_existing_idb(tmp_path: Path) -> No
             image_base=0x8000,
             new_database=True,
         ),
-        worker="worker",
+        launcher=["ida-codemode", "worker"],
         record_suffix="abcdef",
     )
 
-    assert command[1] == str(source)
+    assert command[:3] == ["ida-codemode", "worker", str(source)]
     assert command[command.index("--output-database") + 1] == str(expected_idb)
     assert command[command.index("--image-base") + 1] == "0x8000"
     assert "--new-database" in command
@@ -1409,11 +1409,11 @@ def test_existing_idb_drops_source_import_options(tmp_path: Path) -> None:
             processor="arm",
             file_type="Raw",
         ),
-        worker="worker",
+        launcher=["ida-codemode", "worker"],
         record_suffix="abcdef",
     )
 
-    assert command[1] == str(expected_idb)
+    assert command[:3] == ["ida-codemode", "worker", str(expected_idb)]
     assert "--image-base" not in command
     assert "--processor" not in command
     assert "--file-type" not in command
@@ -1457,10 +1457,11 @@ def test_worker_launch_forwards_all_ida_command_options(tmp_path: Path) -> None:
             no_segmentation=True,
             debug_flags=("ldr", "debugger"),
         ),
-        worker="worker",
+        launcher=["ida-codemode", "worker"],
         record_suffix="abcdef",
     )
 
+    assert command[:2] == ["ida-codemode", "worker"]
     assert "--auto-analysis" in command
     assert command[command.index("--image-base") + 1] == "0x8000"
     assert "--new-database" in command
@@ -1489,7 +1490,7 @@ def test_worker_launch_forwards_all_ida_command_options(tmp_path: Path) -> None:
     assert "--debug-flag=ldr" in command
     assert "--debug-flag=debugger" in command
 
-    parsed = worker_parser().parse_args(command[1:])
+    parsed = worker_parser().parse_args(command[2:])
     ida_options = _build_ida_options(parsed, lambda **kwargs: kwargs)
     assert ida_options == {
         "auto_analysis": True,

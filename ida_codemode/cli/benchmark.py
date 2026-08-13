@@ -412,8 +412,8 @@ def non_negative_int(value: str) -> int:
     return parsed
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="ida-codemode benchmark", description=__doc__)
     parser.add_argument("target", type=Path, help="executable or existing IDB")
     parser.add_argument("--iterations", type=positive_int, default=200)
     parser.add_argument("--warmup", type=non_negative_int, default=20)
@@ -439,7 +439,7 @@ def main() -> int:
         type=Path,
         help="also write the complete machine-readable report to this path",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     for name in ("execution_timeout", "request_timeout", "open_timeout"):
         value = getattr(args, name)

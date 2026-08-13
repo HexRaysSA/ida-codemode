@@ -163,7 +163,7 @@ def _build_worker_command(
     lease_grace: float,
     options: WorkerLaunchOptions,
     *,
-    worker: str,
+    launcher: Sequence[str],
     record_suffix: str,
 ) -> list[str]:
     """Build a worker command without starting a subprocess."""
@@ -185,7 +185,7 @@ def _build_worker_command(
         # reopened without source-import configuration.
         options = WorkerLaunchOptions()
     command = [
-        worker,
+        *launcher,
         input_path,
         "--managed",
         "--record-suffix",
@@ -263,7 +263,7 @@ def spawn_worker(
 ) -> tuple[subprocess.Popen[bytes], Path]:
     suffix = os.urandom(3).hex()
     try:
-        worker = _find_console_script("ida-codemode-worker")
+        executable = _find_console_script("ida-codemode")
     except FileNotFoundError as error:
         raise DatabaseOpenError(str(error)) from error
     command = _build_worker_command(
@@ -271,7 +271,7 @@ def spawn_worker(
         expected_idb,
         lease_grace,
         options or WorkerLaunchOptions(),
-        worker=worker,
+        launcher=[executable, "worker"],
         record_suffix=suffix,
     )
 

@@ -76,9 +76,10 @@ def repl(handle: DatabaseHandle):
             exec(handle, code, "<stdin>", json_mode=False)
 
 
-def main():
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Execute Python script or command in the context of an IDA database."
+        prog="ida-codemode exec",
+        description="Execute Python script or command in the context of an IDA database.",
     )
     parser.add_argument(
         "path",
@@ -97,7 +98,7 @@ def main():
     parser.add_argument(
         "--json", action="store_true", help="Output only JSON to stdout."
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     with DatabaseHandle.open(args.path) as handle:
         if args.c:
@@ -108,10 +109,12 @@ def main():
             with open(filename, "r") as f:
                 code = f.read()
         else:
-            return repl(handle)
+            repl(handle)
+            return 0
 
         if not exec(handle, code, filename, args.json):
-            sys.exit(1)
+            return 1
+    return 0
 
 
 if __name__ == "__main__":

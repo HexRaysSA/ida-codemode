@@ -11,12 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ida-codemode-mcp = "ida_codemode_mcp:cli"
-ida-codemode-dashboard = "ida_codemode_dashboard:cli"
-ida-codemode-logs = "ida_codemode.logs:main"
-ida-codemode-worker = "ida_codemode.worker:main"
-ida-codemode-benchmark = "ida_codemode.benchmark:main"
-ida-codemode-exec = "ida_codemode_exec:main"
+ida-codemode = "ida_codemode.cli:main"
 
 [dependency-groups]
 dev = [
@@ -31,8 +26,6 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 only-include = [
     "ida-plugin.json",
-    "ida_codemode_mcp.py",
-    "ida_codemode_dashboard.py",
     "ida_codemode_plugin.py",
     "ida_codemode",
 ]

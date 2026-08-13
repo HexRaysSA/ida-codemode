@@ -613,7 +613,7 @@ def _default_output() -> Path:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="ida-codemode-logs",
+        prog="ida-codemode logs",
         description=(
             "Create a ZIP containing ida-codemode semantic sessions, linked "
             "Claude, Codex, or Pi transcripts, and operational logs."
@@ -646,12 +646,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             overwrite=args.force,
         )
     except (LogArchiveError, OSError, zipfile.BadZipFile) as exc:
-        print(f"ida-codemode-logs: error: {exc}", file=sys.stderr)
+        print(f"ida-codemode logs: error: {exc}", file=sys.stderr)
         return 2
 
     for missing in result.missing_agent_sessions:
         print(
-            "ida-codemode-logs: warning: linked "
+            "ida-codemode logs: warning: linked "
             f"{missing.kind} session not found: {missing.recorded_path} "
             f"(from {missing.semantic_session})",
             file=sys.stderr,

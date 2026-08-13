@@ -30,7 +30,7 @@ MCP lifecycle management. Low-level `DatabaseManager` users can set
 
 ```bash
 uv sync
-uv run ida-codemode-mcp
+uv run ida-codemode mcp
 ```
 
 ## Releases
@@ -55,7 +55,7 @@ managed file has the same version. Each GitHub release also includes one
 The MCP server uses stdio by default. A local HTTP transport is also available:
 
 ```bash
-uv run ida-codemode-mcp --transport http://127.0.0.1:5001 --agent inspector
+uv run ida-codemode mcp --transport http://127.0.0.1:5001 --agent inspector
 ```
 
 To manually play with the MCP, use the inspector:
@@ -142,7 +142,7 @@ Run the endpoint benchmark against an existing IDB to compare client-visible
 latency across machines or revisions:
 
 ```bash
-uv run ida-codemode-benchmark /path/to/database.i64 \
+uv run ida-codemode benchmark /path/to/database.i64 \
   --output benchmark.json
 ```
 
@@ -235,8 +235,8 @@ the same way.
 Run the stdlib-only local dashboard with:
 
 ```bash
-uv run ida-codemode-dashboard --open
-uv run ida-codemode-dashboard --port 9000 \
+uv run ida-codemode dashboard --open
+uv run ida-codemode dashboard --port 9000 \
   --sessions-dir "$IDAUSR/codemode/sessions"
 ```
 
@@ -272,14 +272,14 @@ Claude, Codex, or Pi transcript, and every file under
 `<IDAUSR>/codemode/logs/`:
 
 ```bash
-uv run ida-codemode-logs
-uv run ida-codemode-logs --output support.zip
+uv run ida-codemode logs
+uv run ida-codemode logs --output support.zip
 ```
 
 Pass one or more semantic session files to collect only those sessions:
 
 ```bash
-uv run ida-codemode-logs session-a.jsonl session-b.jsonl -o selected.zip
+uv run ida-codemode logs session-a.jsonl session-b.jsonl -o selected.zip
 ```
 
 The ZIP contains `ida-codemode-logs.json`, a schema-versioned JSON table of
@@ -290,7 +290,7 @@ dashboard does not resolve or render them. Open a bundle without accessing the
 receiving machine's transcript paths with:
 
 ```bash
-uv run ida-codemode-dashboard --archive support.zip --open
+uv run ida-codemode dashboard --archive support.zip --open
 ```
 
 `--sessions-zip` is an alias for `--archive`.
@@ -324,14 +324,14 @@ exposed as a console script for reuse and diagnostics. To verify that idalib
 initializes without opening a database:
 
 ```bash
-uv run ida-codemode-worker --probe
+uv run ida-codemode worker --probe
 ```
 
 To open one executable or IDB in idalib and serve the same authenticated
 loopback HTTP API:
 
 ```bash
-uv run ida-codemode-worker /path/to/target.elf
+uv run ida-codemode worker /path/to/target.elf
 ```
 
 It registers in the private registry just like a resolver-spawned worker, so

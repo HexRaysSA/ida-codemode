@@ -4,7 +4,7 @@ Serves a local HTTP UI (stdlib only, no extra dependencies) that lists the
 JSONL traces under ``<IDAUSR>/codemode/sessions`` and renders each MCP/agent
 session as a timeline linked to its Claude Code, Codex, Pi, or OMP transcript.
 
-Run with: ida-codemode-dashboard [--host 127.0.0.1] [--port 8736] [--open]
+Run with: ida-codemode dashboard [--host 127.0.0.1] [--port 8736] [--open]
 """
 
 import argparse
@@ -23,7 +23,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
-from ida_codemode.logs import LogArchiveError, open_log_archive
+from ida_codemode.cli.logs import LogArchiveError, open_log_archive
 from ida_codemode.paths import STATE_DIR
 
 DEFAULT_SESSIONS_DIR = STATE_DIR / "sessions"
@@ -2491,11 +2491,11 @@ def serve(host: str, port: int, open_browser: bool = False) -> None:
         server.server_close()
 
 
-def cli() -> int:
+def cli(argv: list[str] | None = None) -> int:
     global ARCHIVE_PATH, ARCHIVE_PATH_MAP, ARCHIVE_SESSION_AGENT_PATHS
     global ARCHIVE_SOURCE_PATHS, SESSIONS_DIR
     parser = argparse.ArgumentParser(
-        prog="ida-codemode-dashboard",
+        prog="ida-codemode dashboard",
         description="Web dashboard for ida-codemode semantic sessions",
     )
     parser.add_argument("--host", default=DEFAULT_HOST, help="Bind address")
@@ -2510,12 +2510,12 @@ def cli() -> int:
         "--archive",
         "--sessions-zip",
         type=Path,
-        help="ZIP produced by ida-codemode-logs",
+        help="ZIP produced by ida-codemode logs",
     )
     parser.add_argument(
         "--open", action="store_true", help="Open the dashboard in a browser"
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.archive is not None:
         try:

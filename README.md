@@ -71,8 +71,8 @@ Configure a regular stdio MCP server in your MCP JSON configuration:
       "command": "uvx",
       "args": [
         "--with=ida-hcli",
-        "--from=ida-codemode",
-        "ida-codemode-mcp",
+        "ida-codemode",
+        "mcp",
         "--agent=my-agent"
       ]
     }
@@ -102,6 +102,22 @@ Start your agent harness and ask it something like:
 To test the GUI integration, open something in IDA and ask your harness:
 
 > What do I have open in the IDA GUI?
+
+## Command line
+
+The package installs one `ida-codemode` command with subcommands:
+
+```bash
+ida-codemode mcp --agent=my-agent
+ida-codemode dashboard --open
+ida-codemode exec /path/to/sample.elf -c 'db.functions.get_all()'
+ida-codemode logs
+ida-codemode benchmark /path/to/sample.elf
+```
+
+Run `ida-codemode COMMAND --help` for command-specific options. The internal
+`worker` subcommand is used automatically when a managed idalib database is
+needed.
 
 ## Python Package (Developers)
 

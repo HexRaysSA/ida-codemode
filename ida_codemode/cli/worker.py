@@ -7,9 +7,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ._registry import LOG_DIR, REGISTRY_DIR, InstanceIdentity, ensure_private_directory
-from ._runtime import AnalysisState, IDARuntime, create_autoanalysis_hook
-from ._server import DEFAULT_LEASE_GRACE_SECONDS, CodeModeHTTPServer
+from .._registry import (
+    LOG_DIR,
+    REGISTRY_DIR,
+    InstanceIdentity,
+    ensure_private_directory,
+)
+from .._runtime import AnalysisState, IDARuntime, create_autoanalysis_hook
+from .._server import DEFAULT_LEASE_GRACE_SECONDS, CodeModeHTTPServer
 
 
 def _parse_non_negative_int(value: str) -> int:
@@ -37,7 +42,7 @@ def _image_base_to_paragraphs(image_base: int | None) -> int | None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="ida-codemode-worker",
+        prog="ida-codemode worker",
         description="Open one executable in idalib and expose the IDA Code Mode API",
     )
     parser.add_argument(
