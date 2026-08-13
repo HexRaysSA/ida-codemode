@@ -147,11 +147,9 @@ class LogArchiveTests(unittest.TestCase):
             logs = root / "logs"
             _write_jsonl(session, _semantic_records("with-logs"))
             (logs / "worker.log").parent.mkdir(parents=True)
-            (logs / "worker.log").write_text("worker output\n", encoding="utf-8")
+            (logs / "worker.log").write_bytes(b"worker output\n")
             (logs / "legacy" / "bridge.log").parent.mkdir(parents=True)
-            (logs / "legacy" / "bridge.log").write_text(
-                "bridge output\n", encoding="utf-8"
-            )
+            (logs / "legacy" / "bridge.log").write_bytes(b"bridge output\n")
 
             output = root / "logs.zip"
             with mock.patch.object(logs_module, "DEFAULT_LOGS_DIR", logs):

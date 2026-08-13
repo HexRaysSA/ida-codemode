@@ -85,6 +85,8 @@ class CodeModeHTTPServer:
         self._registration: InstanceRegistration | None = None
         self._entry: RegistryEntry | None = None
         self._draining = False
+        self._shutdown_requested = False
+        self._save_on_shutdown = True
         self._active_leases = 0
         self._active_requests = 0
         self._leases: dict[str, _Lease] = {}
@@ -108,11 +110,19 @@ class CodeModeHTTPServer:
     def entry(self) -> RegistryEntry | None:
         return self._entry
 
+    @property
+    def save_on_shutdown(self) -> bool:
+        """Whether the lifecycle owner should persist the database during teardown."""
+        with self._activity:
+            return self._save_on_shutdown
+
     def start(self) -> None:
         with self._lock:
             if self._httpd is not None:
                 return
             self._draining = False
+            self._shutdown_requested = False
+            self._save_on_shutdown = True
             self._stream_stop.clear()
             self._shutdown_at = time.monotonic() + self.lease_grace
             registration = InstanceRegistration(
@@ -235,7 +245,7 @@ class CodeModeHTTPServer:
 
     def _lease_opened(self, lease_id: str, keepalive: float) -> _Lease | None:
         with self._activity:
-            if self._draining or lease_id in self._leases:
+            if self._draining or self._shutdown_requested or lease_id in self._leases:
                 return None
             lease = _Lease(keepalive=keepalive, stop=threading.Event())
             self._leases[lease_id] = lease
@@ -270,7 +280,7 @@ class CodeModeHTTPServer:
 
     def _request_started(self, lease_id: str | None) -> None:
         with self._activity:
-            if self._draining:
+            if self._draining or self._shutdown_requested:
                 raise APIError(
                     "instance_draining", "The instance is shutting down", status=503
                 )
@@ -371,9 +381,45 @@ class CodeModeHTTPServer:
                 self.backend.cancel_active()
             return True
 
+    def _request_shutdown(self, lease_id: str | None, save: bool) -> None:
+        if lease_id is None:
+            raise APIError("invalid_lease", "lease_id is required")
+        with self._activity:
+            if not self.identity.managed or self.identity.backend != "idalib":
+                raise APIError(
+                    "shutdown_not_supported",
+                    "Only managed idalib workers can be shut down remotely",
+                    status=409,
+                )
+            if set(self._leases) != {lease_id}:
+                raise APIError(
+                    "instance_shared",
+                    "The managed worker has another active lease",
+                    status=409,
+                )
+            if (
+                self._active_requests != 1
+                or self._running_operation_id is not None
+                or self._pending_operations
+            ):
+                raise APIError(
+                    "instance_busy",
+                    "The managed worker has another active operation",
+                    status=409,
+                )
+            self._shutdown_requested = True
+            self._save_on_shutdown = save
+
+    def _begin_requested_shutdown(self) -> None:
+        with self._activity:
+            if not self._shutdown_requested or self._draining:
+                return
+            self._draining = True
+            self._activity.notify_all()
+
     def _health_payload(self) -> dict[str, Any]:
         with self._activity:
-            if self._draining:
+            if self._draining or self._shutdown_requested:
                 raise APIError(
                     "instance_draining", "The instance is shutting down", status=503
                 )
@@ -504,8 +550,23 @@ class CodeModeHTTPServer:
         return timeout
 
     @staticmethod
-    def _success(result: Any) -> HTTPResponse:
-        return json_response(200, {"ok": True, "result": result})
+    def _success(
+        result: Any,
+        *,
+        after_send: Callable[[], None] | None = None,
+    ) -> HTTPResponse:
+        try:
+            return json_response(
+                200,
+                {"ok": True, "result": result},
+                after_send=after_send,
+            )
+        except (TypeError, ValueError) as exc:
+            raise APIError(
+                "invalid_result",
+                f"Code Mode results must be valid JSON: {exc}",
+                status=500,
+            ) from exc
 
     @staticmethod
     def _failure(error: APIError) -> HTTPResponse:
@@ -558,6 +619,7 @@ class CodeModeHTTPServer:
                     "/execute_python",
                     "/cancel_operation",
                     "/save_database",
+                    "/shutdown_database",
                 }
                 else {}
             )
@@ -626,6 +688,15 @@ class CodeModeHTTPServer:
                 if method == "POST" and path == "/save_database":
                     return self._success(
                         self._run_operation(lease_id, self.backend.save_database)
+                    )
+                if method == "POST" and path == "/shutdown_database":
+                    save = payload.get("save")
+                    if not isinstance(save, bool):
+                        raise APIError("invalid_save", "save must be a boolean")
+                    self._request_shutdown(lease_id, save)
+                    return self._success(
+                        {"shutting_down": True, "save": save},
+                        after_send=self._begin_requested_shutdown,
                     )
                 return json_response(404, {"ok": False, "error": "Not Found"})
             finally:

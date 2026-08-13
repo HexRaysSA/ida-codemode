@@ -1615,6 +1615,36 @@ def test_await_ready_accepts_console_launcher_child_pid(
     assert result is entry
 
 
+def test_database_handle_attach_and_poll_use_exact_entry(tmp_path: Path) -> None:
+    analysis = AnalysisState()
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
+        analysis,
+        REGISTRY_DIR,
+        heartbeat_interval=0.02,
+    )
+    server.start()
+    assert server.entry is not None
+    handle = DatabaseHandle.attach(server.entry)
+    try:
+        assert handle.path == server.entry.exe_path
+        assert handle.entry.record_id == server.entry.record_id
+        assert handle.poll_autoanalysis() == {
+            "status": "running",
+            "complete": False,
+        }
+        analysis.mark_complete()
+        assert handle.poll_autoanalysis() == {
+            "status": "complete",
+            "complete": True,
+        }
+    finally:
+        handle.close()
+        server.stop()
+        server.release_registration()
+
+
 def test_multiple_leases_share_one_managed_server(tmp_path: Path) -> None:
     stopped = threading.Event()
     server = CodeModeHTTPServer(
@@ -1646,6 +1676,58 @@ def test_multiple_leases_share_one_managed_server(tmp_path: Path) -> None:
         second.close()
     assert stopped.wait(2)
     server.release_registration()
+
+
+def test_exclusive_managed_worker_can_shutdown_without_saving(tmp_path: Path) -> None:
+    stopped = threading.Event()
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
+        AnalysisState(),
+        REGISTRY_DIR,
+        lease_grace=30,
+        heartbeat_interval=0.02,
+        on_shutdown=stopped.set,
+    )
+    server.start()
+    assert server.entry is not None
+    handle = DatabaseHandle.attach(server.entry)
+    try:
+        assert handle.shutdown_database(save=False) == {
+            "shutting_down": True,
+            "save": False,
+        }
+        assert stopped.wait(2)
+        assert server.save_on_shutdown is False
+    finally:
+        handle.close()
+        server.release_registration()
+
+
+def test_managed_worker_shutdown_rejects_another_lease(tmp_path: Path) -> None:
+    server = CodeModeHTTPServer(
+        StaticBackend(),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
+        AnalysisState(),
+        REGISTRY_DIR,
+        lease_grace=30,
+        heartbeat_interval=0.02,
+    )
+    server.start()
+    assert server.entry is not None
+    first = DatabaseHandle.attach(server.entry)
+    second = DatabaseHandle.attach(server.entry)
+    try:
+        try:
+            first.shutdown_database(save=False)
+        except client_mod.RemoteError as exc:
+            assert exc.code == "instance_shared"
+        else:  # pragma: no cover
+            raise AssertionError("shared worker accepted exclusive shutdown")
+    finally:
+        first.close()
+        second.close()
+        server.release_registration()
 
 
 def test_final_explicit_release_skips_startup_grace(tmp_path: Path) -> None:

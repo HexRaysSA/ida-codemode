@@ -349,8 +349,10 @@ def main(argv: list[str] | None = None) -> int:
             and runtime.database is not None
         ):
             try:
-                # We are back on the idalib main thread after serve().
-                database.close(save=True)
+                # We are back on the idalib main thread after serve(). A remote
+                # exclusive shutdown may explicitly request that changes be discarded.
+                save = getattr(server, "save_on_shutdown", True)
+                database.close(save=save)
                 runtime.database = None
             except Exception as exc:  # noqa: BLE001 -- SWIG may raise arbitrary errors
                 print(
