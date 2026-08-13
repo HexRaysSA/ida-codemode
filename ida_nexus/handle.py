@@ -16,8 +16,13 @@ from .errors import (
     DatabaseDisconnectedError,
     RemoteError,
 )
+from .instances import wait_database_released
 from .models import AnalysisResult, PythonExecutionResult, SaveResult, ShutdownResult
 from .options import MAX_KEEPALIVE_SECONDS, DatabaseOpenOptions
+
+# Closing an IDB may include a final save. Allow the same five-minute budget as
+# explicit saving plus a small margin for worker and registry teardown.
+DATABASE_CLOSE_TIMEOUT_SECONDS = 305.0
 
 # The server reaps an idle HTTP/1.1 connection after 30 seconds. Reconnect
 # proactively with headroom rather than discovering the close during a POST,
@@ -568,8 +573,8 @@ class DatabaseHandle:
             )
         return result
 
-    def _release_remote_lease(self) -> None:
-        """Best-effort lease release over a connection independent of RPC work."""
+    def _release_remote_lease(self) -> bool:
+        """Best-effort release; return whether it committed final IDB shutdown."""
 
         entry = self.instance
         connection = http.client.HTTPConnection(HOST, entry.port, timeout=2.0)
@@ -587,20 +592,47 @@ class DatabaseHandle:
             )
             response = connection.getresponse()
             try:
-                response.read()
+                payload = json.loads(response.read())
+                result = payload.get("result") if isinstance(payload, dict) else None
+                return bool(
+                    isinstance(result, dict)
+                    and result.get("shutdown_pending") is True
+                )
             finally:
                 response.close()
-        except (TimeoutError, OSError, http.client.HTTPException):
+        except (
+            TimeoutError,
+            OSError,
+            http.client.HTTPException,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ):
             # Closing the SSE socket below remains the authoritative fallback.
-            pass
+            return False
         finally:
             connection.close()
 
-    def close(self) -> None:
+    def close(
+        self,
+        *,
+        wait_for_database: bool = False,
+        timeout: float = DATABASE_CLOSE_TIMEOUT_SECONDS,
+    ) -> None:
+        """Release this lease and optionally wait for a final managed IDB close."""
+
+        if not isinstance(wait_for_database, bool):
+            raise TypeError("wait_for_database must be a boolean")
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout < 0
+        ):
+            raise ValueError("timeout must be a finite non-negative number")
         if self._closed.is_set():
             return
         self._closed.set()
-        self._release_remote_lease()
+        shutdown_pending = self._release_remote_lease()
         with self._lock:
             response = self._lease_response
             connection = self._lease_connection
@@ -642,6 +674,14 @@ class DatabaseHandle:
                 pass
         if connection is not None:
             connection.close()
+
+        if wait_for_database and shutdown_pending and not wait_database_released(
+            self.instance,
+            timeout=float(timeout),
+        ):
+            raise NexusConnectionError(
+                f"timed out after {float(timeout):g}s waiting for the IDB to close"
+            )
 
     def __enter__(self) -> Self:
         return self

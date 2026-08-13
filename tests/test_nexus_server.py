@@ -469,15 +469,17 @@ def test_execute_state_is_scoped_to_and_released_with_lease(tmp_path: Path):
         )
         assert status == 200
         assert payload["result"] == {"lease_id": "scoped"}
-        assert (
-            request(
-                server,
-                "POST",
-                "/release_lease",
-                {"lease_id": "scoped"},
-            )[0]
-            == 200
+        release_status, release_payload, _ = request(
+            server,
+            "POST",
+            "/release_lease",
+            {"lease_id": "scoped"},
         )
+        assert release_status == 200
+        assert release_payload["result"] == {
+            "released": True,
+            "shutdown_pending": False,
+        }
         deadline = time.monotonic() + 1
         while ("release_session", "scoped") not in backend.calls:
             assert time.monotonic() < deadline

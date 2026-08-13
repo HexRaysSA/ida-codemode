@@ -222,14 +222,14 @@ poisoning the next operation.
 
 ## Protocol contract and versioning
 
-`PROTOCOL_VERSION` is currently `5`. It is an exact compatibility version for
+`PROTOCOL_VERSION` is currently `6`. It is an exact compatibility version for
 the private discovery registry and per-database HTTP API. There is no downgrade
 or highest-common-version negotiation: a scanner whose local version differs
 from a lock-held record marks that owner `BLOCKED` before probing HTTP. This is
 deliberate—starting a replacement could corrupt an IDB already owned by a peer
 that the scanner does not understand.
 
-Protocol version 5 consists of the following interoperable contracts.
+Protocol version 6 consists of the following interoperable contracts.
 
 ### Discovery contract
 
@@ -264,7 +264,7 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 |---|---|
 | `GET /health` | Raw health identity object described above. |
 | `GET /health?sse=1` | `text/event-stream`; accepts `lease_id` and bounded `keepalive` query values, emits one initial `health` event and heartbeat comments. |
-| `POST /release_lease` | `{lease_id}`; idempotently releases that lease after acknowledging the request. |
+| `POST /release_lease` | `{lease_id}`; idempotently detaches that lease and returns `{"released":true,"shutdown_pending":bool}`. A true `shutdown_pending` commits final zero-keepalive managed shutdown so the client may wait for the lifetime lock to be released. |
 | `POST /execute_python` | `{code, timeout?, lease_id?, operation_id?, persist_globals?, filename?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. Persistence defaults to false and requires an active lease. Execution does not implicitly wait for autoanalysis. |
 | `POST /cancel_operation` | `{lease_id, operation_id}`; success is `{"ok":true,"result":{"cancelled":bool}}`. Cancellation is lease-scoped and preserves the handle. |
 | `POST /save_database` | `{lease_id?}`; success is `{"ok":true,"result":{"saved":true,"idb_path":...}}`. |
@@ -275,6 +275,7 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 Request-owned cancellation requires registry protocol version 3. Version 4 adds
 opt-in lease-scoped persistent Python namespaces. Version 5 requires execution
 results to be directly JSON-serializable and adds exclusive managed-worker
+shutdown. Version 6 reports when explicit lease release commits final managed
 shutdown. This prevents a new client from silently attaching to a GUI plugin or
 worker that cannot provide the lifecycle and execution semantics on which it
 relies.
@@ -380,7 +381,7 @@ Tools are:
 | `execute_python(code, instance_id=None, timeout=360, filename=None)` | Wait without a deadline for initial autoanalysis once through a separate handle request, then execute Python against the selected handle with the numeric execution-only timeout. |
 | `list_databases()` | Discover registered instances and identify this MCP server's handles. |
 | `save_database(instance_id=None)` | Explicitly save the selected database. |
-| `close_database(instance_id=None)` | Release this MCP server's handle; it is not a global close. |
+| `close_database(instance_id=None)` | Release this MCP server's handle. If that commits final managed shutdown, wait up to 305 seconds for the IDB close and lifetime-lock release; it is not a global close. |
 
 `--database` schedules a startup attachment without blocking MCP
 initialization; an operation that needs the current target waits for that

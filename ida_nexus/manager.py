@@ -573,9 +573,10 @@ class DatabaseManager:
             self._instances.pop(target_id)
             if self._current_instance_id == target_id:
                 self._current_instance_id = next(iter(self._instances), None)
-        # Do not wait for an operation owned by this handle. Releasing its lease
-        # asks the worker to cancel orphaned execution before shutting down.
-        session.handle.close()
+        # Do not take the operation lock: releasing the lease asks the worker to
+        # cancel orphaned execution. If this commits final managed shutdown,
+        # wait for the lifetime lock released after the IDB has finished closing.
+        session.handle.close(wait_for_database=True)
         self._emit(
             "database_released",
             instance_id=target_id,
