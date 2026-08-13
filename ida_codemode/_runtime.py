@@ -150,12 +150,16 @@ def _execute_user_code(
     code: str,
     namespace: dict[str, Any],
     runtime: dict[str, Any],
+    filename: str | None = None,
 ) -> Any:
+    if not filename:
+        filename = USER_CODE_FILENAME
+
     stripped = code.strip()
     if not stripped:
         raise CodeValidationError("code must not be empty")
 
-    module = ast.parse(stripped, filename=USER_CODE_FILENAME, mode="exec")
+    module = ast.parse(stripped, filename=filename, mode="exec")
     previous_entrypoints = {
         name: namespace.get(name) for name in ("run", "execute", "main")
     }
@@ -166,7 +170,7 @@ def _execute_user_code(
         if len(module.body) == 1 and isinstance(module.body[0], ast.Expr):
             expression = ast.Expression(module.body[0].value)
             return eval(
-                compile(expression, USER_CODE_FILENAME, "eval"),
+                compile(expression, filename, "eval"),
                 namespace,
                 namespace,
             )
@@ -175,19 +179,19 @@ def _execute_user_code(
             prefix = ast.Module(body=module.body[:-1], type_ignores=module.type_ignores)
             if prefix.body:
                 exec(  # noqa: S102 -- intentional Code Mode surface
-                    compile(prefix, USER_CODE_FILENAME, "exec"),
+                    compile(prefix, filename, "exec"),
                     namespace,
                     namespace,
                 )
             expression = ast.Expression(module.body[-1].value)
             return eval(
-                compile(expression, USER_CODE_FILENAME, "eval"),
+                compile(expression, filename, "eval"),
                 namespace,
                 namespace,
             )
 
         exec(  # noqa: S102 -- intentional Code Mode surface
-            compile(module, USER_CODE_FILENAME, "exec"),
+            compile(module, filename, "exec"),
             namespace,
             namespace,
         )
@@ -200,7 +204,7 @@ def _execute_user_code(
         namespace.pop("result", None)
 
 
-def _format_user_traceback(error: BaseException) -> str | None:
+def _format_user_traceback(error: BaseException, trace_filename: str) -> str | None:
     """Format only the supplied-code portion of an execution failure."""
 
     if isinstance(error, SyntaxError):
@@ -210,7 +214,7 @@ def _format_user_traceback(error: BaseException) -> str | None:
         (
             index
             for index, frame in enumerate(frames)
-            if frame.filename == USER_CODE_FILENAME
+            if frame.filename == trace_filename
         ),
         None,
     )
@@ -349,9 +353,13 @@ class IDARuntime:
         timeout: float | None,
         batch: bool = True,
         capture_output: bool = False,
+        trace_filename: str | None = None,
     ) -> Any:
         import ida_kernwin
         import idc
+
+        if not trace_filename:
+            trace_filename = USER_CODE_FILENAME
 
         effective_timeout = timeout
         if effective_timeout is not None and (
@@ -447,11 +455,28 @@ class IDARuntime:
                         stdout_capture.getvalue(),
                         stderr_capture.getvalue(),
                     )
+                except SystemExit as exc:
+                    outcome = (
+                        False,
+                        APIError(
+                            "system_exit",
+                            f"{kind} raised SystemExit({exc.code!r})",
+                            status=409,
+                            details={
+                                "exit_code": exc.code,
+                                "stdout": stdout_capture.getvalue(),
+                                "stderr": stderr_capture.getvalue(),
+                            },
+                        ),
+                        repr(exc.code),
+                        stdout_capture.getvalue(),
+                        stderr_capture.getvalue(),
+                    )
                 except BaseException as exc:  # noqa: BLE001 -- marshal any IDA callback failure
                     outcome = (
                         False,
                         exc,
-                        _format_user_traceback(exc),
+                        _format_user_traceback(exc, trace_filename),
                         stdout_capture.getvalue(),
                         stderr_capture.getvalue(),
                     )
@@ -539,8 +564,12 @@ class IDARuntime:
         *,
         lease_id: str | None = None,
         persist_globals: bool = False,
+        filename: str | None = None,
     ) -> PythonExecutionResult:
         import ida_domain
+
+        if not filename:
+            filename = USER_CODE_FILENAME
 
         def execute() -> Any:
             runtime = {
@@ -573,7 +602,7 @@ class IDARuntime:
                         **runtime,
                     }
                 )
-            result = _execute_user_code(code, namespace, runtime)
+            result = _execute_user_code(code, namespace, runtime, filename)
             if inspect.isawaitable(result):
                 result = asyncio.run(result)
             return result
@@ -583,6 +612,7 @@ class IDARuntime:
             kind="execute",
             timeout=self.default_timeout if timeout is None else timeout,
             capture_output=True,
+            trace_filename=filename,
         )
 
     def release_session(self, lease_id: str) -> None:

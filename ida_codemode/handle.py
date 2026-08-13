@@ -421,6 +421,7 @@ class DatabaseHandle:
         *,
         operation_id: str | None = None,
         persist_globals: bool = False,
+        filename: str | None = None,
     ) -> PythonExecutionResult:
         """Execute Python; stateless execution resets this handle's namespace."""
 
@@ -428,6 +429,8 @@ class DatabaseHandle:
             "code": code,
             "persist_globals": persist_globals,
         }
+        if filename is not None:
+            payload["filename"] = filename
         if timeout is not None:
             payload["timeout"] = timeout
         # Leave enough HTTP time for the server to return its structured

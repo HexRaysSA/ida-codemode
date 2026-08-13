@@ -16,6 +16,7 @@ ida-codemode-dashboard = "ida_codemode_dashboard:cli"
 ida-codemode-logs = "ida_codemode.logs:main"
 ida-codemode-worker = "ida_codemode.worker:main"
 ida-codemode-benchmark = "ida_codemode.benchmark:main"
+ida-codemode-exec = "ida_codemode_exec:main"
 
 [dependency-groups]
 dev = [

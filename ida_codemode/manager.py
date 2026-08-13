@@ -398,6 +398,7 @@ class DatabaseManager:
         *,
         operation_id: str | None = None,
         persist_globals: bool = False,
+        filename: str | None = None,
     ) -> PythonExecutionResult:
         effective_timeout = self._execute_timeout if timeout is None else timeout
         if (
@@ -417,6 +418,7 @@ class DatabaseManager:
                     timeout=float(effective_timeout),
                     operation_id=operation_id,
                     persist_globals=persist_globals,
+                    filename=filename,
                 )
             except CodeModeConnectionError:
                 if not session.handle.connected:
