@@ -19,6 +19,7 @@ from ida_codemode import (
     DatabaseManager,
     DatabaseOpenOptions,
     DatabaseSelectionError,
+    PythonExecutionResult,
     discover_databases,
     find_database_owner,
     wait_database_released,
@@ -58,9 +59,14 @@ class StaticBackend:
         *,
         lease_id: str | None = None,
         persist_globals: bool = False,
-    ):
+        filename: str | None = None,
+    ) -> PythonExecutionResult:
         del lease_id, persist_globals
-        return {"code": code, "timeout": timeout}
+        return {
+            "result": {"code": code, "timeout": timeout},
+            "stdout": "",
+            "stderr": "",
+        }
 
     def cancel_active(self) -> None:
         pass
@@ -1204,6 +1210,7 @@ def test_mcp_execution_waits_for_autoanalysis_once_per_database(
             *,
             lease_id: str | None = None,
             persist_globals: bool = False,
+            filename: str | None = None,
         ):
             self.calls.append(("execute", code, timeout))
             return super().execute_python(
@@ -1841,6 +1848,7 @@ def test_cancel_active_preserves_database_handle(tmp_path: Path) -> None:
             *,
             lease_id: str | None = None,
             persist_globals: bool = False,
+            filename: str | None = None,
         ):
             if code == "second":
                 return super().execute_python(
@@ -1911,6 +1919,7 @@ def test_database_close_cancels_its_active_execution(tmp_path: Path) -> None:
             *,
             lease_id: str | None = None,
             persist_globals: bool = False,
+            filename: str | None = None,
         ):
             del lease_id, persist_globals
             self.started.set()

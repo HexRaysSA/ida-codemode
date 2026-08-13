@@ -14,7 +14,7 @@ from urllib.parse import parse_qs
 
 from ._http import HOST, HTTPResponse, LocalHTTPServer, json_response
 from ._registry import DatabaseInstance, InstanceIdentity, InstanceRegistration
-from ._runtime import AnalysisState, APIError
+from ._runtime import USER_CODE_FILENAME, AnalysisState, APIError
 
 logger = logging.getLogger(__name__)
 DEFAULT_LEASE_GRACE_SECONDS = 20.0
@@ -36,6 +36,7 @@ class CodeModeBackend(Protocol):
         *,
         lease_id: str | None = None,
         persist_globals: bool = False,
+        filename: str | None = None,
     ) -> Any: ...
 
     def cancel_active(self) -> None: ...
@@ -536,6 +537,13 @@ class CodeModeHTTPServer:
         return persist_globals
 
     @staticmethod
+    def _filename(payload: dict[str, Any]) -> str:
+        filename = payload.get("filename", USER_CODE_FILENAME)
+        if not isinstance(filename, str) or not filename.strip():
+            raise APIError("invalid_filename", "filename must be a non-empty string")
+        return filename
+
+    @staticmethod
     def _timeout(payload: dict[str, Any]) -> float | None:
         timeout = payload.get("timeout")
         if timeout is None:
@@ -658,6 +666,7 @@ class CodeModeHTTPServer:
                             "invalid_lease",
                             "persist_globals requires an active lease",
                         )
+                    filename = self._filename(payload)
                     return self._success(
                         self._run_operation(
                             lease_id,
@@ -666,6 +675,7 @@ class CodeModeHTTPServer:
                                 self._timeout(payload),
                                 lease_id=lease_id,
                                 persist_globals=persist_globals,
+                                filename=filename,
                             ),
                             self._operation_id(payload),
                         )

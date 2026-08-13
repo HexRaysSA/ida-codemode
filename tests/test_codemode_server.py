@@ -24,6 +24,7 @@ class RecordingBackend:
         *,
         lease_id: str | None = None,
         persist_globals: bool = False,
+        filename: str | None = None,
     ):
         self.calls.append(("execute_python", code, timeout, lease_id, persist_globals))
         if code == "return-bytes":
@@ -414,6 +415,7 @@ def test_execute_state_is_scoped_to_and_released_with_lease(tmp_path: Path):
             *,
             lease_id: str | None = None,
             persist_globals: bool = False,
+            filename: str | None = None,
         ):
             self.calls.append(
                 (

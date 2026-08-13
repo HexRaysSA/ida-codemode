@@ -264,7 +264,7 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 | `GET /health` | Raw health identity object described above. |
 | `GET /health?sse=1` | `text/event-stream`; accepts `lease_id` and bounded `keepalive` query values, emits one initial `health` event and heartbeat comments. |
 | `POST /release_lease` | `{lease_id}`; idempotently releases that lease after acknowledging the request. |
-| `POST /execute_python` | `{code, timeout?, lease_id?, operation_id?, persist_globals?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. Persistence defaults to false and requires an active lease. Execution does not implicitly wait for autoanalysis. |
+| `POST /execute_python` | `{code, timeout?, lease_id?, operation_id?, persist_globals?, filename?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. Persistence defaults to false and requires an active lease. Execution does not implicitly wait for autoanalysis. |
 | `POST /cancel_operation` | `{lease_id, operation_id}`; success is `{"ok":true,"result":{"cancelled":bool}}`. Cancellation is lease-scoped and preserves the handle. |
 | `POST /save_database` | `{lease_id?}`; success is `{"ok":true,"result":{"saved":true,"idb_path":...}}`. |
 | `POST /shutdown_database` | `{lease_id, save}`; the active lease must be exclusive and own a managed idalib worker. Success is `{"ok":true,"result":{"shutting_down":true,"save":bool}}`, after which teardown uses `Database.close(save=save)`. |
@@ -376,7 +376,7 @@ Tools are:
 |---|---|
 | `reference(query)` | Search the installed ida-domain API reference. |
 | `open_database(path, set_current=True)` | Attach to a GUI or shared managed worker. |
-| `execute_python(code, instance_id=None, timeout=360)` | Wait without a deadline for initial autoanalysis once through a separate handle request, then execute Python against the selected handle with the numeric execution-only timeout. |
+| `execute_python(code, instance_id=None, timeout=360, filename=None)` | Wait without a deadline for initial autoanalysis once through a separate handle request, then execute Python against the selected handle with the numeric execution-only timeout. |
 | `list_databases()` | Discover registered instances and identify this MCP server's handles. |
 | `save_database(instance_id=None)` | Explicitly save the selected database. |
 | `close_database(instance_id=None)` | Release this MCP server's handle; it is not a global close. |
