@@ -339,7 +339,16 @@ def test_execute_rejects_invalid_timeouts(tmp_path: Path):
 def test_execute_rejects_invalid_operation_labels(tmp_path: Path) -> None:
     server, backend = make_server(tmp_path)
     try:
-        for operation_label in ("", "  ", "x" * 129, 1, True):
+        status, _, _ = request(
+            server,
+            "POST",
+            "/execute_python",
+            {"code": "lambda: 1", "operation_label": "x" * 1024},
+        )
+        assert status == 200
+        backend.calls.clear()
+
+        for operation_label in ("", "  ", "x" * 1025, 1, True):
             status, payload, _ = request(
                 server,
                 "POST",

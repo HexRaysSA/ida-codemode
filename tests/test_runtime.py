@@ -131,7 +131,7 @@ def test_execution_operation_metadata_is_scoped_to_hook(
     runtime = _inline_runtime(monkeypatch)
     hook = SimpleNamespace(
         operation_id=None,
-        operation_label=None,
+        operation_label="IDA GUI",
         origin_id=None,
     )
     runtime._idb_change_hook = hook
@@ -165,11 +165,35 @@ def test_execution_operation_metadata_is_scoped_to_hook(
     assert attributed["origin_id"] == runtime_module._event_origin_id("lease-1")
 
     record_change()
-    unattributed = state.wait(subscriber, timeout=1.0)
-    assert unattributed is not None
-    assert unattributed["operation_id"] is None
-    assert unattributed["operation_label"] is None
-    assert unattributed["origin_id"] is None
+    gui_event = state.wait(subscriber, timeout=1.0)
+    assert gui_event is not None
+    assert gui_event["operation_id"] is None
+    assert gui_event["operation_label"] == "IDA GUI"
+    assert gui_event["origin_id"] is None
+
+
+def test_idb_hook_starts_with_runtime_unattributed_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _inline_runtime(monkeypatch)
+    runtime.idb_change_state = IdbChangeState()
+    runtime.unattributed_operation_label = "IDA GUI"
+    hook = SimpleNamespace(operation_label=None, hook=lambda: True)
+    monkeypatch.setattr(
+        runtime_module,
+        "create_idb_change_hook",
+        lambda _state: hook,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_kernwin",
+        SimpleNamespace(MFF_FAST=0, execute_sync=lambda callback, _flags: callback()),
+    )
+
+    runtime.enable_idb_change_hook()
+
+    assert runtime._idb_change_hook is hook
+    assert hook.operation_label == "IDA GUI"
 
 
 def test_structured_hook_captures_renamed_event(

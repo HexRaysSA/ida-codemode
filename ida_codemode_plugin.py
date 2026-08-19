@@ -111,6 +111,7 @@ class CodeModePlugin(idaapi.plugin_t):
             database=database,
             analysis_state=self.analysis_state,
             idb_change_state=self.idb_change_state,
+            unattributed_operation_label="IDA GUI",
         )
         server = CodeModeHTTPServer(
             runtime,
