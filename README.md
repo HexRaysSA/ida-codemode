@@ -203,6 +203,37 @@ disconnected rather than receiving an incomplete history. The subscription can
 be opened before autoanalysis completes; hooks are installed after initial
 autoanalysis and removed when the final subscriber disconnects.
 
+`@remote_ida` turns a typed IDA-domain function into a synchronous function
+whose first argument is a `DatabaseHandle`. Keep the `Database` import
+type-only so importing an application does not initialize idalib:
+
+```python
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from ida_codemode import DatabaseHandle, remote_ida
+
+if TYPE_CHECKING:
+    from ida_domain import Database
+
+
+@remote_ida
+def read_bytes(db: Database, address: int, size: int) -> bytes:
+    return db.bytes.get_bytes_at(address, size) or b""
+
+
+with DatabaseHandle.open("firmware.bin") as handle:
+    header = read_bytes(handle, 0x401000, 16)
+```
+
+The function body is type-checked against `ida_domain.Database`, while callers
+are type-checked against `DatabaseHandle`. Remote functions must be ordinary
+source-backed `def` functions without closures or additional decorators.
+Imports used by the body belong inside the function. Arguments and return
+values may contain `None`, booleans, integers, finite floats, strings, bytes,
+lists, tuples, and string-keyed dictionaries recursively.
+
 Discovery returns public instance descriptors that support exact attachment:
 
 ```python
