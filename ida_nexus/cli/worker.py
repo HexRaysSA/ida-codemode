@@ -13,7 +13,12 @@ from .._registry import (
     InstanceIdentity,
     ensure_private_directory,
 )
-from .._runtime import AnalysisState, IDARuntime, create_autoanalysis_hook
+from .._runtime import (
+    AnalysisState,
+    IDARuntime,
+    IdbChangeState,
+    create_autoanalysis_hook,
+)
 from .._server import DEFAULT_LEASE_GRACE_SECONDS, NexusHTTPServer
 
 
@@ -269,6 +274,9 @@ def main(argv: list[str] | None = None) -> int:
 
     analysis_state = AnalysisState()
     analysis_hook: Any | None = None
+    # The change hook is installed only while /idb_events has subscribers and
+    # only after initial autoanalysis has finished.
+    idb_change_state = IdbChangeState()
     database: Any | None = None
     runtime: IDARuntime | None = None
     server: NexusHTTPServer | None = None
@@ -311,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
             backend="idalib",
             database=database,
             analysis_state=analysis_state,
+            idb_change_state=idb_change_state,
         )
         server = NexusHTTPServer(
             runtime,
@@ -346,6 +355,15 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:  # noqa: BLE001 -- best-effort SWIG hook cleanup
                 print(
                     f"[ida-nexus] failed to remove analysis hook: {exc}",
+                    file=sys.stderr,
+                )
+        if runtime is not None:
+            try:
+                # Ensure the lazily-installed hook is gone before teardown.
+                runtime.disable_idb_change_hook()
+            except Exception as exc:  # noqa: BLE001 -- best-effort SWIG hook cleanup
+                print(
+                    f"[ida-nexus] failed to remove idb-change hook: {exc}",
                     file=sys.stderr,
                 )
         if (

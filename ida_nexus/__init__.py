@@ -12,7 +12,7 @@ from .errors import (
     RemoteError,
     WorkerStartError,
 )
-from .handle import DatabaseHandle
+from .handle import DatabaseChangeSubscription, DatabaseHandle
 from .instances import (
     DatabaseInstance,
     DiscoveredDatabase,
@@ -31,7 +31,13 @@ from .manager import (
     SaveDatabaseResult,
     WaitAutoanalysisResult,
 )
-from .models import AnalysisResult, PythonExecutionResult, SaveResult, ShutdownResult
+from .models import (
+    AnalysisResult,
+    DatabaseChangeEvent,
+    PythonExecutionResult,
+    SaveResult,
+    ShutdownResult,
+)
 from .options import DatabaseOpenOptions
 from .paths import get_state_dir
 from .reference import get_ida_domain_version, reference
@@ -43,6 +49,8 @@ __all__ = [
     "NexusConnectionError",
     "NexusError",
     "DatabaseBusyError",
+    "DatabaseChangeEvent",
+    "DatabaseChangeSubscription",
     "DatabaseDisconnectedError",
     "DatabaseEventCallback",
     "DatabaseHandle",

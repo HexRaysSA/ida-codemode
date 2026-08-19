@@ -1,15 +1,69 @@
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+import ida_nexus._runtime as runtime_module
 from ida_nexus._runtime import (
     IDARuntime,
+    IdbChangeState,
     PythonExecutionResult,
     _execute_user_code,
+    create_idb_change_hook,
 )
+
+
+def test_idb_change_state_delivers_one_event_at_a_time() -> None:
+    state = IdbChangeState()
+    subscriber = state.subscribe()
+    state.record({"event_name": "first", "timestamp": 1}, "operation-1")
+    state.record({"event_name": "second", "timestamp": 2}, "operation-2")
+
+    assert state.wait(subscriber, timeout=1.0) == {
+        "event_name": "first",
+        "timestamp": 1,
+        "revision": 1,
+        "operation_id": "operation-1",
+        "operation_label": None,
+        "origin_id": None,
+    }
+    assert state.wait(subscriber, timeout=1.0) == {
+        "event_name": "second",
+        "timestamp": 2,
+        "revision": 2,
+        "operation_id": "operation-2",
+        "operation_label": None,
+        "origin_id": None,
+    }
+    assert state.wait(subscriber, timeout=0.01) is None
+
+
+def test_idb_change_state_fans_out_from_subscription_time() -> None:
+    state = IdbChangeState()
+    early = state.subscribe()
+    state.record({"event_name": "first", "timestamp": 1})
+    late = state.subscribe()
+    state.record({"event_name": "second", "timestamp": 2})
+
+    first = state.wait(early, 1.0)
+    assert first is not None and first["event_name"] == "first"
+    second = state.wait(early, 1.0)
+    assert second is not None and second["event_name"] == "second"
+    late_event = state.wait(late, 1.0)
+    assert late_event is not None and late_event["event_name"] == "second"
+
+
+def test_idb_change_state_bounds_slow_subscriber_queue() -> None:
+    state = IdbChangeState()
+    subscriber = state.subscribe()
+    for revision in range(10_000):
+        state.record({"event_name": "changed", "timestamp": revision})
+
+    with pytest.raises(OverflowError, match="fell behind"):
+        state.wait(subscriber, timeout=1.0)
 
 
 def _namespace() -> dict[str, Any]:
@@ -49,6 +103,7 @@ def _inline_runtime(monkeypatch: pytest.MonkeyPatch) -> IDARuntime:
     runtime.database = object()
     runtime.default_timeout = 60.0
     runtime._session_namespaces = {}
+    runtime._idb_change_hook = None
 
     def run_inline(
         function,
@@ -66,6 +121,103 @@ def _inline_runtime(monkeypatch: pytest.MonkeyPatch) -> IDARuntime:
 
     monkeypatch.setattr(runtime, "_run_sync", run_inline)
     return runtime
+
+
+def test_execution_operation_metadata_is_scoped_to_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = IdbChangeState()
+    subscriber = state.subscribe()
+    runtime = _inline_runtime(monkeypatch)
+    hook = SimpleNamespace(
+        operation_id=None,
+        operation_label=None,
+        origin_id=None,
+    )
+    runtime._idb_change_hook = hook
+
+    def record_change() -> None:
+        state.record(
+            {"event_name": "renamed", "timestamp": 1},
+            hook.operation_id,
+            hook.operation_label,
+            hook.origin_id,
+        )
+
+    def execute_and_fail(*_args: Any) -> None:
+        record_change()
+        raise RuntimeError("failed after mutation")
+
+    monkeypatch.setattr(runtime_module, "_execute_user_code", execute_and_fail)
+    with pytest.raises(RuntimeError, match="failed after mutation"):
+        runtime.execute_python(
+            "mutate()",
+            None,
+            operation_id="request-1",
+            operation_label="IDA Nexus TUI: Duncan",
+            lease_id="lease-1",
+        )
+
+    attributed = state.wait(subscriber, timeout=1.0)
+    assert attributed is not None
+    assert attributed["operation_id"] == "request-1"
+    assert attributed["operation_label"] == "IDA Nexus TUI: Duncan"
+    assert attributed["origin_id"] == runtime_module._event_origin_id("lease-1")
+
+    record_change()
+    unattributed = state.wait(subscriber, timeout=1.0)
+    assert unattributed is not None
+    assert unattributed["operation_id"] is None
+    assert unattributed["operation_label"] is None
+    assert unattributed["origin_id"] is None
+
+
+def test_structured_hook_captures_renamed_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeIDBHooks:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+    monkeypatch.delitem(sys.modules, "ida_nexus._idb_events", raising=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_idp",
+        SimpleNamespace(IDB_Hooks=FakeIDBHooks),
+    )
+    for module_name in (
+        "ida_dirtree",
+        "ida_frame",
+        "ida_funcs",
+        "ida_gdl",
+        "ida_moves",
+        "ida_range",
+        "ida_segment",
+        "ida_typeinf",
+        "ida_ua",
+    ):
+        monkeypatch.setitem(sys.modules, module_name, SimpleNamespace())
+
+    state = IdbChangeState()
+    subscriber = state.subscribe()
+    hook = create_idb_change_hook(state)
+    hook.renamed(0x401000, "new_name", False, "old_name")
+
+    event = state.wait(subscriber, timeout=1.0)
+    assert event is not None
+    assert event == {
+        "event_name": "renamed",
+        "timestamp": event["timestamp"],
+        "ea": 0x401000,
+        "new_name": "new_name",
+        "local_name": False,
+        "old_name": "old_name",
+        "revision": 1,
+        "operation_id": None,
+        "operation_label": None,
+        "origin_id": None,
+    }
+    assert isinstance(event["timestamp"], int)
 
 
 def test_stateless_execution_discards_persistent_lease_namespace(

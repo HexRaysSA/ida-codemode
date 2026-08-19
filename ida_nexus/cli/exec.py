@@ -14,7 +14,12 @@ except ImportError:
 
 def exec(handle: DatabaseHandle, code: str, filename: str, json_mode: bool) -> bool:
     try:
-        result = handle.execute_python(code, persist_globals=True, filename=filename)
+        result = handle.execute_python(
+            code,
+            operation_label="ida-nexus cli",
+            persist_globals=True,
+            filename=filename,
+        )
     except RemoteError as e:
         if stdout := e.details.get("stdout"):
             sys.stdout.write(stdout)

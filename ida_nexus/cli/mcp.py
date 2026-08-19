@@ -63,10 +63,10 @@ from zeromcp import McpServer, McpToolError
 
 from ida_nexus import (
     CloseDatabaseResult,
-    NexusError,
     DatabaseManager,
     DatabaseSelectionError,
     ListDatabasesResult,
+    NexusError,
     OpenDatabaseResult,
     PythonExecutionResult,
     RemoteError,
@@ -274,14 +274,16 @@ DATABASE_MANAGER = DatabaseManager(
 _TRACE_LIFECYCLE_LOCK = threading.Lock()
 _TRACE_STARTED = False
 _TRACE_STOPPED = False
+_OPERATION_LABEL = "ida-nexus mcp"
 
 
 def _start_mcp_trace(transport: str, agent: str | None) -> None:
-    global _TRACE_STARTED
+    global _OPERATION_LABEL, _TRACE_STARTED
     with _TRACE_LIFECYCLE_LOCK:
         if _TRACE_STARTED:
             return
         _TRACE_STARTED = True
+        _OPERATION_LABEL = agent or "ida-nexus mcp"
     TRACE.emit(
         "mcp_started",
         session=_session_fields(),
@@ -489,7 +491,7 @@ async def execute_python(
         DATABASE_MANAGER.resolve_instance_id,
         instance_id,
     )
-    operation_id = uuid.uuid4().hex
+    operation_id = _TRACE_CALL_ID.get() or uuid.uuid4().hex
     cancel_requested = threading.Event()
 
     def execute() -> PythonExecutionResult:
@@ -507,6 +509,7 @@ async def execute_python(
             target_id,
             timeout=timeout,
             operation_id=operation_id,
+            operation_label=_OPERATION_LABEL,
             persist_globals=True,
         )
 

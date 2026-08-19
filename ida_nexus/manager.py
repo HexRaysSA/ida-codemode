@@ -21,7 +21,7 @@ from ida_nexus._registry import (
     scan_instances,
 )
 from ida_nexus._resolver import expected_idb_path
-from ida_nexus.errors import NexusConnectionError, DatabaseSelectionError
+from ida_nexus.errors import DatabaseSelectionError, NexusConnectionError
 from ida_nexus.handle import DatabaseHandle
 from ida_nexus.models import PythonExecutionResult
 from ida_nexus.options import MAX_KEEPALIVE_SECONDS, DatabaseOpenOptions
@@ -397,6 +397,7 @@ class DatabaseManager:
         timeout: float | None = None,
         *,
         operation_id: str | None = None,
+        operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
     ) -> PythonExecutionResult:
@@ -417,6 +418,7 @@ class DatabaseManager:
                     code,
                     timeout=float(effective_timeout),
                     operation_id=operation_id,
+                    operation_label=operation_label,
                     persist_globals=persist_globals,
                     filename=filename,
                 )

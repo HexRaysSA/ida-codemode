@@ -10,7 +10,12 @@ import ida_nalt
 import idaapi
 
 from ida_nexus._registry import REGISTRY_DIR, InstanceIdentity, find_gui_owner
-from ida_nexus._runtime import AnalysisState, IDARuntime, create_autoanalysis_hook
+from ida_nexus._runtime import (
+    AnalysisState,
+    IDARuntime,
+    IdbChangeState,
+    create_autoanalysis_hook,
+)
 from ida_nexus._server import NexusHTTPServer
 
 
@@ -62,6 +67,9 @@ class NexusPlugin(idaapi.plugin_t):
         self.analysis_state = AnalysisState()
         self._analysis_hook = create_autoanalysis_hook(self.analysis_state)
         self._analysis_hook.hook()
+        # The change hook is installed only while /idb_events has subscribers
+        # and only after initial autoanalysis has finished.
+        self.idb_change_state = IdbChangeState()
         # IDA's SWIG stubs model hook constructors with spurious arguments.
         hook_type: Any = ReadyToRunHook
         ui_hook = hook_type(self)
@@ -102,6 +110,7 @@ class NexusPlugin(idaapi.plugin_t):
             backend="gui",
             database=database,
             analysis_state=self.analysis_state,
+            idb_change_state=self.idb_change_state,
         )
         server = NexusHTTPServer(
             runtime,
@@ -138,11 +147,21 @@ class NexusPlugin(idaapi.plugin_t):
         if server is not None:
             server.stop()
             self._server = None
-        if self._runtime is not None and self._runtime.database is not None:
+        if self._runtime is not None:
             try:
-                self._runtime.database.unhook()
+                # Ensure the lazily-installed hook is gone before teardown.
+                self._runtime.disable_idb_change_hook()
             except Exception as exc:  # noqa: BLE001 -- best-effort SWIG cleanup
-                ida_kernwin.msg(f"[ida-nexus] failed to detach database: {exc}\n")
+                ida_kernwin.msg(
+                    f"[ida-nexus] failed to remove idb-change hook: {exc}\n"
+                )
+            if self._runtime.database is not None:
+                try:
+                    self._runtime.database.unhook()
+                except Exception as exc:  # noqa: BLE001 -- best-effort SWIG cleanup
+                    ida_kernwin.msg(
+                        f"[ida-nexus] failed to detach database: {exc}\n"
+                    )
             self._runtime = None
         if server is not None:
             # Release the lifetime lock only after detaching from the GUI IDB.

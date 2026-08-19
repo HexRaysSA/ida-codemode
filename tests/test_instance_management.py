@@ -37,7 +37,7 @@ from ida_nexus._registry import (
     scan_instances,
 )
 from ida_nexus._resolver import resolve_instance
-from ida_nexus._runtime import AnalysisState
+from ida_nexus._runtime import AnalysisState, IdbChangeState
 from ida_nexus._server import NexusHTTPServer
 from ida_nexus.cli import mcp as mcp_app
 from ida_nexus.cli.worker import (
@@ -52,16 +52,21 @@ from ida_nexus.cli.worker import (
 
 
 class StaticBackend:
+    def __init__(self) -> None:
+        self.idb_change_state = IdbChangeState()
+
     def execute_python(
         self,
         code: str,
         timeout: float | None,
         *,
         lease_id: str | None = None,
+        operation_id: str | None = None,
+        operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
     ) -> PythonExecutionResult:
-        del lease_id, persist_globals
+        del lease_id, operation_id, operation_label, persist_globals
         return {
             "result": {"code": code, "timeout": timeout},
             "stdout": "",
@@ -79,6 +84,31 @@ class StaticBackend:
 
     def save_database(self):
         return {"saved": True, "idb_path": "/tmp/test.i64"}
+
+    def enable_idb_change_hook(self) -> None:
+        pass
+
+    def disable_idb_change_hook(self) -> None:
+        pass
+
+    def subscribe_idb_changes(self):
+        return self.idb_change_state.subscribe()
+
+    def wait_idb_change(self, subscriber, timeout: float):
+        return self.idb_change_state.wait(subscriber, timeout)
+
+    def record_idb_change(
+        self,
+        operation_id: str | None = None,
+        operation_label: str | None = None,
+        origin_id: str | None = None,
+    ) -> None:
+        self.idb_change_state.record(
+            {"event_name": operation_id or "changed", "timestamp": 1},
+            operation_id,
+            operation_label,
+            origin_id,
+        )
 
 
 def test_file_lock_excludes_other_open_descriptions(tmp_path: Path) -> None:
@@ -607,20 +637,31 @@ def test_mcp_execute_owns_autoanalysis_policy(monkeypatch) -> None:
             timeout: float | None = None,
             *,
             operation_id: str | None = None,
+            operation_label: str | None = None,
             persist_globals: bool = False,
         ):
             assert persist_globals
             self.calls.append(
-                ("execute_python", code, instance_id, timeout, operation_id)
+                (
+                    "execute_python",
+                    code,
+                    instance_id,
+                    timeout,
+                    operation_id,
+                    operation_label,
+                )
             )
             return {"result": 1, "stdout": "", "stderr": ""}
 
     manager = FakeManager()
+    trace_records: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(mcp_app, "DATABASE_MANAGER", manager)
     monkeypatch.setattr(
         mcp_app,
         "TRACE",
-        SimpleNamespace(emit=lambda *_args, **_kwargs: None),
+        SimpleNamespace(
+            emit=lambda event, **fields: trace_records.append((event, fields))
+        ),
     )
 
     result = asyncio.run(mcp_app.execute_python("lambda: 1", "test-instance"))
@@ -632,9 +673,18 @@ def test_mcp_execute_owns_autoanalysis_policy(monkeypatch) -> None:
     assert manager.calls[0] == ("resolve_instance_id", "test-instance")
     operation_id = manager.calls[1][2]
     assert isinstance(operation_id, str) and len(operation_id) == 32
+    tool_call = next(fields for event, fields in trace_records if event == "tool_call")
+    assert operation_id == tool_call["call_id"]
     assert manager.calls[1:] == [
         ("ensure_autoanalysis", "test-instance", operation_id),
-        ("execute_python", "lambda: 1", "test-instance", 360, operation_id),
+        (
+            "execute_python",
+            "lambda: 1",
+            "test-instance",
+            360,
+            operation_id,
+            "ida-nexus mcp",
+        ),
     ]
 
 
@@ -756,11 +806,13 @@ def test_cancelling_queued_mcp_execution_does_not_cancel_running_request(
             timeout: float | None = None,
             *,
             operation_id: str | None = None,
+            operation_label: str | None = None,
             persist_globals: bool = False,
         ) -> dict[str, object]:
             assert timeout == 360
             assert persist_globals
             assert operation_id is not None
+            assert operation_label == "ida-nexus mcp"
             self.operation_ids[code] = operation_id
             if code == "second":
                 self.second_waiting.set()
@@ -903,6 +955,7 @@ def test_mcp_session_trace_metadata(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(mcp_app, "_TRACE_STOPPED", False)
 
     mcp_app._start_mcp_trace("stdio", "test-agent")
+    assert mcp_app._OPERATION_LABEL == "test-agent"
     mcp_app.mcp.registry.methods["initialize"](
         "2025-06-18",
         {},
@@ -1209,14 +1262,18 @@ def test_mcp_execution_waits_for_autoanalysis_once_per_database(
             timeout: float | None,
             *,
             lease_id: str | None = None,
+            operation_id: str | None = None,
+            operation_label: str | None = None,
             persist_globals: bool = False,
             filename: str | None = None,
         ):
-            self.calls.append(("execute", code, timeout))
+            self.calls.append(("execute", code, timeout, operation_id, operation_label))
             return super().execute_python(
                 code,
                 timeout,
                 lease_id=lease_id,
+                operation_id=operation_id,
+                operation_label=operation_label,
                 persist_globals=persist_globals,
             )
 
@@ -1256,11 +1313,18 @@ def test_mcp_execution_waits_for_autoanalysis_once_per_database(
             "stdout": "",
             "stderr": "",
         }
-        assert backend.calls == [
-            ("wait", None),
-            ("execute", "lambda: 1", 7.0),
-            ("execute", "lambda: 2", 9.0),
-        ]
+        assert backend.calls[0] == ("wait", None)
+        first_operation = backend.calls[1]
+        second_operation = backend.calls[2]
+        assert first_operation[:3] == ("execute", "lambda: 1", 7.0)
+        assert second_operation[:3] == ("execute", "lambda: 2", 9.0)
+        first_operation_id = first_operation[3]
+        second_operation_id = second_operation[3]
+        assert isinstance(first_operation_id, str) and len(first_operation_id) == 32
+        assert isinstance(second_operation_id, str) and len(second_operation_id) == 32
+        assert first_operation_id != second_operation_id
+        assert first_operation[4] is None
+        assert second_operation[4] is None
     finally:
         manager.shutdown()
         server.stop()
@@ -1578,6 +1642,89 @@ def test_database_handle_attach_and_poll_use_exact_entry(tmp_path: Path) -> None
         server.release_registration()
 
 
+def test_database_handle_exposes_closeable_idb_event_iterator(tmp_path: Path) -> None:
+    analysis = AnalysisState()
+    backend = StaticBackend()
+    server = NexusHTTPServer(
+        backend,
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
+        analysis,
+        REGISTRY_DIR,
+        heartbeat_interval=0.02,
+    )
+    server.start()
+    assert server.entry is not None
+    handle = DatabaseHandle.attach(server.entry)
+    try:
+        with handle.subscribe_idb_events() as events:
+            assert events in handle._idb_subscriptions
+            analysis.mark_complete()
+            deadline = time.monotonic() + 1
+            while not server._idb_event_hook_enabled and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert server._idb_event_hook_enabled
+            backend.record_idb_change(
+                "first",
+                "first label",
+                handle.event_origin_id,
+            )
+            event = next(events)
+            assert event == {
+                "event_name": "first",
+                "timestamp": 1,
+                "revision": 1,
+                "operation_id": "first",
+                "operation_label": "first label",
+                "origin_id": handle.event_origin_id,
+            }
+            assert handle.owns_event(event)
+            assert not handle.owns_event({**event, "origin_id": "another-handle"})
+            assert len(handle.event_origin_id) == 32
+        assert events.closed
+        assert events not in handle._idb_subscriptions
+    finally:
+        handle.close()
+        server.stop()
+        server.release_registration()
+
+
+def test_database_handle_closes_idb_event_iterators(tmp_path: Path) -> None:
+    analysis = AnalysisState()
+    analysis.mark_complete()
+    server = NexusHTTPServer(
+        StaticBackend(),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
+        analysis,
+        REGISTRY_DIR,
+        heartbeat_interval=0.02,
+    )
+    server.start()
+    assert server.entry is not None
+    handle = DatabaseHandle.attach(server.entry)
+    events = handle.subscribe_idb_events()
+    stopped = threading.Event()
+
+    def read_event() -> None:
+        try:
+            next(events)
+        except StopIteration:
+            stopped.set()
+
+    reader = threading.Thread(target=read_event, daemon=True)
+    reader.start()
+    try:
+        time.sleep(0.05)
+        handle.close()
+        assert events.closed
+        assert stopped.wait(1)
+        reader.join(timeout=1)
+        assert not reader.is_alive()
+    finally:
+        handle.close()
+        server.stop()
+        server.release_registration()
+
+
 def test_multiple_leases_share_one_managed_server(tmp_path: Path) -> None:
     stopped = threading.Event()
     server = NexusHTTPServer(
@@ -1848,6 +1995,8 @@ def test_cancel_active_preserves_database_handle(tmp_path: Path) -> None:
             timeout: float | None,
             *,
             lease_id: str | None = None,
+            operation_id: str | None = None,
+            operation_label: str | None = None,
             persist_globals: bool = False,
             filename: str | None = None,
         ):
@@ -1856,6 +2005,8 @@ def test_cancel_active_preserves_database_handle(tmp_path: Path) -> None:
                     code,
                     timeout,
                     lease_id=lease_id,
+                    operation_id=operation_id,
+                    operation_label=operation_label,
                     persist_globals=persist_globals,
                 )
             self.started.set()
@@ -1964,10 +2115,12 @@ def test_database_close_cancels_its_active_execution(tmp_path: Path) -> None:
             timeout: float | None,
             *,
             lease_id: str | None = None,
+            operation_id: str | None = None,
+            operation_label: str | None = None,
             persist_globals: bool = False,
             filename: str | None = None,
         ):
-            del lease_id, persist_globals
+            del lease_id, operation_id, operation_label, persist_globals
             self.started.set()
             assert self.cancelled.wait(2)
             raise RuntimeError("cancelled")

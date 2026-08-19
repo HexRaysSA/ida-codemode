@@ -164,6 +164,34 @@ new source file. They do not reconfigure a reused GUI, worker, or existing IDB.
 `execute_python()` is stateless by default; pass `persist_globals=True` to keep
 a lease-scoped Python namespace between calls.
 
+Database changes are available as a closeable, blocking iterator. Each item is
+one structured IDB hook event with a monotonically increasing `revision`, a
+nanosecond Unix `timestamp`, the `operation_id` and optional untrusted
+`operation_label` active when IDA emitted it, and a nullable opaque `origin_id`.
+The origin is derived from the producing handle's private lease without exposing
+that control-capable lease ID:
+
+```python
+with handle.subscribe_idb_events() as events:
+    for event in events:
+        print(
+            event["event_name"],
+            event["revision"],
+            event["operation_id"],
+            event["operation_label"],
+            handle.owns_event(event),
+        )
+```
+
+`handle.owns_event(event)` identifies changes made through that handle without
+requiring the consumer to generate or retain operation IDs. `operation_id`
+remains available when correlation with one specific execution is useful.
+
+Each subscriber buffers at most 4096 events. A subscriber that falls behind is
+disconnected rather than receiving an incomplete history. The subscription can
+be opened before autoanalysis completes; hooks are installed after initial
+autoanalysis and removed when the final subscriber disconnects.
+
 Discovery returns public instance descriptors that support exact attachment:
 
 ```python
