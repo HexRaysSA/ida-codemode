@@ -10,7 +10,7 @@ import math
 import sys
 import textwrap
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar, cast, overload
 
 from .errors import NexusConnectionError
 from .handle import DatabaseHandle
@@ -187,35 +187,39 @@ def _decode_value(value: Any) -> Any:
 
 def _extract_function_source(
     function: Callable[..., Any],
+    *,
+    helper: bool = False,
 ) -> tuple[str, str, str]:
+    role = "helper" if helper else "function"
     if not inspect.isfunction(function):
-        raise TypeError("@remote_ida can only decorate Python functions")
+        raise TypeError(f"@remote_ida {role}s must be plain Python functions")
     if inspect.iscoroutinefunction(function):
-        raise TypeError("@remote_ida does not support async functions")
+        raise TypeError(f"@remote_ida does not support async {role}s")
 
-    parameters = list(inspect.signature(function).parameters.values())
-    if not parameters or parameters[0].name != "db":
-        raise TypeError(
-            "@remote_ida functions must declare 'db' as their first parameter"
-        )
-    if parameters[0].kind not in (
-        inspect.Parameter.POSITIONAL_ONLY,
-        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-    ):
-        raise TypeError("@remote_ida function parameter 'db' must be positional")
+    if not helper:
+        parameters = list(inspect.signature(function).parameters.values())
+        if not parameters or parameters[0].name != "db":
+            raise TypeError(
+                "@remote_ida functions must declare 'db' as their first parameter"
+            )
+        if parameters[0].kind not in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            raise TypeError("@remote_ida function parameter 'db' must be positional")
     if function.__closure__:
-        raise TypeError("@remote_ida functions cannot capture nonlocal values")
+        raise TypeError(f"@remote_ida {role}s cannot capture nonlocal values")
 
     try:
         lines, first_line = inspect.getsourcelines(function)
     except (OSError, TypeError) as exc:
-        raise TypeError("@remote_ida could not recover the function source") from exc
+        raise TypeError(f"@remote_ida could not recover the {role} source") from exc
 
     source = textwrap.dedent("".join(lines))
     try:
         module = ast.parse(source)
     except SyntaxError as exc:
-        raise TypeError("@remote_ida could not parse the function source") from exc
+        raise TypeError(f"@remote_ida could not parse the {role} source") from exc
 
     definitions = [
         statement
@@ -223,12 +227,18 @@ def _extract_function_source(
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
     if len(definitions) != 1 or definitions[0].name != function.__name__:
-        raise TypeError("@remote_ida requires one recoverable function definition")
+        raise TypeError(f"@remote_ida requires one recoverable {role} definition")
     definition = definitions[0]
     if isinstance(definition, ast.AsyncFunctionDef):
-        raise TypeError("@remote_ida does not support async functions")
-    if len(definition.decorator_list) > 1:
+        raise TypeError(f"@remote_ida does not support async {role}s")
+    if helper and definition.decorator_list:
+        raise TypeError("@remote_ida helpers cannot have decorators")
+    if not helper and len(definition.decorator_list) > 1:
         raise TypeError("@remote_ida cannot be combined with other decorators")
+    if function.__name__ in {"db", "ida_domain"} or function.__name__.startswith(
+        "__remote_ida_"
+    ):
+        raise TypeError(f"@remote_ida {role} name {function.__name__!r} is reserved")
     definition.decorator_list = []
     ast.fix_missing_locations(definition)
 
@@ -240,7 +250,22 @@ def _extract_function_source(
     )
 
 
+def _extract_helper_sources(
+    helpers: tuple[Callable[..., Any], ...],
+) -> tuple[tuple[str, ...], frozenset[str]]:
+    sources: list[str] = []
+    names: set[str] = set()
+    for helper in helpers:
+        source, _, name = _extract_function_source(helper, helper=True)
+        if name in names:
+            raise TypeError(f"duplicate @remote_ida helper name: {name!r}")
+        sources.append(source)
+        names.add(name)
+    return tuple(sources), frozenset(names)
+
+
 def _build_remote_code(
+    helper_sources: tuple[str, ...],
     function_source: str,
     function_name: str,
     args: tuple[Any, ...],
@@ -256,12 +281,13 @@ def _build_remote_code(
         allow_nan=False,
         separators=(",", ":"),
     )
+    definitions = "\n\n".join((*helper_sources, function_source))
     return f"""from __future__ import annotations
 import json as __remote_ida_json
 
 {_REMOTE_CODEC_SOURCE}
 
-{function_source}
+{definitions}
 
 __remote_ida_payload = __remote_ida_json.loads({payload_json!r})
 if (
@@ -296,13 +322,14 @@ def _decode_result(value: Any) -> Any:
         ) from exc
 
 
-def remote_ida(
+def _decorate_remote(
     function: Callable[Concatenate[Database, P], R],
-    /,
+    helpers: tuple[Callable[..., Any], ...],
 ) -> Callable[Concatenate[DatabaseHandle, P], R]:
-    """Run a typed IDA-domain function through a ``DatabaseHandle``."""
-
     function_source, filename, function_name = _extract_function_source(function)
+    helper_sources, helper_names = _extract_helper_sources(helpers)
+    if function_name in helper_names:
+        raise TypeError(f"@remote_ida function and helper share name {function_name!r}")
 
     @functools.wraps(function)
     def wrapper(
@@ -315,7 +342,13 @@ def remote_ida(
             raise TypeError(
                 "the first argument to a @remote_ida function must be a DatabaseHandle"
             )
-        code = _build_remote_code(function_source, function_name, args, kwargs)
+        code = _build_remote_code(
+            helper_sources,
+            function_source,
+            function_name,
+            args,
+            kwargs,
+        )
         execution = handle.execute_python(
             code,
             persist_globals=False,
@@ -328,3 +361,33 @@ def remote_ida(
         return cast(R, _decode_result(execution["result"]))
 
     return cast(Callable[Concatenate[DatabaseHandle, P], R], wrapper)
+
+
+@overload
+def remote_ida(
+    function: Callable[Concatenate[Database, P], R],
+    /,
+) -> Callable[Concatenate[DatabaseHandle, P], R]: ...
+
+
+@overload
+def remote_ida(
+    *,
+    helpers: tuple[Callable[..., Any], ...] = (),
+) -> Callable[
+    [Callable[Concatenate[Database, P], R]],
+    Callable[Concatenate[DatabaseHandle, P], R],
+]: ...
+
+
+def remote_ida(
+    function: Callable[..., Any] | None = None,
+    /,
+    *,
+    helpers: tuple[Callable[..., Any], ...] = (),
+) -> Callable[..., Any]:
+    """Run a typed IDA-domain function through a ``DatabaseHandle``."""
+
+    if function is None:
+        return lambda selected: _decorate_remote(selected, helpers)
+    return _decorate_remote(function, helpers)
