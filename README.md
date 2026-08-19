@@ -203,56 +203,85 @@ disconnected rather than receiving an incomplete history. The subscription can
 be opened before autoanalysis completes; hooks are installed after initial
 autoanalysis and removed when the final subscriber disconnects.
 
-`@remote_ida` turns a typed IDA-domain function into a synchronous function
-whose first argument is a `DatabaseHandle`. Keep the `Database` import
-type-only so importing an application does not initialize idalib:
+`@remote_ida` turns an ordinary typed function into a synchronous remote
+callable. It can use IDAPython directly; no `db` parameter is required:
 
 ```python
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
 from ida_codemode import DatabaseHandle, remote_ida
+
+
+@remote_ida(operation_label=lambda: f"IDA TUI: {active_user()}")
+def screen_address() -> int:
+    import ida_kernwin
+
+    return int(ida_kernwin.get_screen_ea())
+
+
+with DatabaseHandle.open("firmware.bin") as handle:
+    address = screen_address(handle)
+```
+
+When the first parameter is named `db`, ida-domain's database is injected
+automatically and removed from the caller signature:
+
+```python
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ida_domain import Database
 
 
-@remote_ida
+@remote_ida(timeout=10, operation_label="firmware browser")
 def read_bytes(db: Database, address: int, size: int) -> bytes:
     return db.bytes.get_bytes_at(address, size) or b""
 
 
-with DatabaseHandle.open("firmware.bin") as handle:
-    header = read_bytes(handle, 0x401000, 16)
+header = read_bytes(handle, 0x401000, 16)
 ```
 
-The function body is type-checked against `ida_domain.Database`, while callers
-are type-checked against `DatabaseHandle`. Remote functions must be ordinary
-source-backed `def` functions without closures or additional decorators.
-Imports used by the body belong inside the function. Arguments and return
-values may contain `None`, booleans, integers, finite floats, strings, bytes,
-lists, tuples, and string-keyed dictionaries recursively.
+String labels and zero-argument label callables are supported. Callables are
+evaluated once per invocation, so a `ContextVar` or application user/session
+provider can produce labels such as `IDA TUI: alice`; installation and execution
+of that call receive the same resolved label.
 
-Reusable plain functions can be bundled explicitly. They are type-checked with
-their normal signatures and execute in the same remote namespace:
+The first call installs a content-addressed module through any object satisfying
+`RemoteExecutor`; later calls send only encoded arguments and a short invocation.
+`RemoteExecutor` is structural, so tests can use an ordinary fake with
+`execute_python()`. Remote functions must be synchronous, source-backed `def`
+functions without closures or stacked decorators. Explicit `helpers=(...)`
+bundle reusable plain functions into the same installed module.
+
+Large or stateful implementations belong in a real Python module, not a string.
+`RemoteModule` reads and content-hashes that file, installs it once per handle,
+keeps its module globals and caches alive, and validates declarations against the
+implementation signature:
 
 ```python
-def read_exact(db: Database, address: int, size: int) -> bytes:
-    data = db.bytes.get_bytes_at(address, size)
-    if data is None:
-        raise ValueError("unreadable address")
-    return data
+from ida_codemode import RemoteModule
+
+tools = RemoteModule("remote_tools.py", operation_label="firmware browser")
 
 
-@remote_ida(helpers=(read_exact,))
-def read_magic(db: Database, address: int) -> bytes:
-    return read_exact(db, address, 4)
+@tools.function(timeout=15)
+def decompile(address: str, include_addresses: bool = True) -> dict:
+    ...
+
+
+result = decompile(handle, "0x401000")
 ```
 
-Helpers must also be synchronous, source-backed functions without decorators or
-closures. List every helper used by the remote function, including helpers used
-by other helpers.
+`RemoteModule.function()` follows the same `db` naming convention. Declarations
+for ordinary module functions have an empty body; database-aware functions may
+be their real import-safe implementation. Signature drift fails immediately
+while the application imports.
+
+The default `codec="typed"` preserves bytes and tuples. A module whose boundary
+is guaranteed JSON-native can use `codec="json"` to return large dictionaries
+and lists without an additional Python-level value walk.
+
+Arguments and results may recursively contain `None`, booleans, integers, finite
+floats, strings, bytes, lists, tuples, and string-keyed dictionaries. Unsupported
+values fail at the call boundary rather than silently degrading to strings.
 
 Discovery returns public instance descriptors that support exact attachment:
 

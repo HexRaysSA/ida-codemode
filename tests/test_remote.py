@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
-from ida_codemode import DatabaseHandle, remote_ida
+from ida_codemode import RemoteExecutor, RemoteModule, remote_ida
 from ida_codemode._runtime import _execute_user_code
 from ida_codemode.models import PythonExecutionResult
 
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from ida_domain import Database
 
 
-class InProcessHandle(DatabaseHandle):
+class InProcessHandle:
     def __init__(self, database: object) -> None:
         self.database = database
         self.calls: list[dict[str, Any]] = []
@@ -27,6 +27,7 @@ class InProcessHandle(DatabaseHandle):
         timeout: float | None = None,
         *,
         operation_id: str | None = None,
+        operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
     ) -> PythonExecutionResult:
@@ -35,6 +36,7 @@ class InProcessHandle(DatabaseHandle):
                 "code": code,
                 "timeout": timeout,
                 "operation_id": operation_id,
+                "operation_label": operation_label,
                 "persist_globals": persist_globals,
                 "filename": filename,
             }
@@ -159,13 +161,14 @@ def test_remote_ida_executes_function_and_preserves_bytes_and_tuples(
     assert type(result) is tuple
     assert type(result[1]["items"]) is list
     assert capsys.readouterr().out == "executed in IDA\n"
-    assert len(handle.calls) == 1
-    call = handle.calls[0]
+    assert len(handle.calls) == 2
+    install, call = handle.calls
+    assert install["persist_globals"] is False
     assert call["persist_globals"] is False
     assert call["timeout"] is None
     assert isinstance(call["filename"], str)
     assert "test_remote.py" in call["filename"]
-    assert "@remote_ida" not in call["code"]
+    assert "@remote_ida" not in install["code"]
 
 
 def test_remote_ida_round_trips_empty_and_binary_values() -> None:
@@ -209,9 +212,128 @@ def test_remote_ida_rejects_unsupported_remote_result() -> None:
         remote_unsupported_result(handle)
 
 
-def test_remote_ida_requires_a_database_handle() -> None:
-    with pytest.raises(TypeError, match="DatabaseHandle"):
-        remote_identity(cast(DatabaseHandle, object()), "value")
+def test_remote_ida_requires_a_remote_executor() -> None:
+    with pytest.raises(TypeError, match="RemoteExecutor"):
+        remote_identity(cast(RemoteExecutor, object()), "value")
+
+
+def test_remote_ida_supports_direct_idapython_style_functions() -> None:
+    @remote_ida
+    def direct_identity(value: int) -> int:
+        return value
+
+    handle = InProcessHandle(object())
+    assert direct_identity(handle, 7) == 7
+
+
+def test_operation_label_callable_is_evaluated_once_per_call() -> None:
+    user = ["alice"]
+    calls = 0
+
+    def label() -> str:
+        nonlocal calls
+        calls += 1
+        return f"IDA TUI: {user[0]}"
+
+    @remote_ida(operation_label=label)
+    def direct_identity(value: int) -> int:
+        return value
+
+    handle = InProcessHandle(object())
+    assert direct_identity(handle, 1) == 1
+    user[0] = "bob"
+    assert direct_identity(handle, 2) == 2
+    assert calls == 2
+    assert [call["operation_label"] for call in handle.calls] == [
+        "IDA TUI: alice",
+        "IDA TUI: alice",
+        "IDA TUI: bob",
+    ]
+
+
+def test_remote_ida_installs_once_and_propagates_execution_metadata() -> None:
+    @remote_ida(timeout=2.5, operation_label="test client")
+    def configured(db: Database, value: int) -> int:
+        del db
+        return value + 1
+
+    handle = InProcessHandle(object())
+    assert configured(handle, 1) == 2
+    assert configured(handle, 2) == 3
+    assert len(handle.calls) == 3
+    assert all(call["timeout"] == 2.5 for call in handle.calls)
+    assert all(call["operation_label"] == "test client" for call in handle.calls)
+
+
+def test_remote_module_is_typed_persistent_source(
+    tmp_path,
+) -> None:
+    path = tmp_path / "remote_module.py"
+    path.write_text(
+        "counter = 0\n\n"
+        "def add(value, step=1):\n"
+        "    global counter\n"
+        "    counter += 1\n"
+        "    return value + step, counter\n"
+    )
+    module = RemoteModule(path, operation_label="module client")
+
+    @module.function(timeout=3.0)
+    def add(value: int, step: int = 1) -> tuple[int, int]: ...
+
+    handle = InProcessHandle(object())
+    assert add(handle, 2) == (3, 1)
+    assert add(handle, 2, step=4) == (6, 2)
+    assert len(handle.calls) == 3
+    assert "counter = 0" in handle.calls[0]["code"]
+    assert "counter = 0" not in handle.calls[1]["code"]
+    assert all(call["timeout"] == 3.0 for call in handle.calls)
+    assert all(call["operation_label"] == "module client" for call in handle.calls)
+
+
+def test_remote_module_can_bind_database_aware_implementations(tmp_path) -> None:
+    path = tmp_path / "remote_module.py"
+    path.write_text(
+        "def read_byte(db, address):\n"
+        "    return db.bytes.get_bytes_at(address, 1) or b''\n"
+    )
+    module = RemoteModule(path)
+
+    @module.function
+    def read_byte(db: Database, address: int) -> bytes: ...
+
+    handle = InProcessHandle(FakeDatabase())
+    assert read_byte(handle, 0) == b"\x00"
+
+
+def test_remote_module_json_codec_skips_typed_value_transform(tmp_path) -> None:
+    path = tmp_path / "remote_module.py"
+    path.write_text("def payload(value):\n    return {'value': value}\n")
+    module = RemoteModule(path, codec="json")
+
+    @module.function
+    def payload(value: int) -> dict[str, int]: ...
+
+    handle = InProcessHandle(object())
+    assert payload(handle, 7) == {"value": 7}
+
+
+def test_remote_module_rejects_unknown_codec(tmp_path) -> None:
+    path = tmp_path / "remote_module.py"
+    path.write_text("def operation():\n    return None\n")
+    with pytest.raises(ValueError, match="codec"):
+        RemoteModule(path, codec=cast(Any, "unknown"))
+
+
+def test_remote_module_rejects_signature_drift(tmp_path) -> None:
+    path = tmp_path / "remote_module.py"
+    path.write_text("def operation(value):\n    return value\n")
+    module = RemoteModule(path)
+
+    with pytest.raises(TypeError, match="does not match"):
+
+        @module.function
+        def operation(value: int, extra: int) -> int: ...
 
 
 def test_remote_ida_rejects_async_functions() -> None:

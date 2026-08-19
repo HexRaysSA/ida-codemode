@@ -4,32 +4,71 @@ import ast
 import base64
 import binascii
 import functools
+import hashlib
 import inspect
 import json
 import math
 import sys
 import textwrap
+import threading
+import weakref
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar, cast, overload
+from pathlib import Path
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Concatenate,
+    Generic,
+    Literal,
+    ParamSpec,
+    Protocol,
+    TypeVar,
+    cast,
+    overload,
+)
 
 from .errors import CodeModeConnectionError
-from .handle import DatabaseHandle
+from .models import PythonExecutionResult
 
 if TYPE_CHECKING:
     from ida_domain import Database
 
 P = ParamSpec("P")
 R = TypeVar("R")
+OperationLabel = str | Callable[[], str | None] | None
+RemoteCodec = Literal["typed", "json"]
+
 
 _CODEC_VERSION = 1
 _BYTES_TAG = "$bytes"
 _TUPLE_TAG = "$tuple"
 _DICT_TAG = "$dict"
 _RESERVED_TAGS = frozenset((_BYTES_TAG, _TUPLE_TAG, _DICT_TAG))
-
+_MISSING_MODULE = "__remote_ida_missing_module__"
+_RUNTIME_PREFIX = "__remote_ida_"
 _SUPPORTED_VALUES = (
     "None, bool, int, finite float, str, bytes, list, tuple, and dict[str, value]"
 )
+
+
+class RemoteExecutor(Protocol):
+    """The structural transport required by remote callables.
+
+    DatabaseHandle satisfies this protocol. Keeping the decorator structural
+    makes ordinary fakes sufficient for application and library tests.
+    """
+
+    def execute_python(
+        self,
+        code: str,
+        timeout: float | None = None,
+        *,
+        operation_id: str | None = None,
+        operation_label: str | None = None,
+        persist_globals: bool = False,
+        filename: str | None = None,
+    ) -> PythonExecutionResult: ...
+
 
 _REMOTE_CODEC_SOURCE = """
 import base64 as __remote_ida_base64
@@ -105,8 +144,27 @@ def __remote_ida_encode(value):
         return {key: item for key, item in entries}
     raise TypeError(
         "remote_ida values must be None, bool, int, finite float, str, bytes, "
-        f"list, tuple, or dict[str, value]; got {value_type.__name__}"
+        f"list, tuple, and dict[str, value]; got {value_type.__name__}"
     )
+
+
+def __remote_ida_invoke(db, function_name, pass_database, typed_codec, payload):
+    if type(payload) is not dict or payload.get("version") != 1:
+        raise ValueError("invalid remote_ida payload")
+    if typed_codec:
+        args = __remote_ida_decode(payload.get("args"))
+        kwargs = __remote_ida_decode(payload.get("kwargs"))
+    else:
+        args = payload.get("args")
+        kwargs = payload.get("kwargs")
+    function = globals()[function_name]
+    if pass_database:
+        value = function(db, *args, **kwargs)
+    else:
+        value = function(*args, **kwargs)
+    if typed_codec:
+        return {"version": 1, "value": __remote_ida_encode(value)}
+    return value
 """.strip()
 
 
@@ -185,133 +243,11 @@ def _decode_value(value: Any) -> Any:
     return {key: _decode_value(item) for key, item in value.items()}
 
 
-def _extract_function_source(
-    function: Callable[..., Any],
-    *,
-    helper: bool = False,
-) -> tuple[str, str, str]:
-    role = "helper" if helper else "function"
-    if not inspect.isfunction(function):
-        raise TypeError(f"@remote_ida {role}s must be plain Python functions")
-    if inspect.iscoroutinefunction(function):
-        raise TypeError(f"@remote_ida does not support async {role}s")
-
-    if not helper:
-        parameters = list(inspect.signature(function).parameters.values())
-        if not parameters or parameters[0].name != "db":
-            raise TypeError(
-                "@remote_ida functions must declare 'db' as their first parameter"
-            )
-        if parameters[0].kind not in (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        ):
-            raise TypeError("@remote_ida function parameter 'db' must be positional")
-    if function.__closure__:
-        raise TypeError(f"@remote_ida {role}s cannot capture nonlocal values")
-
-    try:
-        lines, first_line = inspect.getsourcelines(function)
-    except (OSError, TypeError) as exc:
-        raise TypeError(f"@remote_ida could not recover the {role} source") from exc
-
-    source = textwrap.dedent("".join(lines))
-    try:
-        module = ast.parse(source)
-    except SyntaxError as exc:
-        raise TypeError(f"@remote_ida could not parse the {role} source") from exc
-
-    definitions = [
-        statement
-        for statement in module.body
-        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ]
-    if len(definitions) != 1 or definitions[0].name != function.__name__:
-        raise TypeError(f"@remote_ida requires one recoverable {role} definition")
-    definition = definitions[0]
-    if isinstance(definition, ast.AsyncFunctionDef):
-        raise TypeError(f"@remote_ida does not support async {role}s")
-    if helper and definition.decorator_list:
-        raise TypeError("@remote_ida helpers cannot have decorators")
-    if not helper and len(definition.decorator_list) > 1:
-        raise TypeError("@remote_ida cannot be combined with other decorators")
-    if function.__name__ in {"db", "ida_domain"} or function.__name__.startswith(
-        "__remote_ida_"
-    ):
-        raise TypeError(f"@remote_ida {role} name {function.__name__!r} is reserved")
-    definition.decorator_list = []
-    ast.fix_missing_locations(definition)
-
-    filename = inspect.getsourcefile(function) or function.__code__.co_filename
-    return (
-        ast.unparse(definition),
-        f"{filename}:{first_line} ({function.__qualname__})",
-        function.__name__,
-    )
-
-
-def _extract_helper_sources(
-    helpers: tuple[Callable[..., Any], ...],
-) -> tuple[tuple[str, ...], frozenset[str]]:
-    sources: list[str] = []
-    names: set[str] = set()
-    for helper in helpers:
-        source, _, name = _extract_function_source(helper, helper=True)
-        if name in names:
-            raise TypeError(f"duplicate @remote_ida helper name: {name!r}")
-        sources.append(source)
-        names.add(name)
-    return tuple(sources), frozenset(names)
-
-
-def _build_remote_code(
-    helper_sources: tuple[str, ...],
-    function_source: str,
-    function_name: str,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-) -> str:
-    payload = {
-        "version": _CODEC_VERSION,
-        "args": _encode_value(list(args)),
-        "kwargs": _encode_value(kwargs),
-    }
-    payload_json = json.dumps(
-        payload,
-        allow_nan=False,
-        separators=(",", ":"),
-    )
-    definitions = "\n\n".join((*helper_sources, function_source))
-    return f"""from __future__ import annotations
-import json as __remote_ida_json
-
-{_REMOTE_CODEC_SOURCE}
-
-{definitions}
-
-__remote_ida_payload = __remote_ida_json.loads({payload_json!r})
-if (
-    type(__remote_ida_payload) is not dict
-    or __remote_ida_payload.get("version") != {_CODEC_VERSION}
-):
-    raise ValueError("invalid remote_ida payload")
-__remote_ida_args = __remote_ida_decode(__remote_ida_payload.get("args"))
-__remote_ida_kwargs = __remote_ida_decode(__remote_ida_payload.get("kwargs"))
-__remote_ida_result = {function_name}(
-    db,
-    *__remote_ida_args,
-    **__remote_ida_kwargs,
-)
-{{"version": {_CODEC_VERSION}, "value": __remote_ida_encode(__remote_ida_result)}}
-"""
-
-
 def _decode_result(value: Any) -> Any:
     if (
         type(value) is not dict
         or set(value) != {"version", "value"}
-        or type(value["version"]) is not int
-        or value["version"] != _CODEC_VERSION
+        or value.get("version") != _CODEC_VERSION
     ):
         raise CodeModeConnectionError("remote_ida returned an invalid encoded result")
     try:
@@ -322,72 +258,615 @@ def _decode_result(value: Any) -> Any:
         ) from exc
 
 
-def _decorate_remote(
-    function: Callable[Concatenate[Database, P], R],
-    helpers: tuple[Callable[..., Any], ...],
-) -> Callable[Concatenate[DatabaseHandle, P], R]:
-    function_source, filename, function_name = _extract_function_source(function)
-    helper_sources, helper_names = _extract_helper_sources(helpers)
-    if function_name in helper_names:
-        raise TypeError(f"@remote_ida function and helper share name {function_name!r}")
+def _validate_options(timeout: float | None, operation_label: OperationLabel) -> None:
+    if timeout is not None and (
+        isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0
+    ):
+        raise ValueError("remote_ida timeout must be a positive finite number")
+    if operation_label is not None and not (
+        callable(operation_label)
+        or (isinstance(operation_label, str) and operation_label.strip())
+    ):
+        raise ValueError(
+            "remote_ida operation_label must be non-empty or a zero-argument callable"
+        )
 
-    @functools.wraps(function)
-    def wrapper(
-        handle: DatabaseHandle,
-        /,
-        *args: P.args,
-        **kwargs: P.kwargs,
-    ) -> R:
-        if not isinstance(handle, DatabaseHandle):
-            raise TypeError(
-                "the first argument to a @remote_ida function must be a DatabaseHandle"
+
+def _resolve_operation_label(operation_label: OperationLabel) -> str | None:
+    value = operation_label() if callable(operation_label) else operation_label
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            "remote_ida operation_label callable must return a non-empty string or None"
+        )
+    return value
+
+
+def _validate_codec(codec: RemoteCodec) -> None:
+    if codec not in ("typed", "json"):
+        raise ValueError("remote_ida codec must be 'typed' or 'json'")
+
+
+def _extract_definition(
+    function: Callable[..., Any], *, helper: bool = False
+) -> tuple[str, str, str, ast.FunctionDef]:
+    role = "helper" if helper else "function"
+    if not inspect.isfunction(function):
+        raise TypeError(f"remote_ida {role}s must be plain Python functions")
+    if inspect.iscoroutinefunction(function):
+        raise TypeError(f"remote_ida does not support async {role}s")
+    if function.__closure__:
+        raise TypeError(f"remote_ida {role}s cannot capture nonlocal values")
+    try:
+        lines, first_line = inspect.getsourcelines(function)
+    except (OSError, TypeError) as exc:
+        raise TypeError(f"remote_ida could not recover the {role} source") from exc
+    source = textwrap.dedent("".join(lines))
+    try:
+        module = ast.parse(source)
+    except SyntaxError as exc:
+        raise TypeError(f"remote_ida could not parse the {role} source") from exc
+    definitions = [item for item in module.body if isinstance(item, ast.FunctionDef)]
+    if len(definitions) != 1 or definitions[0].name != function.__name__:
+        raise TypeError(f"remote_ida requires one recoverable {role} definition")
+    definition = definitions[0]
+    if helper and definition.decorator_list:
+        raise TypeError("remote_ida helpers cannot have decorators")
+    if not helper and len(definition.decorator_list) > 1:
+        raise TypeError("remote_ida cannot be combined with other decorators")
+    if function.__name__.startswith(_RUNTIME_PREFIX):
+        raise TypeError(f"remote_ida {role} name {function.__name__!r} is reserved")
+    definition.decorator_list = []
+    ast.fix_missing_locations(definition)
+    filename = inspect.getsourcefile(function) or function.__code__.co_filename
+    return (
+        ast.unparse(definition),
+        f"{filename}:{first_line} ({function.__qualname__})",
+        function.__name__,
+        definition,
+    )
+
+
+def _parameter_shape_from_ast(definition: ast.FunctionDef) -> tuple[Any, ...]:
+    args = definition.args
+    return (
+        tuple(item.arg for item in args.posonlyargs),
+        tuple(item.arg for item in args.args),
+        args.vararg.arg if args.vararg else None,
+        tuple(item.arg for item in args.kwonlyargs),
+        tuple(default is not None for default in args.kw_defaults),
+        args.kwarg.arg if args.kwarg else None,
+        len(args.defaults),
+    )
+
+
+def _parameter_shape_from_signature(signature: inspect.Signature) -> tuple[Any, ...]:
+    posonly: list[str] = []
+    positional: list[str] = []
+    kwonly: list[str] = []
+    kw_defaults: list[bool] = []
+    vararg = kwarg = None
+    positional_defaults = 0
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+            posonly.append(parameter.name)
+        elif parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD:
+            positional.append(parameter.name)
+        elif parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+            vararg = parameter.name
+        elif parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+            kwonly.append(parameter.name)
+            kw_defaults.append(parameter.default is not inspect.Parameter.empty)
+        elif parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            kwarg = parameter.name
+        if (
+            parameter.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
             )
-        code = _build_remote_code(
-            helper_sources,
-            function_source,
-            function_name,
-            args,
-            kwargs,
+            and parameter.default is not inspect.Parameter.empty
+        ):
+            positional_defaults += 1
+    return (
+        tuple(posonly),
+        tuple(positional),
+        vararg,
+        tuple(kwonly),
+        tuple(kw_defaults),
+        kwarg,
+        positional_defaults,
+    )
+
+
+def _stub_is_empty(definition: ast.FunctionDef) -> bool:
+    body = list(definition.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body.pop(0)
+    return len(body) == 1 and (
+        isinstance(body[0], ast.Pass)
+        or (
+            isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and body[0].value.value is Ellipsis
         )
-        execution = handle.execute_python(
-            code,
-            persist_globals=False,
-            filename=filename,
+    )
+
+
+class _RemoteProgram:
+    def __init__(self, source: str, filename: str) -> None:
+        self.source = source
+        self.filename = filename
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:20]
+        self.module_name = f"_ida_codemode_remote_{digest}"
+        self._installed: weakref.WeakKeyDictionary[object, bool] = (
+            weakref.WeakKeyDictionary()
         )
+        self._lock = threading.Lock()
+
+    def _is_installed(self, handle: RemoteExecutor) -> bool:
+        try:
+            return bool(self._installed.get(cast(object, handle)))
+        except TypeError:
+            return False
+
+    def _mark_installed(self, handle: RemoteExecutor) -> None:
+        try:
+            self._installed[cast(object, handle)] = True
+        except TypeError:
+            pass
+
+    def ensure(
+        self,
+        handle: RemoteExecutor,
+        *,
+        timeout: float | None,
+        operation_label: str | None,
+        force: bool = False,
+    ) -> None:
+        with self._lock:
+            if not force and self._is_installed(handle):
+                return
+            runtime_filename = f"{self.filename} [remote_ida runtime]"
+            code = f"""import sys as __remote_ida_sys, types as __remote_ida_types
+if {self.module_name!r} not in __remote_ida_sys.modules:
+    __remote_ida_module = __remote_ida_types.ModuleType({self.module_name!r})
+    __remote_ida_module.__file__ = {self.filename!r}
+    exec(compile({self.source!r}, {self.filename!r}, "exec"), __remote_ida_module.__dict__)
+    exec(compile({_REMOTE_CODEC_SOURCE!r}, {runtime_filename!r}, "exec"), __remote_ida_module.__dict__)
+    __remote_ida_sys.modules[{self.module_name!r}] = __remote_ida_module
+True
+"""
+            execution = handle.execute_python(
+                code,
+                timeout=timeout,
+                operation_label=operation_label,
+                persist_globals=False,
+                filename=self.filename,
+            )
+            if execution["stdout"]:
+                sys.stdout.write(execution["stdout"])
+            if execution["stderr"]:
+                sys.stderr.write(execution["stderr"])
+            self._mark_installed(handle)
+
+    def execute(
+        self,
+        handle: RemoteExecutor,
+        function_name: str,
+        pass_database: bool,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        timeout: float | None,
+        operation_label: str | None,
+        codec: RemoteCodec,
+    ) -> Any:
+        typed_codec = codec == "typed"
+        payload = json.dumps(
+            {
+                "version": _CODEC_VERSION,
+                "args": _encode_value(list(args)) if typed_codec else list(args),
+                "kwargs": _encode_value(kwargs) if typed_codec else kwargs,
+            },
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        self.ensure(handle, timeout=timeout, operation_label=operation_label)
+
+        def invoke() -> PythonExecutionResult:
+            code = f"""import json as __remote_ida_json, sys as __remote_ida_sys
+__remote_ida_module = __remote_ida_sys.modules.get({self.module_name!r})
+__remote_ida_result = (
+    {{{_MISSING_MODULE!r}: True}}
+    if __remote_ida_module is None
+    else __remote_ida_module.__remote_ida_invoke(
+        db,
+        {function_name!r},
+        {pass_database!r},
+        {typed_codec!r},
+        __remote_ida_json.loads({payload!r}),
+    )
+)
+__remote_ida_result
+"""
+            return handle.execute_python(
+                code,
+                timeout=timeout,
+                operation_label=operation_label,
+                persist_globals=False,
+                filename=self.filename,
+            )
+
+        execution = invoke()
+        if execution["result"] == {_MISSING_MODULE: True}:
+            self.ensure(
+                handle,
+                timeout=timeout,
+                operation_label=operation_label,
+                force=True,
+            )
+            execution = invoke()
         if execution["stdout"]:
             sys.stdout.write(execution["stdout"])
         if execution["stderr"]:
             sys.stderr.write(execution["stderr"])
-        return cast(R, _decode_result(execution["result"]))
+        return (
+            _decode_result(execution["result"]) if typed_codec else execution["result"]
+        )
 
-    return cast(Callable[Concatenate[DatabaseHandle, P], R], wrapper)
+
+class RemoteFunction(Generic[P, R]):
+    """A typed, source-backed callable executed through a RemoteExecutor."""
+
+    def __init__(
+        self,
+        program: _RemoteProgram,
+        function_name: str,
+        *,
+        pass_database: bool,
+        timeout: float | None,
+        operation_label: OperationLabel,
+        codec: RemoteCodec,
+        wrapped: Callable[..., Any],
+    ) -> None:
+        _validate_options(timeout, operation_label)
+        _validate_codec(codec)
+        self._program = program
+        self._function_name = function_name
+        self._pass_database = pass_database
+        self.timeout = timeout
+        self.operation_label = operation_label
+        self.codec = codec
+        functools.update_wrapper(self, wrapped)
+        self.__signature__ = inspect.signature(wrapped)  # type: ignore[attr-defined]
+
+    def __call__(
+        self,
+        handle: RemoteExecutor,
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R:
+        if not callable(getattr(handle, "execute_python", None)):
+            raise TypeError(
+                "the first argument to a remote function must implement RemoteExecutor"
+            )
+        label = _resolve_operation_label(self.operation_label)
+        return cast(
+            R,
+            self._program.execute(
+                handle,
+                self._function_name,
+                self._pass_database,
+                args,
+                kwargs,
+                timeout=self.timeout,
+                codec=self.codec,
+                operation_label=label,
+            ),
+        )
+
+
+class RemoteModule:
+    """A content-addressed Python module installed once per database handle."""
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        operation_label: OperationLabel = None,
+        codec: RemoteCodec = "typed",
+    ) -> None:
+        self.path = Path(path)
+        self.source = self.path.read_text(encoding="utf-8")
+        self.operation_label = operation_label
+        self.codec = codec
+        _validate_options(None, operation_label)
+        _validate_codec(codec)
+        try:
+            parsed = ast.parse(self.source, filename=str(self.path))
+        except SyntaxError as exc:
+            raise TypeError(f"remote module is not valid Python: {self.path}") from exc
+        self._definitions = {
+            item.name: item for item in parsed.body if isinstance(item, ast.FunctionDef)
+        }
+        reserved = [
+            name for name in self._definitions if name.startswith(_RUNTIME_PREFIX)
+        ]
+        if reserved:
+            raise TypeError(f"remote module uses reserved name: {reserved[0]!r}")
+        self._program = _RemoteProgram(self.source, str(self.path))
+
+    @overload
+    def function(
+        self,
+        function: Callable[Concatenate[Database, P], R],
+        /,
+        *,
+        database: None = None,
+        timeout: float | None = None,
+        operation_label: OperationLabel = None,
+    ) -> RemoteFunction[P, R]: ...
+
+    @overload
+    def function(
+        self,
+        function: Callable[P, R],
+        /,
+        *,
+        database: None = None,
+        timeout: float | None = None,
+        operation_label: OperationLabel = None,
+    ) -> RemoteFunction[P, R]: ...
+
+    @overload
+    def function(
+        self,
+        function: Callable[Concatenate[Database, P], R],
+        /,
+        *,
+        database: Literal[True],
+        timeout: float | None = None,
+        operation_label: OperationLabel = None,
+    ) -> RemoteFunction[P, R]: ...
+
+    @overload
+    def function(
+        self,
+        function: Callable[P, R],
+        /,
+        *,
+        database: Literal[False],
+        timeout: float | None = None,
+        operation_label: OperationLabel = None,
+    ) -> RemoteFunction[P, R]: ...
+
+    @overload
+    def function(
+        self,
+        function: None = None,
+        /,
+        *,
+        database: Literal[False] | None = None,
+        timeout: float | None = None,
+        operation_label: OperationLabel = None,
+    ) -> Callable[[Callable[P, R]], RemoteFunction[P, R]]: ...
+
+    def function(
+        self,
+        function: Callable[..., Any] | None = None,
+        /,
+        *,
+        database: bool | None = None,
+        timeout: float | None = None,
+        operation_label: OperationLabel = None,
+    ) -> Any:
+        def bind(declaration: Callable[..., Any]) -> RemoteFunction[Any, Any]:
+            _, _, name, definition = _extract_definition(declaration)
+            parameters = list(inspect.signature(declaration).parameters.values())
+            inject_database = (
+                bool(parameters and parameters[0].name == "db")
+                if database is None
+                else database
+            )
+            if not inject_database and not _stub_is_empty(definition):
+                raise TypeError(
+                    "RemoteModule function declarations must have an empty body"
+                )
+            if inject_database and (not parameters or parameters[0].name != "db"):
+                raise TypeError(
+                    "database-aware RemoteModule functions must declare 'db' first"
+                )
+            implementation = self._definitions.get(name)
+            if implementation is None:
+                raise TypeError(f"remote module {self.path} has no function {name!r}")
+            if _parameter_shape_from_ast(
+                implementation
+            ) != _parameter_shape_from_signature(inspect.signature(declaration)):
+                raise TypeError(
+                    f"remote module function {name!r} does not match its declaration"
+                )
+            remote = RemoteFunction(
+                self._program,
+                name,
+                pass_database=inject_database,
+                timeout=timeout,
+                operation_label=(
+                    operation_label
+                    if operation_label is not None
+                    else self.operation_label
+                ),
+                codec=self.codec,
+                wrapped=declaration,
+            )
+            if inject_database:
+                remote.__signature__ = inspect.signature(declaration).replace(
+                    parameters=parameters[1:]
+                )
+            return remote
+
+        return bind if function is None else bind(function)
+
+
+class _AutoRemoteDecorator(Protocol):
+    @overload
+    def __call__(
+        self, function: Callable[Concatenate[Database, P], R], /
+    ) -> RemoteFunction[P, R]: ...
+
+    @overload
+    def __call__(self, function: Callable[P, R], /) -> RemoteFunction[P, R]: ...
 
 
 @overload
 def remote_ida(
     function: Callable[Concatenate[Database, P], R],
     /,
-) -> Callable[Concatenate[DatabaseHandle, P], R]: ...
+    *,
+    database: None = None,
+    helpers: tuple[Callable[..., Any], ...] = (),
+    timeout: float | None = None,
+    operation_label: OperationLabel = None,
+) -> RemoteFunction[P, R]: ...
 
 
 @overload
 def remote_ida(
+    function: Callable[P, R],
+    /,
     *,
+    database: None = None,
     helpers: tuple[Callable[..., Any], ...] = (),
+    timeout: float | None = None,
+    operation_label: OperationLabel = None,
+) -> RemoteFunction[P, R]: ...
+
+
+@overload
+def remote_ida(
+    function: Callable[Concatenate[Database, P], R],
+    /,
+    *,
+    database: Literal[True],
+    helpers: tuple[Callable[..., Any], ...] = (),
+    timeout: float | None = None,
+    operation_label: OperationLabel = None,
+) -> RemoteFunction[P, R]: ...
+
+
+@overload
+def remote_ida(
+    function: Callable[P, R],
+    /,
+    *,
+    database: Literal[False],
+    helpers: tuple[Callable[..., Any], ...] = (),
+    timeout: float | None = None,
+    operation_label: OperationLabel = None,
+) -> RemoteFunction[P, R]: ...
+
+
+@overload
+def remote_ida(
+    function: None = None,
+    /,
+    *,
+    database: None = None,
+    helpers: tuple[Callable[..., Any], ...] = (),
+    timeout: float | None = None,
+    operation_label: OperationLabel = None,
+) -> _AutoRemoteDecorator: ...
+
+
+@overload
+def remote_ida(
+    function: None = None,
+    /,
+    *,
+    database: Literal[True],
+    helpers: tuple[Callable[..., Any], ...] = (),
+    timeout: float | None = None,
+    operation_label: OperationLabel = None,
 ) -> Callable[
     [Callable[Concatenate[Database, P], R]],
-    Callable[Concatenate[DatabaseHandle, P], R],
+    RemoteFunction[P, R],
 ]: ...
+
+
+@overload
+def remote_ida(
+    function: None = None,
+    /,
+    *,
+    database: Literal[False],
+    helpers: tuple[Callable[..., Any], ...] = (),
+    timeout: float | None = None,
+    operation_label: OperationLabel = None,
+) -> Callable[[Callable[P, R]], RemoteFunction[P, R]]: ...
 
 
 def remote_ida(
     function: Callable[..., Any] | None = None,
     /,
     *,
+    database: bool | None = None,
     helpers: tuple[Callable[..., Any], ...] = (),
-) -> Callable[..., Any]:
-    """Run a typed IDA-domain function through a ``DatabaseHandle``."""
+    timeout: float | None = None,
+    operation_label: OperationLabel = None,
+) -> Any:
+    """Declare a typed function that runs in IDA through a RemoteExecutor.
 
-    if function is None:
-        return lambda selected: _decorate_remote(selected, helpers)
-    return _decorate_remote(function, helpers)
+    A first parameter named ``db`` receives ida-domain's database and disappears
+    from the caller signature. Functions without it run exactly as declared,
+    which is ideal for direct IDAPython. ``database=`` can override the
+    convention for unusual signatures.
+    """
+
+    def decorate(selected: Callable[..., Any]) -> RemoteFunction[Any, Any]:
+        function_source, filename, function_name, _ = _extract_definition(selected)
+        parameters = list(inspect.signature(selected).parameters.values())
+        inject_database = (
+            bool(parameters and parameters[0].name == "db")
+            if database is None
+            else database
+        )
+        if inject_database and (not parameters or parameters[0].name != "db"):
+            raise TypeError(
+                "database-aware remote_ida functions must declare 'db' first"
+            )
+        helper_sources: list[str] = []
+        helper_names: set[str] = set()
+        for helper in helpers:
+            source, _, name, _ = _extract_definition(helper, helper=True)
+            if name in helper_names or name == function_name:
+                raise TypeError(f"duplicate remote_ida helper name: {name!r}")
+            helper_sources.append(source)
+            helper_names.add(name)
+        source = "from __future__ import annotations\n\n" + "\n\n".join(
+            (*helper_sources, function_source)
+        )
+        program = _RemoteProgram(source, filename)
+        declaration = cast(Callable[..., Any], selected)
+        remote = RemoteFunction(
+            program,
+            function_name,
+            pass_database=inject_database,
+            timeout=timeout,
+            operation_label=operation_label,
+            codec="typed",
+            wrapped=declaration,
+        )
+        if inject_database:
+            remote.__signature__ = inspect.signature(selected).replace(
+                parameters=parameters[1:]
+            )
+        return remote
+
+    return decorate if function is None else decorate(function)

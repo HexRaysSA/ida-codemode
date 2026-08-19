@@ -1,6 +1,13 @@
 """Public Python API for authenticated IDA Code Mode database sessions."""
 
-from ._remote import remote_ida
+from ._remote import (
+    OperationLabel,
+    RemoteCodec,
+    RemoteExecutor,
+    RemoteFunction,
+    RemoteModule,
+    remote_ida,
+)
 from .errors import (
     AmbiguousDatabaseError,
     CodeModeConnectionError,
@@ -66,8 +73,13 @@ __all__ = [
     "ListDatabasesResult",
     "NoDatabaseInstanceError",
     "OpenDatabaseResult",
+    "OperationLabel",
     "PythonExecutionResult",
+    "RemoteCodec",
     "RemoteError",
+    "RemoteExecutor",
+    "RemoteFunction",
+    "RemoteModule",
     "SaveDatabaseResult",
     "SaveResult",
     "ShutdownResult",

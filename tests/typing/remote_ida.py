@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, assert_type
 
-from ida_codemode import DatabaseHandle, remote_ida
+from ida_codemode import (
+    DatabaseHandle,
+    RemoteExecutor,
+    RemoteModule,
+    remote_ida,
+)
 
 if TYPE_CHECKING:
     from ida_domain import Database
@@ -37,7 +42,24 @@ def read_with_helpers(db: Database, address: int) -> bytes:
     return keep_bytes(read_pair(db, address))
 
 
-def check_remote_ida_types(handle: DatabaseHandle) -> None:
+@remote_ida
+def direct_idapython(value: int) -> int:
+    return value
+
+
+module = RemoteModule(__file__)
+
+
+def module_read(db: Database, address: int) -> bytes:
+    return db.bytes.get_bytes_at(address, 1) or b""
+
+
+remote_module_read = module.function(module_read)
+
+
+def check_remote_ida_types(handle: DatabaseHandle, executor: RemoteExecutor) -> None:
     assert_type(read_bytes(handle, 0x401000, 4), bytes)
     assert_type(describe_bytes(handle, 0x401000, b"\x7fELF"), tuple[int, bytes])
     assert_type(read_with_helpers(handle, 0x401000), bytes)
+    assert_type(remote_module_read(executor, 0x401000), bytes)
+    assert_type(direct_idapython(executor, 7), int)
