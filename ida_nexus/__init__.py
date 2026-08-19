@@ -1,5 +1,6 @@
 """Public Python API for authenticated IDA Nexus database sessions."""
 
+from ._remote import remote_ida
 from .errors import (
     AmbiguousDatabaseError,
     NexusConnectionError,
@@ -77,5 +78,6 @@ __all__ = [
     "get_ida_domain_version",
     "get_state_dir",
     "reference",
+    "remote_ida",
     "wait_database_released",
 ]
