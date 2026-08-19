@@ -125,6 +125,30 @@ def test_http_handler_workers_are_prewarmed_and_stopped(tmp_path: Path):
         assert httpd._worker_count == 0
 
 
+def test_server_stop_closes_idle_keep_alive_connection(tmp_path: Path):
+    server, _ = make_server(tmp_path)
+    connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+    try:
+        connection.request(
+            "GET",
+            "/health",
+            headers={"Authorization": f"Bearer {server.token}"},
+        )
+        response = connection.getresponse()
+        assert response.status == 200
+        response.read()
+        sock = connection.sock
+        assert sock is not None
+
+        server.stop()
+        sock.settimeout(1)
+        assert sock.recv(1) == b""
+    finally:
+        connection.close()
+        server.stop()
+        server.release_registration()
+
+
 def test_server_rejects_nonfinite_lifecycle_intervals(tmp_path: Path):
     analysis = AnalysisState()
     identity = InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib")
@@ -162,6 +186,23 @@ def test_health_registry_and_authentication(tmp_path: Path):
         entry = load_registry_entry(tmp_path / f"{server.entry.record_id}.json")
         assert entry.backend == "idalib"
         assert entry._token == "test-token"
+
+        status, body = raw_request(
+            server,
+            (
+                f"GET /health HTTP/1.0\r\nAuthorization: Bearer {server.token}\r\n\r\n"
+            ).encode(),
+        )
+        assert status == 200
+        assert json.loads(body) == {"status": "ok", **server.entry.health_identity()}
+
+        status, _ = raw_request(
+            server,
+            (
+                f"GET /health HTTP/1.1\r\nAuthorization: Bearer {server.token}\r\n\r\n"
+            ).encode(),
+        )
+        assert status == 403
 
         status, payload, _ = request(server, "GET", "/health", token="wrong")
         assert status == 401
@@ -319,11 +360,40 @@ def test_chunked_framing_browser_gate_and_size_limit(tmp_path: Path):
         assert json.loads(response_body)["result"] == {"code": "lambda: 9"}
         assert backend.calls == [("execute_python", "lambda: 9", None, None, False)]
 
+        malformed_trailer = f"{len(body):X}\r\n".encode() + body + b"\r\n0\r\n \r\n\r\n"
+        status, _ = raw_request(
+            server,
+            prefix + b"Transfer-Encoding: chunked\r\n\r\n" + malformed_trailer,
+        )
+        assert status == 400
+
         status, _ = raw_request(
             server,
             prefix + b"Content-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n",
         )
         assert status == 400
+
+        status, _ = raw_request(
+            server,
+            prefix + f"Content-Length: +{len(body)}\r\n\r\n".encode() + body,
+        )
+        assert status == 400
+
+        status, _ = raw_request(
+            server,
+            prefix
+            + b"Content-Length: 1\r\nTransfer-Encoding: chunked\r\n"
+            + b"Expect: 100-continue\r\n\r\n",
+        )
+        assert status == 400
+
+        status, _ = raw_request(
+            server,
+            prefix
+            + f"Content-Length: {POST_BODY_LIMIT + 1}\r\n".encode()
+            + b"Expect: 100-continue\r\n\r\n",
+        )
+        assert status == 413
 
         status, _, _ = request(
             server,

@@ -16,6 +16,9 @@ HOST = "127.0.0.1"
 POST_BODY_LIMIT = 4 * 1024 * 1024
 MAX_CHUNK_LINE = 8192
 MAX_TRAILER_BYTES = 64 * 1024
+_HTTP_TOKEN_BYTES = (
+    b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+)
 PREWARM_HANDLER_THREADS = 4
 MAX_IDLE_HANDLER_THREADS = 8
 ServerRequest = socket.socket | tuple[bytes, socket.socket]
@@ -70,9 +73,61 @@ class RequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         pass
 
+    def _request_body_framing(self) -> tuple[bool, int] | None:
+        transfer_values = self.headers.get_all("Transfer-Encoding", [])
+        length_values = self.headers.get_all("Content-Length", [])
+
+        if transfer_values and length_values:
+            self.close_connection = True
+            self.send_error(400, "Conflicting request framing")
+            return None
+
+        if transfer_values:
+            encodings = [
+                item.strip().lower()
+                for value in transfer_values
+                for item in value.split(",")
+                if item.strip()
+            ]
+            if encodings != ["chunked"]:
+                self.close_connection = True
+                self.send_error(400, "Unsupported Transfer-Encoding")
+                return None
+            return True, 0
+
+        if len(length_values) > 1:
+            self.close_connection = True
+            self.send_error(400, "Ambiguous Content-Length")
+            return None
+        if not length_values:
+            return False, 0
+
+        length_text = length_values[0].strip(" \t")
+        if not length_text or any(char not in "0123456789" for char in length_text):
+            self.close_connection = True
+            self.send_error(400, "Invalid Content-Length")
+            return None
+
+        normalized_length = length_text.lstrip("0") or "0"
+        limit_text = str(POST_BODY_LIMIT)
+        if len(normalized_length) > len(limit_text) or (
+            len(normalized_length) == len(limit_text) and normalized_length > limit_text
+        ):
+            self._send_payload_too_large()
+            return None
+        return False, int(normalized_length)
+
     def handle_expect_100(self) -> bool:
-        # BaseHTTPRequestHandler would otherwise accept the body before auth.
+        # BaseHTTPRequestHandler would otherwise accept the body before auth
+        # or before rejecting deterministically invalid request framing.
         if not self._check_api_request():
+            return False
+        framing = self._request_body_framing()
+        if framing is None:
+            return False
+        chunked, content_length = framing
+        if self.command != "POST" and (chunked or content_length):
+            self.send_error(400, "Request body is not allowed")
             return False
         self.send_response_only(100)
         self.end_headers()
@@ -133,7 +188,12 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _check_api_request(self) -> bool:
         hosts = self.headers.get_all("Host", [])
-        if len(hosts) != 1 or hosts[0] not in self.server.allowed_hosts:
+        host_required = self.request_version not in ("HTTP/0.9", "HTTP/1.0")
+        if (
+            len(hosts) > 1
+            or (host_required and not hosts)
+            or (hosts and hosts[0] not in self.server.allowed_hosts)
+        ):
             self.close_connection = True
             self.send_error(403, "Forbidden")
             return False
@@ -169,18 +229,17 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._respond(response)
 
     def _has_unexpected_body(self) -> bool:
-        transfer_values = self.headers.get_all("Transfer-Encoding", [])
-        length_values = self.headers.get_all("Content-Length", [])
-        if transfer_values:
+        if self.headers.get_all("Transfer-Encoding", []):
             return True
+        length_values = self.headers.get_all("Content-Length", [])
         if not length_values:
             return False
         if len(length_values) != 1:
             return True
-        try:
-            return int(length_values[0]) != 0
-        except ValueError:
+        length_text = length_values[0].strip(" \t")
+        if not length_text or any(char not in "0123456789" for char in length_text):
             return True
+        return any(char != "0" for char in length_text)
 
     def do_GET(self) -> None:
         if self._check_api_request():
@@ -218,45 +277,16 @@ class RequestHandler(BaseHTTPRequestHandler):
     do_CONNECT = _reject_other
 
     def _read_body(self) -> bytes | None:
-        transfer_values = self.headers.get_all("Transfer-Encoding", [])
-        length_values = self.headers.get_all("Content-Length", [])
-        if transfer_values and length_values:
-            self.close_connection = True
-            self.send_error(400, "Conflicting request framing")
+        framing = self._request_body_framing()
+        if framing is None:
             return None
+        chunked, content_length = framing
 
-        if transfer_values:
-            encodings = [
-                item.strip().lower()
-                for value in transfer_values
-                for item in value.split(",")
-                if item.strip()
-            ]
-            if encodings != ["chunked"]:
-                self.close_connection = True
-                self.send_error(400, "Unsupported Transfer-Encoding")
-                return None
+        if chunked:
             raw = self._read_chunked()
             if raw is None:
                 return None
         else:
-            if len(length_values) > 1:
-                self.close_connection = True
-                self.send_error(400, "Ambiguous Content-Length")
-                return None
-            try:
-                content_length = int(length_values[0]) if length_values else 0
-            except ValueError:
-                self.close_connection = True
-                self.send_error(400, "Invalid Content-Length")
-                return None
-            if content_length < 0:
-                self.close_connection = True
-                self.send_error(400, "Invalid Content-Length")
-                return None
-            if content_length > POST_BODY_LIMIT:
-                self._send_payload_too_large()
-                return None
             raw = self.rfile.read(content_length) if content_length else b""
             if len(raw) != content_length:
                 self.close_connection = True
@@ -306,6 +336,18 @@ class RequestHandler(BaseHTTPRequestHandler):
                         return None
                     if trailer in (b"\r\n", b"\n"):
                         return b"".join(chunks)
+                    field_line = (
+                        trailer[:-2] if trailer.endswith(b"\r\n") else trailer[:-1]
+                    )
+                    name, separator, _ = field_line.partition(b":")
+                    if (
+                        not separator
+                        or not name
+                        or any(byte not in _HTTP_TOKEN_BYTES for byte in name)
+                    ):
+                        self.close_connection = True
+                        self.send_error(400, "Malformed chunk trailer")
+                        return None
             if total + chunk_size > POST_BODY_LIMIT:
                 self._send_payload_too_large()
                 return None
@@ -399,6 +441,7 @@ class LocalHTTPServer(HTTPServer):
         self._worker_count = 0
         self._idle_worker_count = 0
         self._closing_workers = False
+        self._active_connections: set[socket.socket] = set()
         super().__init__((HOST, 0), RequestHandler)
         self.port = int(self.server_address[1])
         self.token = token
@@ -453,11 +496,19 @@ class LocalHTTPServer(HTTPServer):
             if not isinstance(connection, socket.socket):
                 self.shutdown_request(connection)
                 continue
+            with self._worker_condition:
+                if self._closing_workers:
+                    self.shutdown_request(connection)
+                    continue
+                self._active_connections.add(connection)
             try:
                 self.finish_request(connection, client_address)
             except Exception:  # noqa: BLE001 -- socketserver isolation boundary
                 self.handle_error(connection, client_address)
             finally:
+                with self._worker_condition:
+                    self._active_connections.discard(connection)
+                    self._worker_condition.notify_all()
                 self.shutdown_request(connection)
 
     def process_request(
@@ -480,6 +531,7 @@ class LocalHTTPServer(HTTPServer):
                 return
             self._closing_workers = True
             worker_count = self._worker_count
+            active_connections = tuple(self._active_connections)
             while True:
                 try:
                     pending = self._request_queue.get_nowait()
@@ -489,6 +541,14 @@ class LocalHTTPServer(HTTPServer):
                     self.shutdown_request(pending[0])
             for _ in range(worker_count):
                 self._request_queue.put(None)
+
+        for connection in active_connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        with self._worker_condition:
             deadline = time.monotonic() + 1.0
             while self._worker_count > 0 and time.monotonic() < deadline:
                 self._worker_condition.wait(deadline - time.monotonic())
