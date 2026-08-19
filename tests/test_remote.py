@@ -67,6 +67,36 @@ class FakeDatabase:
     bytes = FakeBytes()
 
 
+def helper_read_exact(db: Database, address: int, size: int) -> bytes:
+    data = db.bytes.get_bytes_at(address, size)
+    if data is None:
+        raise ValueError("unreadable")
+    return data
+
+
+def helper_with_length(data: bytes) -> tuple[int, bytes]:
+    return len(data), data
+
+
+def helper_read_with_length(
+    db: Database,
+    address: int,
+    size: int,
+) -> tuple[int, bytes]:
+    return helper_with_length(helper_read_exact(db, address, size))
+
+
+@remote_ida(
+    helpers=(helper_read_with_length, helper_with_length, helper_read_exact),
+)
+def remote_read_with_length(
+    db: Database,
+    address: int,
+    size: int,
+) -> tuple[int, bytes]:
+    return helper_read_with_length(db, address, size)
+
+
 @remote_ida
 def remote_round_trip(
     db: Database,
@@ -90,6 +120,21 @@ def remote_identity(db: Database, value: object) -> object:
 def remote_unsupported_result(db: Database) -> object:
     del db
     return {1, 2}
+
+
+def test_remote_ida_bundles_reusable_helpers() -> None:
+    handle = InProcessHandle(FakeDatabase())
+
+    result = remote_read_with_length(handle, 0, 1)
+
+    assert result == (1, b"\x00")
+    code = handle.calls[0]["code"]
+    assert code.index("def helper_read_exact") < code.index(
+        "def remote_read_with_length"
+    )
+    assert code.index("def helper_with_length") < code.index(
+        "def remote_read_with_length"
+    )
 
 
 def test_remote_ida_executes_function_and_preserves_bytes_and_tuples(
@@ -186,3 +231,17 @@ def test_remote_ida_rejects_closures() -> None:
 
     with pytest.raises(TypeError, match="cannot capture nonlocal values"):
         remote_ida(closure)
+
+
+def test_remote_ida_rejects_helper_closures() -> None:
+    suffix = b"!"
+
+    def helper(data: bytes) -> bytes:
+        return data + suffix
+
+    def remote_function(db: Database, data: bytes) -> bytes:
+        del db
+        return data
+
+    with pytest.raises(TypeError, match="helpers cannot capture nonlocal values"):
+        remote_ida(helpers=(helper,))(remote_function)

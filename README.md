@@ -234,6 +234,26 @@ Imports used by the body belong inside the function. Arguments and return
 values may contain `None`, booleans, integers, finite floats, strings, bytes,
 lists, tuples, and string-keyed dictionaries recursively.
 
+Reusable plain functions can be bundled explicitly. They are type-checked with
+their normal signatures and execute in the same remote namespace:
+
+```python
+def read_exact(db: Database, address: int, size: int) -> bytes:
+    data = db.bytes.get_bytes_at(address, size)
+    if data is None:
+        raise ValueError("unreadable address")
+    return data
+
+
+@remote_ida(helpers=(read_exact,))
+def read_magic(db: Database, address: int) -> bytes:
+    return read_exact(db, address, 4)
+```
+
+Helpers must also be synchronous, source-backed functions without decorators or
+closures. List every helper used by the remote function, including helpers used
+by other helpers.
+
 Discovery returns public instance descriptors that support exact attachment:
 
 ```python
