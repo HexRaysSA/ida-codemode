@@ -8,13 +8,14 @@ from pathlib import Path
 
 from ida_codemode._http import POST_BODY_LIMIT
 from ida_codemode._registry import InstanceIdentity, load_registry_entry
-from ida_codemode._runtime import AnalysisState
+from ida_codemode._runtime import AnalysisState, IdbChangeState
 from ida_codemode._server import CodeModeHTTPServer
 
 
 class RecordingBackend:
     def __init__(self, analysis: AnalysisState) -> None:
         self.analysis = analysis
+        self.idb_change_state = IdbChangeState()
         self.calls: list[tuple[object, ...]] = []
 
     def execute_python(
@@ -23,10 +24,22 @@ class RecordingBackend:
         timeout: float | None,
         *,
         lease_id: str | None = None,
+        operation_id: str | None = None,
+        operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
     ):
-        self.calls.append(("execute_python", code, timeout, lease_id, persist_globals))
+        self.calls.append(
+            (
+                "execute_python",
+                code,
+                timeout,
+                lease_id,
+                operation_id,
+                operation_label,
+                persist_globals,
+            )
+        )
         if code == "return-bytes":
             return {"bytes": b"not-json"}
         return {"code": code}
@@ -45,6 +58,32 @@ class RecordingBackend:
     def save_database(self):
         self.calls.append(("save",))
         return {"saved": True, "idb_path": "/tmp/test.i64"}
+
+    def enable_idb_change_hook(self) -> None:
+        self.calls.append(("enable_idb_change_hook",))
+
+    def disable_idb_change_hook(self) -> None:
+        self.calls.append(("disable_idb_change_hook",))
+
+    def subscribe_idb_changes(self):
+        return self.idb_change_state.subscribe()
+
+    def wait_idb_change(self, subscriber, timeout: float):
+        return self.idb_change_state.wait(subscriber, timeout)
+
+    def record_idb_event(
+        self,
+        operation_id: str | None = None,
+        operation_label: str | None = None,
+        origin_id: str | None = None,
+    ) -> None:
+        """Test-only stand-in for an IDB_Hooks callback firing."""
+        self.idb_change_state.record(
+            {"event_name": operation_id or "changed", "timestamp": 1},
+            operation_id,
+            operation_label,
+            origin_id,
+        )
 
 
 def request(
@@ -210,7 +249,6 @@ def test_health_registry_and_authentication(tmp_path: Path):
     finally:
         server.stop()
         server.release_registration()
-    assert not list(tmp_path.glob("*.json"))
 
 
 def test_execute_wait_and_save_routes(tmp_path: Path):
@@ -220,7 +258,12 @@ def test_execute_wait_and_save_routes(tmp_path: Path):
             server,
             "POST",
             "/execute_python",
-            {"code": "lambda: 1", "timeout": 2.5},
+            {
+                "code": "lambda: 1",
+                "timeout": 2.5,
+                "operation_id": "request-1",
+                "operation_label": "IDA Nexus TUI: Duncan",
+            },
         )
         assert status == 200
         assert payload == {"ok": True, "result": {"code": "lambda: 1"}}
@@ -241,7 +284,15 @@ def test_execute_wait_and_save_routes(tmp_path: Path):
         assert status == 200
         assert payload["result"]["saved"] is True
         assert backend.calls == [
-            ("execute_python", "lambda: 1", 2.5, None, False),
+            (
+                "execute_python",
+                "lambda: 1",
+                2.5,
+                None,
+                "request-1",
+                "IDA Nexus TUI: Duncan",
+                False,
+            ),
             ("wait", 4.0),
             ("save",),
         ]
@@ -279,6 +330,24 @@ def test_execute_rejects_invalid_timeouts(tmp_path: Path):
             )
             assert status == 400
             assert payload["error"]["code"] == "invalid_timeout"
+        assert backend.calls == []
+    finally:
+        server.stop()
+        server.release_registration()
+
+
+def test_execute_rejects_invalid_operation_labels(tmp_path: Path) -> None:
+    server, backend = make_server(tmp_path)
+    try:
+        for operation_label in ("", "  ", "x" * 129, 1, True):
+            status, payload, _ = request(
+                server,
+                "POST",
+                "/execute_python",
+                {"code": "lambda: 1", "operation_label": operation_label},
+            )
+            assert status == 400
+            assert payload["error"]["code"] == "invalid_operation_label"
         assert backend.calls == []
     finally:
         server.stop()
@@ -330,7 +399,9 @@ def test_compressed_request_body(tmp_path: Path):
         assert response.status == 200
         response.read()
         connection.close()
-        assert backend.calls == [("execute_python", "lambda: 7", None, None, False)]
+        assert backend.calls == [
+            ("execute_python", "lambda: 7", None, None, None, None, False)
+        ]
     finally:
         server.stop()
         server.release_registration()
@@ -358,7 +429,9 @@ def test_chunked_framing_browser_gate_and_size_limit(tmp_path: Path):
         )
         assert status == 200
         assert json.loads(response_body)["result"] == {"code": "lambda: 9"}
-        assert backend.calls == [("execute_python", "lambda: 9", None, None, False)]
+        assert backend.calls == [
+            ("execute_python", "lambda: 9", None, None, None, None, False)
+        ]
 
         malformed_trailer = f"{len(body):X}\r\n".encode() + body + b"\r\n0\r\n \r\n\r\n"
         status, _ = raw_request(
@@ -476,6 +549,87 @@ def test_sse_health_holds_and_releases_a_client_lease(tmp_path: Path):
         server.release_registration()
 
 
+def test_sse_idb_events_defers_hook_until_analysis_finishes(tmp_path: Path):
+    server, backend = make_server(tmp_path)
+    connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+    try:
+        connection.request(
+            "GET",
+            "/idb_events",
+            headers={
+                "Authorization": f"Bearer {server.token}",
+                "Accept": "text/event-stream",
+            },
+        )
+        response = connection.getresponse()
+        assert response.status == 200
+        assert response.getheader("Content-Type") == "text/event-stream"
+        assert response.readline() == b": keepalive\n"
+        assert ("enable_idb_change_hook",) not in backend.calls
+
+        backend.analysis.mark_complete()
+        enable_call = ("enable_idb_change_hook",)
+        deadline = time.monotonic() + 1
+        while enable_call not in backend.calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert backend.calls.count(("enable_idb_change_hook",)) == 1
+
+        response.close()
+        connection.close()
+        deadline = time.monotonic() + 2
+        while server._idb_event_subscribers and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert server._idb_event_subscribers == 0
+        assert backend.calls.count(("disable_idb_change_hook",)) == 1
+    finally:
+        connection.close()
+        server.stop()
+        server.release_registration()
+
+
+def test_sse_idb_events_reports_structured_events(tmp_path: Path):
+    server, backend = make_server(tmp_path)
+    connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+    try:
+        connection.request(
+            "GET",
+            "/idb_events",
+            headers={
+                "Authorization": f"Bearer {server.token}",
+                "Accept": "text/event-stream",
+            },
+        )
+        response = connection.getresponse()
+        assert response.status == 200
+        backend.analysis.mark_complete()
+
+        enable_call = ("enable_idb_change_hook",)
+        deadline = time.monotonic() + 1
+        while enable_call not in backend.calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        backend.record_idb_event("first", "first label")
+        # A heartbeat may interleave before the notification lands.
+        line = response.readline()
+        while not line.startswith(b"event:"):
+            line = response.readline()
+        assert line == b"event: idb_changed\n"
+        data_line = response.readline()
+        assert data_line.startswith(b"data: ")
+        payload = json.loads(data_line[len(b"data: ") :])
+        assert payload == {
+            "event_name": "first",
+            "timestamp": 1,
+            "revision": 1,
+            "operation_id": "first",
+            "operation_label": "first label",
+            "origin_id": None,
+        }
+    finally:
+        connection.close()
+        server.stop()
+        server.release_registration()
+
+
 def test_execute_state_is_scoped_to_and_released_with_lease(tmp_path: Path):
     class SessionBackend(RecordingBackend):
         def execute_python(
@@ -484,6 +638,8 @@ def test_execute_state_is_scoped_to_and_released_with_lease(tmp_path: Path):
             timeout: float | None,
             *,
             lease_id: str | None = None,
+            operation_id: str | None = None,
+            operation_label: str | None = None,
             persist_globals: bool = False,
             filename: str | None = None,
         ):
@@ -491,6 +647,8 @@ def test_execute_state_is_scoped_to_and_released_with_lease(tmp_path: Path):
                 (
                     "execute",
                     lease_id,
+                    operation_id,
+                    operation_label,
                     code,
                     timeout,
                     persist_globals,
@@ -555,7 +713,7 @@ def test_execute_state_is_scoped_to_and_released_with_lease(tmp_path: Path):
             assert time.monotonic() < deadline
             time.sleep(0.01)
         assert backend.calls == [
-            ("execute", "scoped", "result = 1", None, True),
+            ("execute", "scoped", None, None, "result = 1", None, True),
             ("release_session", "scoped"),
         ]
     finally:

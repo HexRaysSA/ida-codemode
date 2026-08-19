@@ -397,6 +397,7 @@ class DatabaseManager:
         timeout: float | None = None,
         *,
         operation_id: str | None = None,
+        operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
     ) -> PythonExecutionResult:
@@ -417,6 +418,7 @@ class DatabaseManager:
                     code,
                     timeout=float(effective_timeout),
                     operation_id=operation_id,
+                    operation_label=operation_label,
                     persist_globals=persist_globals,
                     filename=filename,
                 )

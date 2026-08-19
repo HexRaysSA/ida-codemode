@@ -33,7 +33,7 @@ connection expresses one client's interest in an already-running database.
 | `ida_codemode/_server.py` | Code Mode routes, instance publication, SSE lease/request accounting, and managed idle shutdown. |
 | `ida_codemode/_registry.py` | Canonical identity, cross-platform file locks, atomic records, health classification, and stale-record cleanup. |
 | `ida_codemode/_resolver.py` | GUI discovery, expected-IDB resolution, serialized worker spawning, import options, and startup diagnostics. |
-| `ida_codemode/handle.py` | Public `DatabaseHandle`, exact instance attachment, SSE lease monitoring, reusable HTTP RPC, execution, analysis polling/waiting, saving, and exclusive worker shutdown. |
+| `ida_codemode/handle.py` | Public `DatabaseHandle`, exact instance attachment, SSE lease and IDB-event streams, reusable HTTP RPC, execution, analysis polling/waiting, saving, and exclusive worker shutdown. |
 | `ida_codemode/manager.py` | Protocol-agnostic database attachment, local selection, per-handle operation serialization, lease cleanup, and lifecycle events. |
 | `ida_codemode/_runtime.py` | Serializes IDA operations onto IDA's main thread and provides the Code Mode Python runtime. |
 | `ida_codemode/reference.py` | Builds and searches an AST-based reference from the installed ida-domain package and examples without importing ida-domain in the MCP process. |
@@ -185,6 +185,7 @@ Important routes are:
 |---|---|
 | `GET /health` | Authenticated record identity and liveness probe. |
 | `GET /health?sse=1` | Persistent client lease with periodic heartbeat and optional keepalive. |
+| `GET /idb_events` | Structured database-operation events after initial autoanalysis finishes. |
 | `POST /release_lease` | Idempotently release one identified client lease. |
 | `POST /execute_python` | Execute Code Mode Python against the open database. |
 | `POST /cancel_operation` | Cooperatively cancel one lease-owned operation without releasing the database handle. |
@@ -264,8 +265,9 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 |---|---|
 | `GET /health` | Raw health identity object described above. |
 | `GET /health?sse=1` | `text/event-stream`; accepts `lease_id` and bounded `keepalive` query values, emits one initial `health` event and heartbeat comments. |
+| `GET /idb_events` | `text/event-stream`; accepts subscribers immediately but installs its structured IDB hook only after initial autoanalysis completes. Each `idb_changed` payload is one event containing `event_name`, nanosecond Unix `timestamp`, monotonically increasing `revision`, event-specific fields, and nullable `origin_id`, `operation_id`, and `operation_label`. `origin_id` is an opaque, one-way-derived identity for the executing lease; it supports handle-local event recognition without disclosing the control-capable `lease_id`. The hook is removed after the final subscriber disconnects. A subscriber that exceeds its bounded queue is disconnected rather than receiving an incomplete history. |
 | `POST /release_lease` | `{lease_id}`; idempotently detaches that lease and returns `{"released":true,"shutdown_pending":bool}`. A true `shutdown_pending` commits final zero-keepalive managed shutdown so the client may wait for the lifetime lock to be released. |
-| `POST /execute_python` | `{code, timeout?, lease_id?, operation_id?, persist_globals?, filename?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. Persistence defaults to false and requires an active lease. Execution does not implicitly wait for autoanalysis. |
+| `POST /execute_python` | `{code, timeout?, lease_id?, operation_id?, operation_label?, persist_globals?, filename?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. The optional operation label is an opaque display fallback. Persistence defaults to false and requires an active lease. Execution does not implicitly wait for autoanalysis. |
 | `POST /cancel_operation` | `{lease_id, operation_id}`; success is `{"ok":true,"result":{"cancelled":bool}}`. Cancellation is lease-scoped and preserves the handle. |
 | `POST /save_database` | `{lease_id?}`; success is `{"ok":true,"result":{"saved":true,"idb_path":...}}`. |
 | `POST /shutdown_database` | `{lease_id, save}`; the active lease must be exclusive and own a managed idalib worker. Success is `{"ok":true,"result":{"shutting_down":true,"save":bool}}`, after which teardown uses `Database.close(save=save)`. |
@@ -328,8 +330,14 @@ protocol bump; it must not silently reinterpret an existing field.
 ## Shared leases and managed shutdown
 
 Each `DatabaseHandle` owns one authenticated SSE lease connection in addition
-to its on-demand RPC connection. Multiple handles, MCP servers, and agents may
-share the same instance. Closing one handle closes only its own connections.
+to its on-demand RPC connection. `subscribe_idb_events()` opens an optional,
+closeable SSE iterator whose revisions signal consumers to refresh cached IDB
+data. Multiple handles, MCP servers, and agents may share the same instance.
+Closing one handle closes only its own connections and event subscriptions.
+Each handle exposes its opaque `event_origin_id`; `owns_event()` compares it to
+an event's optional `origin_id`. The origin is derived from the private lease ID,
+so it remains stable for the handle lifetime without revealing the identifier
+used for cancellation, release, or persistent namespace ownership.
 
 The server emits heartbeat comments so crashed clients are detected when the
 next write fails. A fixed startup grace protects the race between worker

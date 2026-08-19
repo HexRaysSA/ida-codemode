@@ -14,6 +14,15 @@ class AnalysisResult(TypedDict):
     complete: bool
 
 
+class DatabaseChangeEvent(TypedDict):
+    event_name: str
+    timestamp: int
+    revision: int
+    operation_id: str | None
+    operation_label: str | None
+    origin_id: str | None
+
+
 class SaveResult(TypedDict):
     saved: bool
     idb_path: str
