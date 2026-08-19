@@ -265,7 +265,7 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 |---|---|
 | `GET /health` | Raw health identity object described above. |
 | `GET /health?sse=1` | `text/event-stream`; accepts `lease_id` and bounded `keepalive` query values, emits one initial `health` event and heartbeat comments. |
-| `GET /idb_events` | `text/event-stream`; accepts subscribers immediately but installs its structured IDB hook only after initial autoanalysis completes. Each `idb_changed` payload is one event containing `event_name`, nanosecond Unix `timestamp`, monotonically increasing `revision`, event-specific fields, and nullable `origin_id`, `operation_id`, and `operation_label`. `origin_id` is an opaque, one-way-derived identity for the executing lease; it supports handle-local event recognition without disclosing the control-capable `lease_id`. The hook is removed after the final subscriber disconnects. A subscriber that exceeds its bounded queue is disconnected rather than receiving an incomplete history. |
+| `GET /idb_events` | `text/event-stream`; accepts subscribers immediately but installs its structured IDB hook only after initial autoanalysis completes. Each `idb_changed` payload is one event containing `event_name`, nanosecond Unix `timestamp`, monotonically increasing `revision`, event-specific fields, and nullable `origin_id`, `operation_id`, and `operation_label`. `origin_id` is an opaque, one-way-derived identity for the executing lease; it supports handle-local event recognition without disclosing the control-capable `lease_id`. The GUI plugin uses `IDA GUI` as the operation label outside `execute_python()` calls, covering direct UI actions and GUI-process background work. The hook is removed after the final subscriber disconnects. A subscriber that exceeds its bounded queue is disconnected rather than receiving an incomplete history. |
 | `POST /release_lease` | `{lease_id}`; idempotently detaches that lease and returns `{"released":true,"shutdown_pending":bool}`. A true `shutdown_pending` commits final zero-keepalive managed shutdown so the client may wait for the lifetime lock to be released. |
 | `POST /execute_python` | `{code, timeout?, lease_id?, operation_id?, operation_label?, persist_globals?, filename?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. The optional operation label is an opaque display fallback. Persistence defaults to false and requires an active lease. Execution does not implicitly wait for autoanalysis. |
 | `POST /cancel_operation` | `{lease_id, operation_id}`; success is `{"ok":true,"result":{"cancelled":bool}}`. Cancellation is lease-scoped and preserves the handle. |
@@ -361,6 +361,12 @@ worker waits only for safe unwinding, not successful completion. Once no leases
 remain and the final lease's keepalive has expired, the worker stops serving,
 returns to the idalib main thread, saves/closes the IDB, then withdraws its
 registry record and exits.
+
+The `ida-nexus exec` adapter supplies an operation label for every execution:
+`REPL: interactive`, `REPL: stdin`, `REPL: command`, or
+`REPL: script <absolute path>`. Script labels retain the path suffix when the
+1024-character protocol limit requires truncation.
+
 A new lease before shutdown begins cancels pending shutdown. GUI instances are
 unmanaged and ignore zero leases.
 

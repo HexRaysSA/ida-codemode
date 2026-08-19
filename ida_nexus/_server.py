@@ -656,11 +656,11 @@ class NexusHTTPServer:
         if (
             not isinstance(operation_label, str)
             or not operation_label.strip()
-            or len(operation_label) > 128
+            or len(operation_label) > 1024
         ):
             raise APIError(
                 "invalid_operation_label",
-                "operation_label must be 1 to 128 non-whitespace characters",
+                "operation_label must be 1 to 1024 non-whitespace characters",
             )
         return operation_label
 

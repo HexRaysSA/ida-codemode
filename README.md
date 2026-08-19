@@ -120,6 +120,11 @@ uvx ida-nexus reference "decompile function"
 uvx ida-nexus exec tests/crackme03/elf -c 'db.functions.get_all()'
 ```
 
+`exec` labels resulting database events by input mode: `REPL: interactive` for
+a terminal session, `REPL: stdin` for piped input, `REPL: command` for `-c`,
+and `REPL: script <absolute path>` for a script file. These labels are restored
+between executions like every other `execute_python()` provenance label.
+
 Run `uvx ida-nexus COMMAND --help` for command-specific options.
 
 ## Python Package (Developers)
@@ -169,7 +174,9 @@ one structured IDB hook event with a monotonically increasing `revision`, a
 nanosecond Unix `timestamp`, the `operation_id` and optional untrusted
 `operation_label` active when IDA emitted it, and a nullable opaque `origin_id`.
 The origin is derived from the producing handle's private lease without exposing
-that control-capable lease ID:
+that control-capable lease ID. The GUI plugin labels events outside an
+`execute_python()` operation as `IDA GUI`; its background analysis and direct UI
+actions share that source:
 
 ```python
 with handle.subscribe_idb_events() as events:

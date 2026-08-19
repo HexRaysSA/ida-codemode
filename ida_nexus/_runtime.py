@@ -367,6 +367,7 @@ class IDARuntime:
         analysis_state: AnalysisState,
         idb_change_state: IdbChangeState,
         default_timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        unattributed_operation_label: str | None = None,
     ) -> None:
         # Library warnings would otherwise be captured as stderr and returned
         # to the agent alongside execution output.
@@ -391,6 +392,7 @@ class IDARuntime:
         self.analysis_state = analysis_state
         self.idb_change_state = idb_change_state
         self.default_timeout = default_timeout
+        self.unattributed_operation_label = unattributed_operation_label
 
         self._operation_lock = threading.Lock()
         self._active_lock = threading.Lock()
@@ -646,6 +648,7 @@ class IDARuntime:
         def install() -> int:
             if self._idb_change_hook is None:
                 hook = create_idb_change_hook(self.idb_change_state)
+                hook.operation_label = self.unattributed_operation_label
                 if not hook.hook():
                     raise RuntimeError("IDA refused the database-change hook")
                 self._idb_change_hook = hook

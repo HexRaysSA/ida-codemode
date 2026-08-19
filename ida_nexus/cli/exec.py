@@ -4,7 +4,7 @@ import json
 import os
 import sys
 
-from ida_nexus import NexusError, DatabaseHandle, RemoteError
+from ida_nexus import DatabaseHandle, NexusError, RemoteError
 
 try:
     import readline  # noqa: F401  -- enables line editing in input()
@@ -12,11 +12,18 @@ except ImportError:
     pass
 
 
-def exec(handle: DatabaseHandle, code: str, filename: str, json_mode: bool) -> bool:
+def exec(
+    handle: DatabaseHandle,
+    code: str,
+    filename: str,
+    json_mode: bool,
+    *,
+    operation_label: str,
+) -> bool:
     try:
         result = handle.execute_python(
             code,
-            operation_label="ida-nexus cli",
+            operation_label=operation_label,
             persist_globals=True,
             filename=filename,
         )
@@ -58,9 +65,10 @@ def exec(handle: DatabaseHandle, code: str, filename: str, json_mode: bool) -> b
     return True
 
 
-def repl(handle: DatabaseHandle):
+def repl(handle: DatabaseHandle) -> None:
     compiler, buf = codeop.CommandCompiler(), []
     interactive = sys.stdin.isatty()
+    operation_label = "REPL: interactive" if interactive else "REPL: stdin"
     while True:
         try:
             prompt = ("... " if buf else ">>> ") if interactive else ""
@@ -78,7 +86,21 @@ def repl(handle: DatabaseHandle):
             continue
         code, buf = "\n".join(buf), []
         if code:
-            exec(handle, code, "<stdin>", json_mode=False)
+            exec(
+                handle,
+                code,
+                "<stdin>",
+                json_mode=False,
+                operation_label=operation_label,
+            )
+
+
+def _script_operation_label(filename: str) -> str:
+    prefix = "REPL: script "
+    available = 1024 - len(prefix)
+    if len(filename) > available:
+        filename = f"…{filename[-(available - 1) :]}"
+    return f"{prefix}{filename}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -92,13 +114,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "script",
-        help="Path to the Python script to run, or a Python snippet in quotes.",
+        help="Path to the Python script to run.",
         nargs="?",
     )
     parser.add_argument(
         "-c",
         metavar="cmd",
-        help="Python command to execute in the context of the database.",
+        help="Python command or snippet to execute in the database context.",
     )
     parser.add_argument(
         "--json", action="store_true", help="Output only JSON to stdout."
@@ -109,15 +131,23 @@ def main(argv: list[str] | None = None) -> int:
         if args.c:
             code = args.c
             filename = "<string>"
+            operation_label = "REPL: command"
         elif args.script:
             filename = os.path.abspath(args.script)
             with open(filename, "r") as f:
                 code = f.read()
+            operation_label = _script_operation_label(filename)
         else:
             repl(handle)
             return 0
 
-        if not exec(handle, code, filename, args.json):
+        if not exec(
+            handle,
+            code,
+            filename,
+            args.json,
+            operation_label=operation_label,
+        ):
             return 1
     return 0
 
