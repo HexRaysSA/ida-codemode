@@ -1,20 +1,28 @@
-# ida-nexus
+# IDA Nexus
 
 ⚠️ Experimental prerelease ⚠️
 
-IDA Nexus gives agents a compact Python execution surface over the
-[`ida-domain`](https://github.com/HexRaysSA/ida-domain) API. It will
-discover and share databases already open in the IDA GUI, and starts
-managed idalib workers only when no suitable instance exists.
+IDA Nexus allows multiple clients to seamlessly share and operate on IDA databases.
 
-The MCP adapter explicitly runs `execute_python` as a lease-scoped REPL: imports,
-variables, and function definitions persist between its calls through the same
-database handle. The low-level API remains stateless by default and opts in with
-`persist_globals=True`; a stateless call discards any namespace previously
-retained by that handle. Separate handles receive isolated namespaces, and
-closing a handle releases its namespace and retained IDA objects.
+Consumers of the IDA Nexus library will transparently discover and share databases
+already open in the IDA GUI, or start a managed idalib worker when necessary.
+The goal is to enable an ecosystem where many tools can freely operate on a single IDB together.
+To achieve this, IDA Nexus exposes a compact Python execution surface with the
+[`ida-domain`](https://github.com/HexRaysSA/ida-domain) API available.
 
-## Installation
+## IDA GUI Plugin
+
+To support IDA GUI instances when using IDA Nexus, install the plugin:
+
+```bash
+uvx ida-hcli plugin install ida-nexus
+# or if you have hcli installed:
+hcli plugin install ida-nexus
+```
+
+_Note_: Without the GUI plugin, IDA Nexus will only work headlessly.
+
+## MCP Installation
 
 ### Requirements
 
@@ -41,23 +49,13 @@ codex plugin add ida-mcp@HexRaysSA
 ### [Pi](https://pi.dev/)
 
 ```bash
-pi install git:github.com/HexRaysSA/ida-nexus
+pi install git:github.com/HexRaysSA/ida-nexus@latest
 ```
 
 ### [oh-my-pi](https://github.com/can1357/oh-my-pi)
 
 ```bash
-omp plugin install github:HexRaysSA/ida-nexus
-```
-
-### IDA GUI Support
-
-To support IDA GUI instances when using ida-nexus, install the plugin:
-
-```bash
-uvx ida-hcli plugin install ida-nexus
-# or if you have hcli installed:
-hcli plugin install ida-nexus
+omp plugin install github:HexRaysSA/ida-nexus@latest
 ```
 
 ### Other agents
@@ -93,7 +91,7 @@ We tested the following clients, but any MCP client should work similarly:
 - [Antigravity](https://coder.google.com/)
 - [LM Studio](https://lmstudio.ai/)
 
-## Usage
+### Example Usage
 
 Start your agent harness and ask it something like:
 
@@ -103,28 +101,26 @@ To test the GUI integration, open something in IDA and ask your harness:
 
 > What do I have open in the IDA GUI?
 
-## Command line
-
-The package installs one `ida-nexus` command with subcommands:
+## CLI
 
 ```bash
 # MCP server (stdio/http)
-ida-nexus mcp --agent=my-agent
+uvx ida-nexus mcp --agent=my-agent
 
 # Inspect MCP session logs
-ida-nexus dashboard --open
+uvx ida-nexus dashboard --open
 
 # Export MCP session logs to ZIP
-ida-nexus logs
+uvx ida-nexus logs
 
 # IDA Domain API reference
-ida-nexus reference "decompile function"
+uvx ida-nexus reference "decompile function"
 
 # Execute Python against an IDB (command, script, repl)
-ida-nexus exec tests/crackme03/elf -c 'db.functions.get_all()'
+uvx ida-nexus exec tests/crackme03/elf -c 'db.functions.get_all()'
 ```
 
-Run `ida-nexus COMMAND --help` for command-specific options.
+Run `uvx ida-nexus COMMAND --help` for command-specific options.
 
 ## Python Package (Developers)
 
