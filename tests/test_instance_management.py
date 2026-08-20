@@ -1003,6 +1003,92 @@ def test_database_event_inherits_active_trace_call_id(monkeypatch) -> None:
     assert fields["call_id"] == "tool-call-id"
 
 
+def test_list_databases_does_not_wait_for_an_active_operation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class BlockingBackend(StaticBackend):
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def execute_python(
+            self,
+            code: str,
+            timeout: float | None,
+            *,
+            lease_id: str | None = None,
+            operation_id: str | None = None,
+            operation_label: str | None = None,
+            persist_globals: bool = False,
+            filename: str | None = None,
+        ) -> PythonExecutionResult:
+            self.started.set()
+            assert self.release.wait(2)
+            return super().execute_python(
+                code,
+                timeout,
+                lease_id=lease_id,
+                operation_id=operation_id,
+                operation_label=operation_label,
+                persist_globals=persist_globals,
+                filename=filename,
+            )
+
+    idb_path = tmp_path / "open.i64"
+    idb_path.write_bytes(b"idb")
+    backend = BlockingBackend()
+    server = NexusHTTPServer(
+        backend,
+        InstanceIdentity(str(idb_path), "", "gui"),
+        AnalysisState(),
+        REGISTRY_DIR,
+    )
+    server.start()
+    manager = DatabaseManager()
+    opened = manager.open_database(str(idb_path), set_current=True)
+    execution_errors: list[Exception] = []
+
+    def execute_python() -> None:
+        try:
+            manager.execute_python("1", opened["instance_id"], timeout=2)
+        except Exception as error:  # noqa: BLE001 - asserted below
+            execution_errors.append(error)
+
+    execution = threading.Thread(target=execute_python, daemon=True)
+    execution.start()
+    assert backend.started.wait(1)
+    monkeypatch.setattr("ida_nexus.manager.scan_instances", list)
+
+    listing_finished = threading.Event()
+    errors: list[Exception] = []
+
+    def list_databases() -> None:
+        try:
+            manager.list_databases()
+        except Exception as error:  # noqa: BLE001 - asserted below
+            errors.append(error)
+        finally:
+            listing_finished.set()
+
+    thread = threading.Thread(target=list_databases, daemon=True)
+    thread.start()
+    try:
+        completed_while_operation_was_active = listing_finished.wait(0.25)
+    finally:
+        backend.release.set()
+        execution.join(2)
+        thread.join(2)
+        manager.shutdown()
+        server.stop()
+        server.release_registration()
+
+    assert not execution.is_alive()
+    assert execution_errors == []
+    assert errors == []
+    assert completed_while_operation_was_active
+
+
 def test_list_databases_uses_idb_when_gui_executable_is_missing(tmp_path: Path) -> None:
     registry_dir = REGISTRY_DIR
     idb_path = tmp_path / "open.i64"

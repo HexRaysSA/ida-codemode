@@ -34,7 +34,7 @@ connection expresses one client's interest in an already-running database.
 | `ida_nexus/_registry.py` | Canonical identity, cross-platform file locks, atomic records, health classification, and stale-record cleanup. |
 | `ida_nexus/_resolver.py` | GUI discovery, expected-IDB resolution, serialized worker spawning, import options, and startup diagnostics. |
 | `ida_nexus/handle.py` | Public `DatabaseHandle`, exact instance attachment, SSE lease and IDB-event streams, reusable HTTP RPC, execution, analysis polling/waiting, saving, and exclusive worker shutdown. |
-| `ida_nexus/manager.py` | Protocol-agnostic database attachment, local selection, per-handle operation serialization, lease cleanup, and lifecycle events. |
+| `ida_nexus/manager.py` | Protocol-agnostic database attachment, local selection and discovery, lease cleanup, and lifecycle events. |
 | `ida_nexus/_runtime.py` | Serializes IDA operations onto IDA's main thread and provides the Nexus Python runtime. |
 | `ida_nexus/reference.py` | Builds and searches an AST-based reference from the installed ida-domain package and examples without importing ida-domain in the MCP process. |
 | `ida_nexus/paths.py` | Resolves the shared state root from the environment and IDA defaults. |

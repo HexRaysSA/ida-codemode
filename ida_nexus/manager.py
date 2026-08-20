@@ -9,7 +9,7 @@ import math
 import threading
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict
 
@@ -106,10 +106,6 @@ class _DatabaseSession:
     requested_path: str
     handle: DatabaseHandle
     autoanalysis_complete: bool = False
-    operation_lock: threading.RLock = field(
-        default_factory=threading.RLock,
-        repr=False,
-    )
 
 
 class DatabaseManager:
@@ -211,7 +207,7 @@ class DatabaseManager:
             existing: _DatabaseSession | None = None
             current: str | None = None
             if candidate is not None:
-                with candidate.operation_lock, self._lock:
+                with self._lock:
                     if self._instances.get(candidate.instance_id) is candidate:
                         existing = candidate
                         if set_current or self._current_instance_id is None:
@@ -381,14 +377,13 @@ class DatabaseManager:
     ) -> None:
         """Wait once for initial analysis without consuming execution timeout."""
         target_id, session = self._get_session(instance_id)
-        with session.operation_lock:
-            if session.autoanalysis_complete:
-                return
-            result = self.wait_autoanalysis(target_id, operation_id=operation_id)
-            if not result["complete"]:
-                raise DatabaseSelectionError(
-                    "autoanalysis did not complete; Python was not executed"
-                )
+        if session.autoanalysis_complete:
+            return
+        result = self.wait_autoanalysis(target_id, operation_id=operation_id)
+        if not result["complete"]:
+            raise DatabaseSelectionError(
+                "autoanalysis did not complete; Python was not executed"
+            )
 
     def execute_python(
         self,
@@ -410,22 +405,21 @@ class DatabaseManager:
         ):
             raise ValueError("timeout must be a positive finite number")
         target_id, session = self._get_session(instance_id)
-        with session.operation_lock:
+        if not session.handle.connected:
+            raise self._disconnected_error(target_id)
+        try:
+            return session.handle.execute_python(
+                code,
+                timeout=float(effective_timeout),
+                operation_id=operation_id,
+                operation_label=operation_label,
+                persist_globals=persist_globals,
+                filename=filename,
+            )
+        except NexusConnectionError:
             if not session.handle.connected:
-                raise self._disconnected_error(target_id)
-            try:
-                return session.handle.execute_python(
-                    code,
-                    timeout=float(effective_timeout),
-                    operation_id=operation_id,
-                    operation_label=operation_label,
-                    persist_globals=persist_globals,
-                    filename=filename,
-                )
-            except NexusConnectionError:
-                if not session.handle.connected:
-                    raise self._disconnected_error(target_id) from None
-                raise
+                raise self._disconnected_error(target_id) from None
+            raise
 
     def cancel_operation(self, instance_id: str, operation_id: str) -> bool:
         """Cancel one request-owned operation without releasing its lease."""
@@ -449,47 +443,45 @@ class DatabaseManager:
         operation_id: str | None = None,
     ) -> WaitAutoanalysisResult:
         target_id, session = self._get_session(instance_id)
-        with session.operation_lock:
-            if not session.handle.connected:
-                raise self._disconnected_error(target_id)
-            try:
-                result = session.handle.wait_autoanalysis(
-                    timeout,
-                    operation_id=operation_id,
-                )
-            except NexusConnectionError:
-                if not session.handle.connected:
-                    raise self._disconnected_error(target_id) from None
-                raise
-            complete = bool(result["complete"])
-            if complete:
-                session.autoanalysis_complete = True
-            return WaitAutoanalysisResult(
-                status=str(result["status"]),
-                complete=complete,
+        if not session.handle.connected:
+            raise self._disconnected_error(target_id)
+        try:
+            result = session.handle.wait_autoanalysis(
+                timeout,
+                operation_id=operation_id,
             )
+        except NexusConnectionError:
+            if not session.handle.connected:
+                raise self._disconnected_error(target_id) from None
+            raise
+        complete = bool(result["complete"])
+        if complete:
+            session.autoanalysis_complete = True
+        return WaitAutoanalysisResult(
+            status=str(result["status"]),
+            complete=complete,
+        )
 
     def save_database(self, instance_id: str | None) -> SaveDatabaseResult:
         target_id, session = self._get_session(instance_id)
-        with session.operation_lock:
+        if not session.handle.connected:
+            raise self._disconnected_error(target_id)
+        try:
+            result = session.handle.save_database()
+        except NexusConnectionError:
             if not session.handle.connected:
-                raise self._disconnected_error(target_id)
-            try:
-                result = session.handle.save_database()
-            except NexusConnectionError:
-                if not session.handle.connected:
-                    raise self._disconnected_error(target_id) from None
-                raise
-            self._emit(
-                "database_saved",
-                instance_id=target_id,
-                target=self._database_info(session),
-                result=result,
-            )
-            path = result.get("idb_path")
-            if not isinstance(path, str):
-                raise DatabaseSelectionError("save_database returned an invalid path")
-            return SaveDatabaseResult(path=path)
+                raise self._disconnected_error(target_id) from None
+            raise
+        self._emit(
+            "database_saved",
+            instance_id=target_id,
+            target=self._database_info(session),
+            result=result,
+        )
+        path = result.get("idb_path")
+        if not isinstance(path, str):
+            raise DatabaseSelectionError("save_database returned an invalid path")
+        return SaveDatabaseResult(path=path)
 
     @staticmethod
     def _listing_path(entry: DatabaseInstance) -> str:
@@ -512,13 +504,12 @@ class DatabaseManager:
 
         attached: dict[str, _AttachedDatabase] = {}
         for session in sessions:
-            with session.operation_lock:
-                entry = session.handle.instance
-                attached[entry.record_id] = _AttachedDatabase(
-                    entry=entry,
-                    instance_id=session.instance_id,
-                    current=session.instance_id == current,
-                )
+            entry = session.handle.instance
+            attached[entry.record_id] = _AttachedDatabase(
+                entry=entry,
+                instance_id=session.instance_id,
+                current=session.instance_id == current,
+            )
 
         instances: list[DatabaseListing] = []
         for discovered in scan_instances():
