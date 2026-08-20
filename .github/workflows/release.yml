@@ -118,7 +118,10 @@ jobs:
           fi
           git tag "$TAG"
           gh auth setup-git
-          git push --atomic origin "HEAD:$GITHUB_REF_NAME" "refs/tags/$TAG"
+          git push --atomic origin \
+            "HEAD:$GITHUB_REF_NAME" \
+            "refs/tags/$TAG" \
+            "+refs/tags/$TAG:refs/heads/latest"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.tag }}
