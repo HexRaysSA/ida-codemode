@@ -14,7 +14,7 @@ from .._registry import (
     ensure_private_directory,
 )
 from .._runtime import AnalysisState, IDARuntime, create_autoanalysis_hook
-from .._server import DEFAULT_LEASE_GRACE_SECONDS, CodeModeHTTPServer
+from .._server import DEFAULT_LEASE_GRACE_SECONDS, NexusHTTPServer
 
 
 def _parse_non_negative_int(value: str) -> int:
@@ -42,8 +42,8 @@ def _image_base_to_paragraphs(image_base: int | None) -> int | None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="ida-codemode worker",
-        description="Open one executable in idalib and expose the IDA Code Mode API",
+        prog="ida-nexus worker",
+        description="Open one executable in idalib and expose the IDA Nexus API",
     )
     parser.add_argument(
         "input", nargs="?", type=Path, help="Executable or existing IDB to open"
@@ -116,7 +116,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--managed",
         action="store_true",
-        help="Exit after the last Code Mode client lease is released",
+        help="Exit after the last Nexus client lease is released",
     )
     parser.add_argument(
         "--record-suffix",
@@ -225,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
             probe()
         except Exception as exc:  # noqa: BLE001 -- idalib may raise arbitrary errors
             print(
-                f"[ida-codemode] idalib initialization failed: {exc}", file=sys.stderr
+                f"[ida-nexus] idalib initialization failed: {exc}", file=sys.stderr
             )
             return 1
         return 0
@@ -234,21 +234,21 @@ def main(argv: list[str] | None = None) -> int:
 
     suffix = args.record_suffix or os.urandom(3).hex()
     if len(suffix) != 6 or any(c not in "0123456789abcdef" for c in suffix):
-        print("[ida-codemode] invalid record suffix", file=sys.stderr)
+        print("[ida-nexus] invalid record suffix", file=sys.stderr)
         return 2
     record_id = f"{os.getpid()}-{suffix}"
     _redirect_output(record_id)
 
     if not math.isfinite(args.lease_grace) or args.lease_grace < 0:
         print(
-            "[ida-codemode] lease grace must be a finite non-negative number",
+            "[ida-nexus] lease grace must be a finite non-negative number",
             file=sys.stderr,
         )
         return 2
     try:
         input_path = args.input.expanduser().resolve(strict=True)
     except FileNotFoundError:
-        print(f"[ida-codemode] input does not exist: {args.input}", file=sys.stderr)
+        print(f"[ida-nexus] input does not exist: {args.input}", file=sys.stderr)
         return 2
 
     # Import ida-domain only after the process-specific log is installed. In
@@ -271,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     analysis_hook: Any | None = None
     database: Any | None = None
     runtime: IDARuntime | None = None
-    server: CodeModeHTTPServer | None = None
+    server: NexusHTTPServer | None = None
     stop_signal: int | None = None
 
     def request_stop(signum: int, frame: Any) -> None:
@@ -312,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
             database=database,
             analysis_state=analysis_state,
         )
-        server = CodeModeHTTPServer(
+        server = NexusHTTPServer(
             runtime,
             identity,
             analysis_state,
@@ -322,7 +322,7 @@ def main(argv: list[str] | None = None) -> int:
             on_shutdown=kernwin.stop_serving,
         )
         server.start()
-        print(f"[ida-codemode] {server.url}", flush=True)
+        print(f"[ida-nexus] {server.url}", flush=True)
 
         # In IDA 9.4+, serve() dispatches execute_sync requests from HTTP
         # threads until managed lease shutdown or a signal calls
@@ -332,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
             kernwin.serve()
         return 128 + stop_signal if stop_signal is not None else 0
     except Exception as exc:  # noqa: BLE001 -- IDA initialization is third-party code
-        print(f"[ida-codemode] {exc}", file=sys.stderr)
+        print(f"[ida-nexus] {exc}", file=sys.stderr)
         return 1
     finally:
         if server is not None:
@@ -345,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
                 analysis_hook.unhook()
             except Exception as exc:  # noqa: BLE001 -- best-effort SWIG hook cleanup
                 print(
-                    f"[ida-codemode] failed to remove analysis hook: {exc}",
+                    f"[ida-nexus] failed to remove analysis hook: {exc}",
                     file=sys.stderr,
                 )
         if (
@@ -361,7 +361,7 @@ def main(argv: list[str] | None = None) -> int:
                 runtime.database = None
             except Exception as exc:  # noqa: BLE001 -- SWIG may raise arbitrary errors
                 print(
-                    f"[ida-codemode] failed to close database: {exc}",
+                    f"[ida-nexus] failed to close database: {exc}",
                     file=sys.stderr,
                 )
         elif database is not None and runtime is None:
@@ -369,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
                 database.close(save=True)
             except Exception as exc:  # noqa: BLE001 -- best-effort startup cleanup
                 print(
-                    f"[ida-codemode] failed to close database: {exc}",
+                    f"[ida-nexus] failed to close database: {exc}",
                     file=sys.stderr,
                 )
         # The lifetime lock is deliberately released only after the IDB close.

@@ -7,7 +7,7 @@ from http.client import HTTPConnection
 from pathlib import Path
 from unittest import mock
 
-from ida_codemode.cli import dashboard
+from ida_nexus.cli import dashboard
 
 
 class TranscriptTests(unittest.TestCase):
@@ -833,7 +833,7 @@ class SemanticSessionTests(unittest.TestCase):
             run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
             run_dir = sessions_dir / run_id
             logs_dir = run_dir / "logs"
-            mcp_dir = logs_dir / "ida-codemode"
+            mcp_dir = logs_dir / "ida-nexus"
             mcp_dir.mkdir(parents=True)
 
             (run_dir / "result.json").write_text("{}", encoding="utf-8")

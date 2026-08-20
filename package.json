@@ -1,7 +1,7 @@
 {
-  "name": "ida-codemode",
+  "name": "ida-nexus",
   "version": "0.6.1",
-  "description": "IDA Code Mode extension",
+  "description": "IDA Nexus extension",
   "license": "MIT",
   "type": "module",
   "keywords": [
@@ -11,25 +11,25 @@
     "reverse-engineering",
     "mcp"
   ],
-  "repository": "https://github.com/HexRaysSA/ida-codemode.git",
+  "repository": "https://github.com/HexRaysSA/ida-nexus.git",
   "files": [
     ".python-version",
-    "ida-codemode.ts",
+    "ida-nexus.ts",
     "ida-plugin.json",
-    "ida_codemode/*.py",
-    "ida_codemode/cli/*.py",
-    "ida_codemode_plugin.py",
+    "ida_nexus/*.py",
+    "ida_nexus/cli/*.py",
+    "ida_nexus_plugin.py",
     "pyproject.toml",
     "uv.lock"
   ],
   "omp": {
     "extensions": [
-      "./ida-codemode.ts"
+      "./ida-nexus.ts"
     ]
   },
   "pi": {
     "extensions": [
-      "./ida-codemode.ts"
+      "./ida-nexus.ts"
     ]
   },
   "dependencies": {
@@ -57,6 +57,6 @@
     "typescript": "^5.9.3"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck ida-codemode.ts"
+    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck ida-nexus.ts"
   }
 }

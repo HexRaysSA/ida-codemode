@@ -13,18 +13,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict
 
-from ida_codemode._registry import (
+from ida_nexus._registry import (
     LOG_DIR,
     DatabaseInstance,
     canonical_path,
     idb_key,
     scan_instances,
 )
-from ida_codemode._resolver import expected_idb_path
-from ida_codemode.errors import CodeModeConnectionError, DatabaseSelectionError
-from ida_codemode.handle import DatabaseHandle
-from ida_codemode.models import PythonExecutionResult
-from ida_codemode.options import MAX_KEEPALIVE_SECONDS, DatabaseOpenOptions
+from ida_nexus._resolver import expected_idb_path
+from ida_nexus.errors import NexusConnectionError, DatabaseSelectionError
+from ida_nexus.handle import DatabaseHandle
+from ida_nexus.models import PythonExecutionResult
+from ida_nexus.options import MAX_KEEPALIVE_SECONDS, DatabaseOpenOptions
 
 DEFAULT_OPEN_TIMEOUT_SECONDS = 300.0
 DEFAULT_EXECUTE_TIMEOUT_SECONDS = 360.0
@@ -420,7 +420,7 @@ class DatabaseManager:
                     persist_globals=persist_globals,
                     filename=filename,
                 )
-            except CodeModeConnectionError:
+            except NexusConnectionError:
                 if not session.handle.connected:
                     raise self._disconnected_error(target_id) from None
                 raise
@@ -455,7 +455,7 @@ class DatabaseManager:
                     timeout,
                     operation_id=operation_id,
                 )
-            except CodeModeConnectionError:
+            except NexusConnectionError:
                 if not session.handle.connected:
                     raise self._disconnected_error(target_id) from None
                 raise
@@ -474,7 +474,7 @@ class DatabaseManager:
                 raise self._disconnected_error(target_id)
             try:
                 result = session.handle.save_database()
-            except CodeModeConnectionError:
+            except NexusConnectionError:
                 if not session.handle.connected:
                     raise self._disconnected_error(target_id) from None
                 raise

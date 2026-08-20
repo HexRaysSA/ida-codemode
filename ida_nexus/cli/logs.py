@@ -1,4 +1,4 @@
-"""Portable log archives for ida-codemode semantic and agent sessions."""
+"""Portable log archives for ida-nexus semantic and agent sessions."""
 
 from __future__ import annotations
 
@@ -19,11 +19,11 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ida_codemode.paths import STATE_DIR
+from ida_nexus.paths import STATE_DIR
 
-ARCHIVE_FORMAT = "ida-codemode-logs"
+ARCHIVE_FORMAT = "ida-nexus-logs"
 ARCHIVE_SCHEMA = 1
-TOC_NAME = "ida-codemode-logs.json"
+TOC_NAME = "ida-nexus-logs.json"
 DEFAULT_SESSIONS_DIR = STATE_DIR / "sessions"
 DEFAULT_LOGS_DIR = STATE_DIR / "logs"
 
@@ -126,7 +126,7 @@ def _select_sessions(
             path = _canonical_file(requested, label="session file")
             if not _is_semantic_session(path):
                 raise LogArchiveError(
-                    f"not an ida-codemode semantic session (schema 1): {requested}"
+                    f"not an ida-nexus semantic session (schema 1): {requested}"
                 )
             selected.append(path)
     else:
@@ -141,7 +141,7 @@ def _select_sessions(
 
     unique = list(dict.fromkeys(selected))
     if not unique:
-        raise LogArchiveError("no ida-codemode semantic sessions found")
+        raise LogArchiveError("no ida-nexus semantic sessions found")
     return sorted(unique, key=lambda path: str(path))
 
 
@@ -157,7 +157,7 @@ def _find_agent_file(recorded_path: str, semantic_session: Path) -> Path | None:
                 if resolved != semantic_session:
                     return resolved
 
-        # Benchmark bundles retain the MCP trace below logs/ida-codemode while
+        # Benchmark bundles retain the MCP trace below logs/ida-nexus while
         # the corresponding agent transcript is logs/session.jsonl.
         for ancestor in (semantic_session.parent, semantic_session.parent.parent):
             candidate = ancestor / "session.jsonl"
@@ -602,20 +602,20 @@ def open_log_archive(path: Path) -> Iterator[LogArchiveView]:
     """Validate and extract a log archive for the duration of the context."""
 
     archive_path = _canonical_file(path, label="log archive")
-    with tempfile.TemporaryDirectory(prefix="ida-codemode-logs-") as directory:
+    with tempfile.TemporaryDirectory(prefix="ida-nexus-logs-") as directory:
         yield _extract_log_archive(archive_path, Path(directory).resolve())
 
 
 def _default_output() -> Path:
     stamp = datetime.now(UTC).astimezone().strftime("%Y%m%d-%H%M%S")
-    return Path.cwd() / f"ida-codemode-logs-{stamp}.zip"
+    return Path.cwd() / f"ida-nexus-logs-{stamp}.zip"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="ida-codemode logs",
+        prog="ida-nexus logs",
         description=(
-            "Create a ZIP containing ida-codemode semantic sessions, linked "
+            "Create a ZIP containing ida-nexus semantic sessions, linked "
             "Claude, Codex, or Pi transcripts, and operational logs."
         ),
     )
@@ -646,12 +646,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             overwrite=args.force,
         )
     except (LogArchiveError, OSError, zipfile.BadZipFile) as exc:
-        print(f"ida-codemode logs: error: {exc}", file=sys.stderr)
+        print(f"ida-nexus logs: error: {exc}", file=sys.stderr)
         return 2
 
     for missing in result.missing_agent_sessions:
         print(
-            "ida-codemode logs: warning: linked "
+            "ida-nexus logs: warning: linked "
             f"{missing.kind} session not found: {missing.recorded_path} "
             f"(from {missing.semantic_session})",
             file=sys.stderr,

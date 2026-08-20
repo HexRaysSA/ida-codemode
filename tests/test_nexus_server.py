@@ -6,10 +6,10 @@ import time
 from http.client import HTTPConnection
 from pathlib import Path
 
-from ida_codemode._http import POST_BODY_LIMIT
-from ida_codemode._registry import InstanceIdentity, load_registry_entry
-from ida_codemode._runtime import AnalysisState
-from ida_codemode._server import CodeModeHTTPServer
+from ida_nexus._http import POST_BODY_LIMIT
+from ida_nexus._registry import InstanceIdentity, load_registry_entry
+from ida_nexus._runtime import AnalysisState
+from ida_nexus._server import NexusHTTPServer
 
 
 class RecordingBackend:
@@ -48,7 +48,7 @@ class RecordingBackend:
 
 
 def request(
-    server: CodeModeHTTPServer,
+    server: NexusHTTPServer,
     method: str,
     path: str,
     payload: object | None = None,
@@ -70,7 +70,7 @@ def request(
     return result
 
 
-def raw_request(server: CodeModeHTTPServer, data: bytes):
+def raw_request(server: NexusHTTPServer, data: bytes):
     connection = socket.create_connection(("127.0.0.1", server.port), timeout=3)
     try:
         connection.sendall(data)
@@ -97,7 +97,7 @@ def make_server(tmp_path: Path, *, gui: bool = False):
         exe_path="/tmp/test.exe",
         backend="gui" if gui else "idalib",
     )
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         backend,
         identity,
         analysis,
@@ -136,7 +136,7 @@ def test_server_rejects_nonfinite_lifecycle_intervals(tmp_path: Path):
     )
     for name, lease_grace, heartbeat_interval in parameter_sets:
         try:
-            CodeModeHTTPServer(
+            NexusHTTPServer(
                 RecordingBackend(analysis),
                 identity,
                 analysis,
@@ -157,7 +157,7 @@ def test_health_registry_and_authentication(tmp_path: Path):
         assert status == 200
         assert server.entry is not None
         assert payload == {"status": "ok", **server.entry.health_identity()}
-        assert headers["Server"].strip().split("/")[0] == "ida-codemode"
+        assert headers["Server"].strip().split("/")[0] == "ida-nexus"
 
         entry = load_registry_entry(tmp_path / f"{server.entry.record_id}.json")
         assert entry.backend == "idalib"
@@ -434,7 +434,7 @@ def test_execute_state_is_scoped_to_and_released_with_lease(tmp_path: Path):
     analysis = AnalysisState()
     backend = SessionBackend(analysis)
     identity = InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib")
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         backend,
         identity,
         analysis,
@@ -496,7 +496,7 @@ def test_disconnected_sse_skips_startup_grace(tmp_path: Path):
     stopped = threading.Event()
     analysis = AnalysisState()
     backend = RecordingBackend(analysis)
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         backend,
         InstanceIdentity("/tmp/test.i64", "/tmp/test.exe", "idalib", managed=True),
         analysis,

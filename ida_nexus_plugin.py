@@ -9,13 +9,13 @@ import ida_loader
 import ida_nalt
 import idaapi
 
-from ida_codemode._registry import REGISTRY_DIR, InstanceIdentity, find_gui_owner
-from ida_codemode._runtime import AnalysisState, IDARuntime, create_autoanalysis_hook
-from ida_codemode._server import CodeModeHTTPServer
+from ida_nexus._registry import REGISTRY_DIR, InstanceIdentity, find_gui_owner
+from ida_nexus._runtime import AnalysisState, IDARuntime, create_autoanalysis_hook
+from ida_nexus._server import NexusHTTPServer
 
 
 class ReadyToRunHook(ida_kernwin.UI_Hooks):
-    def __init__(self, plugin: "CodeModePlugin") -> None:
+    def __init__(self, plugin: "NexusPlugin") -> None:
         super().__init__()
         self.plugin = plugin
 
@@ -23,16 +23,16 @@ class ReadyToRunHook(ida_kernwin.UI_Hooks):
         try:
             self.plugin.start_server()
         except Exception as exc:  # noqa: BLE001 -- IDA startup may raise SWIG errors
-            ida_kernwin.msg(f"[ida-codemode] failed to start: {exc}\n")
+            ida_kernwin.msg(f"[ida-nexus] failed to start: {exc}\n")
         finally:
             self.unhook()
 
 
-class CodeModePlugin(idaapi.plugin_t):
+class NexusPlugin(idaapi.plugin_t):
     flags = idaapi.PLUGIN_KEEP
-    comment = "Authenticated IDA Code Mode HTTP API"
+    comment = "Authenticated IDA Nexus HTTP API"
     help = ""
-    wanted_name = "IDA Code Mode"
+    wanted_name = "IDA Nexus"
     wanted_hotkey = ""
 
     # term() runs even when init() declined with PLUGIN_SKIP, so every attribute
@@ -40,7 +40,7 @@ class CodeModePlugin(idaapi.plugin_t):
     _analysis_hook: Any = None
     _ui_hook: ReadyToRunHook | None = None
     _runtime: IDARuntime | None = None
-    _server: CodeModeHTTPServer | None = None
+    _server: NexusHTTPServer | None = None
 
     def init(self) -> int:
         # IDA's idalib UI compatibility shim reports is_idaq(), hence both checks.
@@ -49,14 +49,14 @@ class CodeModePlugin(idaapi.plugin_t):
         if sys.version_info < (3, 11):  # noqa: UP036 -- plugin bypasses package metadata
             running = ".".join(str(part) for part in sys.version_info[:3])
             ida_kernwin.msg(
-                f"[ida-codemode] Python 3.11 or newer is required (running {running})\n"
+                f"[ida-nexus] Python 3.11 or newer is required (running {running})\n"
             )
             return idaapi.PLUGIN_SKIP
         version = tuple(
             int(part) for part in idaapi.get_kernel_version().split(".")[:2]
         )
         if version < (9, 4):
-            ida_kernwin.msg("[ida-codemode] IDA 9.4 or newer is required\n")
+            ida_kernwin.msg("[ida-nexus] IDA 9.4 or newer is required\n")
             return idaapi.PLUGIN_SKIP
 
         self.analysis_state = AnalysisState()
@@ -91,7 +91,7 @@ class CodeModePlugin(idaapi.plugin_t):
         # server.start() publishes synchronously, so the next plugin sees it.
         # A second owner would make the resolver raise AmbiguousDatabaseError.
         if idb_path and find_gui_owner(idb_path) is not None:
-            ida_kernwin.msg("[ida-codemode] Database already registered, skipping...\n")
+            ida_kernwin.msg("[ida-nexus] Database already registered, skipping...\n")
             return
 
         from ida_domain import Database
@@ -103,7 +103,7 @@ class CodeModePlugin(idaapi.plugin_t):
             database=database,
             analysis_state=self.analysis_state,
         )
-        server = CodeModeHTTPServer(
+        server = NexusHTTPServer(
             runtime,
             identity,
             self.analysis_state,
@@ -122,13 +122,13 @@ class CodeModePlugin(idaapi.plugin_t):
             raise
         self._runtime = runtime
         self._server = server
-        ida_kernwin.msg("[ida-codemode] Database registered successfully!\n")
+        ida_kernwin.msg("[ida-nexus] Database registered successfully!\n")
 
     def run(self, arg: int) -> None:
         if self._server is not None:
-            ida_kernwin.msg(f"[ida-codemode] Server running at {self._server.url}\n")
+            ida_kernwin.msg(f"[ida-nexus] Server running at {self._server.url}\n")
         else:
-            ida_kernwin.msg("[ida-codemode] Server not running...\n")
+            ida_kernwin.msg("[ida-nexus] Server not running...\n")
 
     def term(self) -> None:
         if self._ui_hook is not None:
@@ -142,7 +142,7 @@ class CodeModePlugin(idaapi.plugin_t):
             try:
                 self._runtime.database.unhook()
             except Exception as exc:  # noqa: BLE001 -- best-effort SWIG cleanup
-                ida_kernwin.msg(f"[ida-codemode] failed to detach database: {exc}\n")
+                ida_kernwin.msg(f"[ida-nexus] failed to detach database: {exc}\n")
             self._runtime = None
         if server is not None:
             # Release the lifetime lock only after detaching from the GUI IDB.
@@ -158,10 +158,10 @@ def is_interactive_gui() -> bool:
     return bool(ida_kernwin.is_idaq() and os.environ.get("IDA_IS_INTERACTIVE") == "1")
 
 
-def PLUGIN_ENTRY() -> CodeModePlugin:
+def PLUGIN_ENTRY() -> NexusPlugin:
     # Always hand IDA an object: returning None makes the kernel complain that
     # "PLUGIN_ENTRY() must return an object!" on every non-GUI run. Declining is
     # init()'s job, via PLUGIN_SKIP, which IDA accepts silently.
     # IDA's SWIG stubs model plugin_t.__new__ with spurious arguments.
-    plugin_type: Any = CodeModePlugin
+    plugin_type: Any = NexusPlugin
     return plugin_type()

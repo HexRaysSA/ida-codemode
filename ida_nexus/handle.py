@@ -12,7 +12,7 @@ from typing import Any, Self
 from ._registry import HOST, DatabaseInstance
 from ._resolver import resolve_instance
 from .errors import (
-    CodeModeConnectionError,
+    NexusConnectionError,
     DatabaseDisconnectedError,
     RemoteError,
 )
@@ -26,7 +26,7 @@ RPC_CONNECTION_MAX_IDLE_SECONDS = 20.0
 
 
 class DatabaseHandle:
-    """A shared Code Mode instance plus one lifetime SSE client lease."""
+    """A shared Nexus instance plus one lifetime SSE client lease."""
 
     def __init__(
         self,
@@ -60,7 +60,7 @@ class DatabaseHandle:
         self._install_lease(instance)
         thread = threading.Thread(
             target=self._monitor_lease,
-            name=f"ida-codemode-lease-{instance.pid}",
+            name=f"ida-nexus-lease-{instance.pid}",
             daemon=True,
         )
         self._lease_thread = thread
@@ -139,7 +139,7 @@ class DatabaseHandle:
                 keepalive=options.keepalive,
                 on_disconnect=on_disconnect,
             )
-        except CodeModeConnectionError:
+        except NexusConnectionError:
             # The worker may cross its zero-lease shutdown boundary between
             # resolve and the SSE handshake. Resolve once more as promised by
             # the instance lifecycle contract.
@@ -154,7 +154,7 @@ class DatabaseHandle:
 
     @property
     def instance(self) -> DatabaseInstance:
-        """The exact Code Mode instance leased by this handle."""
+        """The exact Nexus instance leased by this handle."""
         with self._lock:
             return self._instance
 
@@ -190,13 +190,13 @@ class DatabaseHandle:
             response = connection.getresponse()
         except (OSError, http.client.HTTPException) as exc:
             connection.close()
-            raise CodeModeConnectionError(
+            raise NexusConnectionError(
                 f"failed to establish instance lease: {exc}"
             ) from exc
         if response.status != 200:
             body = response.read(4096).decode("utf-8", errors="replace")
             connection.close()
-            raise CodeModeConnectionError(
+            raise NexusConnectionError(
                 f"failed to establish instance lease: HTTP {response.status}: {body}"
             )
         # The 10-second timeout bounds only the handshake. A lease is an
@@ -210,7 +210,7 @@ class DatabaseHandle:
         if lease_socket is None:
             response.close()
             connection.close()
-            raise CodeModeConnectionError(
+            raise NexusConnectionError(
                 "failed to establish instance lease: socket unavailable"
             )
         lease_socket.settimeout(None)
@@ -222,7 +222,7 @@ class DatabaseHandle:
             if self._closed.is_set():
                 response.close()
                 connection.close()
-                raise CodeModeConnectionError("database handle is closed")
+                raise NexusConnectionError("database handle is closed")
             old_response = self._lease_response
             old_connection = self._lease_connection
             old_socket = self._lease_socket
@@ -286,7 +286,7 @@ class DatabaseHandle:
         stale: http.client.HTTPConnection | None = None
         with self._lock:
             if self._closed.is_set():
-                raise CodeModeConnectionError("database handle is closed")
+                raise NexusConnectionError("database handle is closed")
             connection = self._rpc_connection
             if connection is not None and (
                 connection.port != entry.port
@@ -340,7 +340,7 @@ class DatabaseHandle:
         body = json.dumps(request_payload).encode("utf-8") if method == "POST" else None
         with self._request_lock:
             if self._closed.is_set():
-                raise CodeModeConnectionError("database handle is closed")
+                raise NexusConnectionError("database handle is closed")
             if self._disconnected.is_set():
                 raise DatabaseDisconnectedError(
                     self._disconnect_reason or "database instance disconnected"
@@ -371,8 +371,8 @@ class DatabaseHandle:
                 # Do not retry automatically: a POST may have executed before
                 # the connection failed. The next operation gets a fresh socket.
                 self._discard_rpc_connection(connection)
-                raise CodeModeConnectionError(
-                    f"Code Mode request failed: {exc}"
+                raise NexusConnectionError(
+                    f"Nexus request failed: {exc}"
                 ) from exc
             finally:
                 if operation_id is not None:
@@ -387,14 +387,14 @@ class DatabaseHandle:
             response_payload = json.loads(response_body)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             if status != 200:
-                raise CodeModeConnectionError(
-                    f"Code Mode request failed with HTTP {status}"
+                raise NexusConnectionError(
+                    f"Nexus request failed with HTTP {status}"
                 ) from exc
-            raise CodeModeConnectionError(
-                "Code Mode response was not valid JSON"
+            raise NexusConnectionError(
+                "Nexus response was not valid JSON"
             ) from exc
         if not isinstance(response_payload, dict):
-            raise CodeModeConnectionError("Code Mode response was not a JSON object")
+            raise NexusConnectionError("Nexus response was not a JSON object")
         if status != 200 or (unwrap_result and not response_payload.get("ok")):
             error = response_payload.get("error")
             if isinstance(error, dict):
@@ -405,12 +405,12 @@ class DatabaseHandle:
                 }
                 raise RemoteError(
                     str(error.get("code", "remote_error")),
-                    str(error.get("message", "Code Mode request failed")),
+                    str(error.get("message", "Nexus request failed")),
                     status,
                     details,
                 )
-            raise CodeModeConnectionError(
-                f"Code Mode request failed with HTTP {status}"
+            raise NexusConnectionError(
+                f"Nexus request failed with HTTP {status}"
             )
         return response_payload.get("result") if unwrap_result else response_payload
 
@@ -453,7 +453,7 @@ class DatabaseHandle:
             unwrap_result=False,
         )
         if not isinstance(result, dict) or not isinstance(result.get("complete"), bool):
-            raise CodeModeConnectionError(
+            raise NexusConnectionError(
                 "poll_autoanalysis returned an invalid result"
             )
         return result
@@ -464,7 +464,7 @@ class DatabaseHandle:
         *,
         operation_id: str | None = None,
     ) -> AnalysisResult:
-        """Wait for initial autoanalysis through the public Code Mode route."""
+        """Wait for initial autoanalysis through the public Nexus route."""
         payload: dict[str, Any] = {}
         if timeout is not None:
             payload["timeout"] = timeout
@@ -477,7 +477,7 @@ class DatabaseHandle:
             operation_id=operation_id or uuid.uuid4().hex,
         )
         if not isinstance(result, dict) or not isinstance(result.get("complete"), bool):
-            raise CodeModeConnectionError(
+            raise NexusConnectionError(
                 "wait_autoanalysis returned an invalid result"
             )
         return result
@@ -550,7 +550,7 @@ class DatabaseHandle:
     def save_database(self) -> SaveResult:
         result = self._request("/save_database", {}, timeout=305.0)
         if not isinstance(result, dict):
-            raise CodeModeConnectionError("save_database returned an invalid result")
+            raise NexusConnectionError("save_database returned an invalid result")
         return result
 
     def shutdown_database(self, *, save: bool = True) -> ShutdownResult:
@@ -563,7 +563,7 @@ class DatabaseHandle:
             or result.get("shutting_down") is not True
             or result.get("save") is not save
         ):
-            raise CodeModeConnectionError(
+            raise NexusConnectionError(
                 "shutdown_database returned an invalid result"
             )
         return result

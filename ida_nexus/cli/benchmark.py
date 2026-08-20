@@ -1,4 +1,4 @@
-"""Benchmark a real IDA Code Mode endpoint through its public client and HTTP API.
+"""Benchmark a real IDA Nexus endpoint through its public client and HTTP API.
 
 The target is opened through DatabaseHandle so managed workers remain leased for
 all measurements. Timings include response reads and JSON decoding, matching
@@ -18,8 +18,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ida_codemode import DatabaseHandle, DatabaseOpenOptions
-from ida_codemode._registry import HOST
+from ida_nexus import DatabaseHandle, DatabaseOpenOptions
+from ida_nexus._registry import HOST
 
 TRIVIAL_CODE = "result = 1"
 IDA_CALL_CODE = """\
@@ -177,10 +177,10 @@ def benchmark(args: argparse.Namespace) -> dict[str, Any]:
 
         report: dict[str, Any] = {
             "schema": 1,
-            "benchmark": "ida-codemode-performance",
+            "benchmark": "ida-nexus-performance",
             "created_at": time.time(),
             "client": {
-                "ida_codemode_version": importlib.metadata.version("ida-codemode"),
+                "ida_nexus_version": importlib.metadata.version("ida-nexus"),
                 "python_version": sys.version,
                 "platform": platform.platform(),
                 "executable": sys.executable,
@@ -366,8 +366,8 @@ def metric_label(name: str, metric: dict[str, Any]) -> str:
 def print_human(report: dict[str, Any]) -> None:
     instance = report["instance"]
     client = report["client"]
-    print("IDA Code Mode performance benchmark")
-    print(f"  ida-codemode: {client['ida_codemode_version']}")
+    print("IDA Nexus performance benchmark")
+    print(f"  ida-nexus: {client['ida_nexus_version']}")
     print(f"  client:       {client['platform']}")
     print(
         f"  worker:       IDA {instance['ida_version']}, "
@@ -413,7 +413,7 @@ def non_negative_int(value: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="ida-codemode benchmark", description=__doc__)
+    parser = argparse.ArgumentParser(prog="ida-nexus benchmark", description=__doc__)
     parser.add_argument("target", type=Path, help="executable or existing IDB")
     parser.add_argument("--iterations", type=positive_int, default=200)
     parser.add_argument("--warmup", type=non_negative_int, default=20)

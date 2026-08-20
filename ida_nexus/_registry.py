@@ -16,7 +16,7 @@ from typing import Any, Literal, Self
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from ida_codemode.paths import STATE_DIR
+from ida_nexus.paths import STATE_DIR
 
 HOST = "127.0.0.1"
 REGISTRY_DIR = STATE_DIR / "instances"
@@ -70,7 +70,7 @@ def identity_key(path: str | os.PathLike[str]) -> str:
     if sys.platform == "darwin":
         # normcase() is a no-op in posixpath, while normal macOS volumes are
         # case-insensitive. This intentionally treats case-sensitive APFS the
-        # same way so all Code Mode clients calculate one stable identity.
+        # same way so all Nexus clients calculate one stable identity.
         return value.casefold()
     return value
 
@@ -181,7 +181,7 @@ class InstanceIdentity:
 
 @dataclass(frozen=True)
 class DatabaseInstance:
-    """One published Code Mode database instance.
+    """One published Nexus database instance.
 
     ``port``, ``_token``, ``version``, and ``idb_key`` are private transport and
     discovery details. They remain present because exact attachment uses the
@@ -521,7 +521,7 @@ def scan_instances(
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError("timed out scanning Code Mode instances")
+                raise TimeoutError("timed out scanning Nexus instances")
             probe_timeout = min(probe_timeout, remaining)
         valid, detail = probe_health(entry, probe_timeout)
         discovered.append(

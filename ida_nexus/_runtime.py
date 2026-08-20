@@ -20,7 +20,7 @@ from .models import PythonExecutionResult
 
 DEFAULT_TIMEOUT_SECONDS = 60.0
 SAVE_TIMEOUT_SECONDS = 300.0
-USER_CODE_FILENAME = "<ida-codemode>"
+USER_CODE_FILENAME = "<ida-nexus>"
 
 
 class APIError(RuntimeError):
@@ -63,7 +63,7 @@ class _OperationInterrupt(BaseException):
     """Asynchronous exception used to stop Python code without tracing it."""
 
 
-# Code Mode runs on CPython through IDAPython. Injecting one private exception
+# Nexus runs on CPython through IDAPython. Injecting one private exception
 # into the executing thread keeps pure-Python loops cancellable without
 # installing a trace callback on every opcode. Use a void pointer so a null
 # value can undo the injection if CPython ever reports multiple matching thread
@@ -77,7 +77,7 @@ def _interrupt_thread(thread_id: int) -> bool:
     count = _set_async_exc(thread_id, id(_OperationInterrupt))
     if count > 1:
         _set_async_exc(thread_id, None)
-        raise RuntimeError("CPython matched multiple Code Mode execution threads")
+        raise RuntimeError("CPython matched multiple Nexus execution threads")
     return count == 1
 
 
@@ -101,7 +101,7 @@ class _DeadlineScheduler:
             if self._thread is None:
                 self._thread = threading.Thread(
                     target=self._run,
-                    name="ida-codemode-deadlines",
+                    name="ida-nexus-deadlines",
                     daemon=True,
                 )
                 self._thread.start()
@@ -137,7 +137,7 @@ class _DeadlineScheduler:
                     callback()
                 except BaseException as exc:  # noqa: BLE001 -- keep the scheduler alive
                     warnings.warn(
-                        f"Code Mode deadline callback failed: {exc}",
+                        f"Nexus deadline callback failed: {exc}",
                         RuntimeWarning,
                         stacklevel=1,
                     )
@@ -178,7 +178,7 @@ def _execute_user_code(
         if module.body and isinstance(module.body[-1], ast.Expr):
             prefix = ast.Module(body=module.body[:-1], type_ignores=module.type_ignores)
             if prefix.body:
-                exec(  # noqa: S102 -- intentional Code Mode surface
+                exec(  # noqa: S102 -- intentional Nexus surface
                     compile(prefix, filename, "exec"),
                     namespace,
                     namespace,
@@ -190,7 +190,7 @@ def _execute_user_code(
                 namespace,
             )
 
-        exec(  # noqa: S102 -- intentional Code Mode surface
+        exec(  # noqa: S102 -- intentional Nexus surface
             compile(module, filename, "exec"),
             namespace,
             namespace,
@@ -302,7 +302,7 @@ class IDARuntime:
             int(part) for part in idaapi.get_kernel_version().split(".")[:2]
         )
         if version < (9, 4):
-            raise RuntimeError("IDA Code Mode requires IDA 9.4 or newer")
+            raise RuntimeError("IDA Nexus requires IDA 9.4 or newer")
 
         if not math.isfinite(default_timeout) or default_timeout <= 0:
             raise ValueError("default_timeout must be a positive finite number")
@@ -583,7 +583,7 @@ class IDARuntime:
                         previous.clear()
                 namespace = {
                     "__builtins__": builtins.__dict__,
-                    "__name__": "__ida_codemode_execute__",
+                    "__name__": "__ida_nexus_execute__",
                     **runtime,
                 }
             else:
@@ -598,7 +598,7 @@ class IDARuntime:
                 namespace.update(
                     {
                         "__builtins__": builtins.__dict__,
-                        "__name__": "__ida_codemode_execute__",
+                        "__name__": "__ida_nexus_execute__",
                         **runtime,
                     }
                 )

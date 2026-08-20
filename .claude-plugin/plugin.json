@@ -10,14 +10,14 @@
         "--with=ida-hcli",
         "--project",
         "${CLAUDE_PLUGIN_ROOT}",
-        "ida-codemode",
+        "ida-nexus",
         "mcp",
         "--agent=claude"
       ],
       "env": {
-        "IDA_CODEMODE_ID": "${IDA_CODEMODE_ID:-}",
+        "ida_nexus_ID": "${ida_nexus_ID:-}",
         "IDAUSR": "${IDAUSR:-}",
-        "IDA_CODEMODE_STATE_DIR": "${IDA_CODEMODE_STATE_DIR:-}"
+        "ida_nexus_STATE_DIR": "${ida_nexus_STATE_DIR:-}"
       }
     }
   },
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT} ida-codemode mcp --report-session=claude"
+            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT} ida-nexus mcp --report-session=claude"
           }
         ]
       }

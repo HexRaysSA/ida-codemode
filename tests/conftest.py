@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
-_STATE_DIR = Path(tempfile.mkdtemp(prefix="ida-codemode-tests-"))
-os.environ["IDA_CODEMODE_STATE_DIR"] = str(_STATE_DIR)
+_STATE_DIR = Path(tempfile.mkdtemp(prefix="ida-nexus-tests-"))
+os.environ["ida_nexus_STATE_DIR"] = str(_STATE_DIR)
 
 
 @pytest.fixture(autouse=True)
-def clean_codemode_state() -> Iterator[None]:
+def clean_nexus_state() -> Iterator[None]:
     for name in ("instances", "spawn", "logs"):
         shutil.rmtree(_STATE_DIR / name, ignore_errors=True)
     yield

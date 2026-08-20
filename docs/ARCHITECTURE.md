@@ -1,6 +1,6 @@
-# ida-codemode architecture
+# ida-nexus architecture
 
-ida-codemode uses discoverable, shared IDA instances. Each GUI database or
+ida-nexus uses discoverable, shared IDA instances. Each GUI database or
 idalib worker exposes the same authenticated loopback HTTP service. MCP servers
 attach through client leases rather than owning or terminating IDA processes
 directly.
@@ -27,22 +27,22 @@ connection expresses one client's interest in an already-running database.
 
 | Component | Responsibility |
 |---|---|
-| `ida_codemode_plugin.py` | Starts the Code Mode service inside interactive IDA, prevents duplicate GUI registration, and detaches without closing the GUI database. |
-| `ida_codemode/cli/worker.py` | Opens an executable or IDB with idalib, starts the service, and closes/saves the database when its lifecycle ends. Resolver-spawned workers are managed; directly launched workers are unmanaged unless `--managed` is passed. |
-| `ida_codemode/_http.py` | Loopback HTTP/1.1 listener, bearer/host/browser checks, bounded framing and decompression, and streamed responses. |
-| `ida_codemode/_server.py` | Code Mode routes, instance publication, SSE lease/request accounting, and managed idle shutdown. |
-| `ida_codemode/_registry.py` | Canonical identity, cross-platform file locks, atomic records, health classification, and stale-record cleanup. |
-| `ida_codemode/_resolver.py` | GUI discovery, expected-IDB resolution, serialized worker spawning, import options, and startup diagnostics. |
-| `ida_codemode/handle.py` | Public `DatabaseHandle`, exact instance attachment, SSE lease monitoring, reusable HTTP RPC, execution, analysis polling/waiting, saving, and exclusive worker shutdown. |
-| `ida_codemode/manager.py` | Protocol-agnostic database attachment, local selection, per-handle operation serialization, lease cleanup, and lifecycle events. |
-| `ida_codemode/_runtime.py` | Serializes IDA operations onto IDA's main thread and provides the Code Mode Python runtime. |
-| `ida_codemode/reference.py` | Builds and searches an AST-based reference from the installed ida-domain package and examples without importing ida-domain in the MCP process. |
-| `ida_codemode/paths.py` | Resolves the shared state root from the environment and IDA defaults. |
-| `ida_codemode/cli/` | Implements the single `ida-codemode` entry point and its MCP, dashboard, execution, logs, benchmark, and internal worker subcommands. |
-| `ida_codemode/cli/mcp.py` | ZeroMCP tools/transports, error mapping, startup attachment, agent metadata, and semantic session tracing. |
-| `ida-codemode.ts` | Shared Pi/oh-my-pi extension that starts MCP asynchronously from `session_start`, mirrors its tools with `ida_` names, attaches compatible transcript metadata, and applies host output truncation. Both hosts can enter the session immediately; their lifecycle runners publish late tool registrations before the first model turn. |
-| `ida_codemode/cli/dashboard.py` | Renders semantic session traces and linked Claude, Codex, Pi, or oh-my-pi transcripts from the local state directory or a portable log ZIP. |
-| `ida_codemode/cli/logs.py` | Builds and validates portable log ZIPs containing selected semantic sessions, linked agent transcripts, operational logs, and a JSON path-mapping TOC. |
+| `ida_nexus_plugin.py` | Starts the Nexus service inside interactive IDA, prevents duplicate GUI registration, and detaches without closing the GUI database. |
+| `ida_nexus/cli/worker.py` | Opens an executable or IDB with idalib, starts the service, and closes/saves the database when its lifecycle ends. Resolver-spawned workers are managed; directly launched workers are unmanaged unless `--managed` is passed. |
+| `ida_nexus/_http.py` | Loopback HTTP/1.1 listener, bearer/host/browser checks, bounded framing and decompression, and streamed responses. |
+| `ida_nexus/_server.py` | Nexus routes, instance publication, SSE lease/request accounting, and managed idle shutdown. |
+| `ida_nexus/_registry.py` | Canonical identity, cross-platform file locks, atomic records, health classification, and stale-record cleanup. |
+| `ida_nexus/_resolver.py` | GUI discovery, expected-IDB resolution, serialized worker spawning, import options, and startup diagnostics. |
+| `ida_nexus/handle.py` | Public `DatabaseHandle`, exact instance attachment, SSE lease monitoring, reusable HTTP RPC, execution, analysis polling/waiting, saving, and exclusive worker shutdown. |
+| `ida_nexus/manager.py` | Protocol-agnostic database attachment, local selection, per-handle operation serialization, lease cleanup, and lifecycle events. |
+| `ida_nexus/_runtime.py` | Serializes IDA operations onto IDA's main thread and provides the Nexus Python runtime. |
+| `ida_nexus/reference.py` | Builds and searches an AST-based reference from the installed ida-domain package and examples without importing ida-domain in the MCP process. |
+| `ida_nexus/paths.py` | Resolves the shared state root from the environment and IDA defaults. |
+| `ida_nexus/cli/` | Implements the single `ida-nexus` entry point and its MCP, dashboard, execution, logs, benchmark, and internal worker subcommands. |
+| `ida_nexus/cli/mcp.py` | ZeroMCP tools/transports, error mapping, startup attachment, agent metadata, and semantic session tracing. |
+| `ida-nexus.ts` | Shared Pi/oh-my-pi extension that starts MCP asynchronously from `session_start`, mirrors its tools with `ida_` names, attaches compatible transcript metadata, and applies host output truncation. Both hosts can enter the session immediately; their lifecycle runners publish late tool registrations before the first model turn. |
+| `ida_nexus/cli/dashboard.py` | Renders semantic session traces and linked Claude, Codex, Pi, or oh-my-pi transcripts from the local state directory or a portable log ZIP. |
+| `ida_nexus/cli/logs.py` | Builds and validates portable log ZIPs containing selected semantic sessions, linked agent transcripts, operational logs, and a JSON path-mapping TOC. |
 | `scripts/migrate_logs.py` | One-shot conversion of pre-0.2 operational/bridge logs into schema-1 semantic sessions. |
 
 ## State layout
@@ -56,8 +56,8 @@ connection expresses one client's interest in an already-running database.
   sessions/<mcp-server-id>.jsonl   semantic MCP/agent trace
 ```
 
-`<state-dir>` is `IDA_CODEMODE_STATE_DIR` when that variable is set. Otherwise
-it is `<IDAUSR>/codemode`, where `<IDAUSR>` is the first directory in the
+`<state-dir>` is `ida_nexus_STATE_DIR` when that variable is set. Otherwise
+it is `<IDAUSR>/nexus`, where `<IDAUSR>` is the first directory in the
 `IDAUSR` environment variable. When `IDAUSR` is unset, IDA's platform default
 is used (`~/.idapro` on Unix-like systems or `%APPDATA%/Hex-Rays/IDA Pro` on
 Windows).
@@ -141,7 +141,7 @@ disk permanently to avoid split-inode locking races.
 4. Return a `READY` owner or report a lock-held `BLOCKED` owner.
 5. Acquire `spawn/<idb-key>.lock` and repeat the scan.
 6. If still absent, validate the source path and start the
-   `ida-codemode worker` as a hidden, detached managed worker.
+   `ida-nexus worker` as a hidden, detached managed worker.
 7. Wait for a record with the expected IDB key and launch identity. Normally the
    PID is sufficient; on Windows the console launcher can hand off to a Python
    child, so the random record suffix is authoritative across both processes.
@@ -158,7 +158,7 @@ paragraph-based `-b` value.
 An explicit output database resolves by that IDB identity rather than attaching
 to a GUI that merely has the same executable open. A fresh-database request
 never reuses a live owner. All launch options are spawn/import-only and cannot
-reconfigure a reused instance. When a worker reopens an existing IDB, Code Mode
+reconfigure a reused instance. When a worker reopens an existing IDB, Nexus
 drops source-import options instead of passing invalid loader switches to IDA.
 These controls belong to `DatabaseOpenOptions`, not the six-tool MCP surface.
 
@@ -174,7 +174,7 @@ a race with an independently opened GUI.
 
 ## HTTP and IDA execution
 
-Each per-database Code Mode service is bound to loopback, requires the bearer
+Each per-database Nexus service is bound to loopback, requires the bearer
 token from the private registry record, validates `Host`, and rejects
 browser-originated requests. Request framing and content encoding are strict,
 and both encoded and decompressed body sizes are bounded.
@@ -186,7 +186,7 @@ Important routes are:
 | `GET /health` | Authenticated record identity and liveness probe. |
 | `GET /health?sse=1` | Persistent client lease with periodic heartbeat and optional keepalive. |
 | `POST /release_lease` | Idempotently release one identified client lease. |
-| `POST /execute_python` | Execute Code Mode Python against the open database. |
+| `POST /execute_python` | Execute Nexus Python against the open database. |
 | `POST /cancel_operation` | Cooperatively cancel one lease-owned operation without releasing the database handle. |
 | `POST /save_database` | Explicitly save a GUI or idalib database. |
 | `POST /shutdown_database` | Shut down an exclusively leased managed idalib worker, saving or discarding changes. |
@@ -241,7 +241,7 @@ A published `instances/<record-id>.json` record has these required fields:
 | `backend` | `gui` or `idalib`. |
 | `pid`, `port` | Positive process ID and loopback TCP port. |
 | `token` | Bearer secret used by every per-database HTTP request. |
-| `version` | Exact Code Mode protocol version. |
+| `version` | Exact Nexus protocol version. |
 | `idb_path`, `exe_path` | Case-preserving canonical paths; the executable path may be empty. |
 | `idb_key` | The 16-hex-digit identity described in **Database identity**. |
 | `managed` | Whether zero leases trigger worker shutdown. |
@@ -368,7 +368,7 @@ MCP servers retain independent leases. Registry discovery lets
 `list_databases()` also report GUI and idalib instances that this MCP server
 has not yet attached to; local handles are annotated with their `instance_id`
 and current-target state. If a lease connection dies, its MCP-local
-`instance_id` is invalidated immediately. Code Mode never silently reconnects
+`instance_id` is invalidated immediately. Nexus never silently reconnects
 or replaces the database; the agent must discover and open it again.
 
 Tools are:
@@ -419,7 +419,7 @@ when emitted during a tool invocation.
 The Claude and Codex `PreToolUse` hooks and the Pi extension attach transcript
 paths as hidden `_meta` fields. The MCP adapter promotes those fields into
 request metadata and removes them from public tool arguments. Each tool event
-records the applicable `codemode_id` and agent transcript path under `session`.
+records the applicable `nexus_id` and agent transcript path under `session`.
 This supports one MCP process serving multiple agent sessions and several
 agents sharing one IDA worker.
 
@@ -440,10 +440,10 @@ layout, select Pi's active transcript branch, summarize available token/cost
 data, and export a self-contained session page. Its `/agent` route serves only
 transcript paths referenced by discoverable semantic sessions.
 
-`ida-codemode logs` packages all local semantic sessions by default, or only
+`ida-nexus logs` packages all local semantic sessions by default, or only
 explicitly named session files, together with every available linked agent
 transcript and every file under the operational `logs/` directory. The root
-`ida-codemode-logs.json` TOC records schema/version, checksums,
+`ida-nexus-logs.json` TOC records schema/version, checksums,
 original-to-archive path mappings, per-session transcript references, and
 missing references for semantic and agent sessions. Operational files are
 preserved under `logs/` without TOC entries. The dashboard validates checksums

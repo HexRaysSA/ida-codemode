@@ -28,7 +28,7 @@ class _Lease:
     stop: threading.Event
 
 
-class CodeModeBackend(Protocol):
+class NexusBackend(Protocol):
     def execute_python(
         self,
         code: str,
@@ -48,12 +48,12 @@ class CodeModeBackend(Protocol):
     def save_database(self) -> dict[str, Any]: ...
 
 
-class CodeModeHTTPServer:
-    """Authenticated local Code Mode API, registration, and client leases."""
+class NexusHTTPServer:
+    """Authenticated local Nexus API, registration, and client leases."""
 
     def __init__(
         self,
-        backend: CodeModeBackend,
+        backend: NexusBackend,
         identity: InstanceIdentity,
         analysis_state: AnalysisState,
         registry_dir: str | os.PathLike[str],
@@ -137,7 +137,7 @@ class CodeModeHTTPServer:
             thread = threading.Thread(
                 target=self._serve,
                 args=(httpd, serving),
-                name="ida-codemode-http",
+                name="ida-nexus-http",
                 daemon=True,
             )
             self._registration = registration
@@ -152,7 +152,7 @@ class CodeModeHTTPServer:
             if self.identity.managed:
                 watchdog = threading.Thread(
                     target=self._watch_leases,
-                    name="ida-codemode-leases",
+                    name="ida-nexus-leases",
                     daemon=True,
                 )
                 self._watchdog = watchdog
@@ -167,7 +167,7 @@ class CodeModeHTTPServer:
         try:
             httpd.serve_forever(poll_interval=0.1)
         except Exception:
-            logger.exception("Code Mode HTTP server stopped unexpectedly")
+            logger.exception("Nexus HTTP server stopped unexpectedly")
 
     def release_registration(self) -> None:
         """Withdraw ownership after the owning IDB has detached or closed."""
@@ -241,7 +241,7 @@ class CodeModeHTTPServer:
                 try:
                     self.on_shutdown()
                 except Exception:
-                    logger.exception("Code Mode shutdown callback failed")
+                    logger.exception("Nexus shutdown callback failed")
             return
 
     def _lease_opened(self, lease_id: str, keepalive: float) -> _Lease | None:
@@ -269,7 +269,7 @@ class CodeModeHTTPServer:
                 try:
                     self.backend.cancel_active()
                 except Exception:
-                    logger.exception("Code Mode operation cancellation failed")
+                    logger.exception("Nexus operation cancellation failed")
             if self._active_leases == 0:
                 self._shutdown_at = time.monotonic() + lease.keepalive
             self._activity.notify_all()
@@ -277,7 +277,7 @@ class CodeModeHTTPServer:
         try:
             self.backend.release_session(lease_id)
         except Exception:
-            logger.exception("Code Mode lease session cleanup failed")
+            logger.exception("Nexus lease session cleanup failed")
 
     def _request_started(self, lease_id: str | None) -> None:
         with self._activity:
@@ -572,7 +572,7 @@ class CodeModeHTTPServer:
         except (TypeError, ValueError) as exc:
             raise APIError(
                 "invalid_result",
-                f"Code Mode results must be valid JSON: {exc}",
+                f"Nexus results must be valid JSON: {exc}",
                 status=500,
             ) from exc
 
@@ -714,7 +714,7 @@ class CodeModeHTTPServer:
         except APIError as exc:
             return self._failure(exc)
         except Exception as exc:
-            logger.exception("Unhandled Code Mode API failure")
+            logger.exception("Unhandled Nexus API failure")
             return self._failure(
                 APIError("internal_error", str(exc) or type(exc).__name__, status=500)
             )

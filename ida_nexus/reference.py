@@ -339,7 +339,7 @@ def reference(query: str) -> str:
 
 def cli(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="ida-codemode reference",
+        prog="ida-nexus reference",
         description="Look up the active ida-domain API reference.",
     )
     parser.add_argument(

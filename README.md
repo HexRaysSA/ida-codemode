@@ -1,8 +1,8 @@
-# ida-codemode
+# ida-nexus
 
 ⚠️ Experimental prerelease ⚠️
 
-IDA Code Mode gives agents a compact Python execution surface over the
+IDA Nexus gives agents a compact Python execution surface over the
 [`ida-domain`](https://github.com/HexRaysSA/ida-domain) API. It will
 discover and share databases already open in the IDA GUI, and starts
 managed idalib workers only when no suitable instance exists.
@@ -41,23 +41,23 @@ codex plugin add ida-mcp@HexRaysSA
 ### [Pi](https://pi.dev/)
 
 ```bash
-pi install git:github.com/HexRaysSA/ida-codemode
+pi install git:github.com/HexRaysSA/ida-nexus
 ```
 
 ### [oh-my-pi](https://github.com/can1357/oh-my-pi)
 
 ```bash
-omp plugin install github:HexRaysSA/ida-codemode
+omp plugin install github:HexRaysSA/ida-nexus
 ```
 
 ### IDA GUI Support
 
-To support IDA GUI instances when using ida-codemode, install the plugin:
+To support IDA GUI instances when using ida-nexus, install the plugin:
 
 ```bash
-uvx ida-hcli plugin install ida-codemode
+uvx ida-hcli plugin install ida-nexus
 # or if you have hcli installed:
-hcli plugin install ida-codemode
+hcli plugin install ida-nexus
 ```
 
 ### Other agents
@@ -71,7 +71,7 @@ Configure a regular stdio MCP server in your MCP JSON configuration:
       "command": "uvx",
       "args": [
         "--with=ida-hcli",
-        "ida-codemode",
+        "ida-nexus",
         "mcp",
         "--agent=my-agent"
       ]
@@ -80,7 +80,7 @@ Configure a regular stdio MCP server in your MCP JSON configuration:
 }
 ```
 
-`uvx` resolves the latest stable `ida-codemode` release from PyPI, so this
+`uvx` resolves the latest stable `ida-nexus` release from PyPI, so this
 configuration does not need to be updated for each release. Pre-release
 dependency resolution is currently required because `ida-domain` is published
 as a development release.
@@ -105,36 +105,36 @@ To test the GUI integration, open something in IDA and ask your harness:
 
 ## Command line
 
-The package installs one `ida-codemode` command with subcommands:
+The package installs one `ida-nexus` command with subcommands:
 
 ```bash
 # MCP server (stdio/http)
-ida-codemode mcp --agent=my-agent
+ida-nexus mcp --agent=my-agent
 
 # Inspect MCP session logs
-ida-codemode dashboard --open
+ida-nexus dashboard --open
 
 # Export MCP session logs to ZIP
-ida-codemode logs
+ida-nexus logs
 
 # IDA Domain API reference
-ida-codemode reference "decompile function"
+ida-nexus reference "decompile function"
 
 # Execute Python against an IDB (command, script, repl)
-ida-codemode exec tests/crackme03/elf -c 'db.functions.get_all()'
+ida-nexus exec tests/crackme03/elf -c 'db.functions.get_all()'
 ```
 
-Run `ida-codemode COMMAND --help` for command-specific options.
+Run `ida-nexus COMMAND --help` for command-specific options.
 
 ## Python Package (Developers)
 
-You can build on `ida-codemode` as a library and reuse the database management
-functionality. Doing so will transparently allow other `ida-codemode` users
+You can build on `ida-nexus` as a library and reuse the database management
+functionality. Doing so will transparently allow other `ida-nexus` users
 to use IDBs concurrently and work together.
 
 ### Example scenarios
 
-Below are a few scenarios enabled by the `ida-codemode` library:
+Below are a few scenarios enabled by the `ida-nexus` library:
 
 - You have an executable open in the IDA GUI and would like to use the MCP without closing IDA.
 - Your main agent spawns 5 subagents to work on different parts of the IDB concurrently.
@@ -147,7 +147,7 @@ Below are a few scenarios enabled by the `ida-codemode` library:
 or idalib database; closing it releases only that lease.
 
 ```python
-from ida_codemode import DatabaseHandle, DatabaseOpenOptions
+from ida_nexus import DatabaseHandle, DatabaseOpenOptions
 
 options = DatabaseOpenOptions(
     startup_timeout=300,
@@ -163,7 +163,7 @@ with DatabaseHandle.open("firmware.bin", options=options) as handle:
     print(execution["result"])
 ```
 
-IDA import settings in `DatabaseOpenOptions` apply only when Code Mode imports a
+IDA import settings in `DatabaseOpenOptions` apply only when Nexus imports a
 new source file. They do not reconfigure a reused GUI, worker, or existing IDB.
 `execute_python()` is stateless by default; pass `persist_globals=True` to keep
 a lease-scoped Python namespace between calls.
@@ -171,7 +171,7 @@ a lease-scoped Python namespace between calls.
 Discovery returns public instance descriptors that support exact attachment:
 
 ```python
-from ida_codemode import DatabaseHandle, InstanceState, discover_databases
+from ida_nexus import DatabaseHandle, InstanceState, discover_databases
 
 ready = [
     item.instance for item in discover_databases() if item.state is InstanceState.READY
@@ -183,6 +183,6 @@ with DatabaseHandle.attach(ready[0]) as handle:
 `find_database_owner()` and `wait_database_released()` support clients that must
 safely replace an executable or IDB. `DatabaseManager` is the secondary API for
 MCP-style adapters that manage several handles and a current target. All
-supported Python names are exported directly from `ida_codemode`; underscore
+supported Python names are exported directly from `ida_nexus`; underscore
 modules and non-exported implementation modules are private.
 See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for more details.

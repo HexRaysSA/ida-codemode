@@ -1,4 +1,4 @@
-"""One-shot migration of pre-0.2 ida-codemode logs into semantic sessions."""
+"""One-shot migration of pre-0.2 ida-nexus logs into semantic sessions."""
 
 import argparse
 import hashlib
@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ida_codemode.paths import STATE_DIR
+from ida_nexus.paths import STATE_DIR
 
 DEFAULT_SOURCE = STATE_DIR / "logs"
 DEFAULT_DESTINATION = STATE_DIR / "sessions"
@@ -58,9 +58,9 @@ def _read_records(path: Path, report: list[str]) -> list[tuple[int, dict[str, An
 def _session_fields(record: dict[str, Any]) -> dict[str, Any]:
     nested = record.get("session")
     fields = dict(nested) if isinstance(nested, dict) else {}
-    codemode_id = record.get("codemode_id")
-    if isinstance(codemode_id, str) and codemode_id:
-        fields.setdefault("codemode_id", codemode_id)
+    nexus_id = record.get("nexus_id")
+    if isinstance(nexus_id, str) and nexus_id:
+        fields.setdefault("nexus_id", nexus_id)
     for field in _AGENT_FIELDS.values():
         value = record.get(field)
         if isinstance(value, str) and value:
@@ -73,9 +73,9 @@ def _session_key(fields: dict[str, Any], source: Path) -> tuple[str, str]:
         value = fields.get(field)
         if isinstance(value, str) and value:
             return kind, str(Path(value).expanduser())
-    codemode_id = fields.get("codemode_id")
-    if isinstance(codemode_id, str) and codemode_id:
-        return "codemode", codemode_id
+    nexus_id = fields.get("nexus_id")
+    if isinstance(nexus_id, str) and nexus_id:
+        return "nexus", nexus_id
     return "unattributed", str(source.resolve())
 
 

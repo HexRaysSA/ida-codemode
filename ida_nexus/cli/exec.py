@@ -4,7 +4,7 @@ import json
 import os
 import sys
 
-from ida_codemode import CodeModeError, DatabaseHandle, RemoteError
+from ida_nexus import NexusError, DatabaseHandle, RemoteError
 
 try:
     import readline  # noqa: F401  -- enables line editing in input()
@@ -32,7 +32,7 @@ def exec(handle: DatabaseHandle, code: str, filename: str, json_mode: bool) -> b
         else:
             print(f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return False
-    except CodeModeError as e:
+    except NexusError as e:
         print(f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return False
 
@@ -78,7 +78,7 @@ def repl(handle: DatabaseHandle):
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="ida-codemode exec",
+        prog="ida-nexus exec",
         description="Execute Python script or command in the context of an IDA database.",
     )
     parser.add_argument(

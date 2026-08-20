@@ -263,7 +263,7 @@ def spawn_worker(
 ) -> tuple[subprocess.Popen[bytes], Path]:
     suffix = os.urandom(3).hex()
     try:
-        executable = _find_console_script("ida-codemode")
+        executable = _find_console_script("ida-nexus")
     except FileNotFoundError as error:
         raise DatabaseOpenError(str(error)) from error
     command = _build_worker_command(
@@ -318,7 +318,7 @@ def _scan_until(
 ) -> list[DiscoveredDatabase]:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise TimeoutError("timed out scanning Code Mode instances")
+        raise TimeoutError("timed out scanning Nexus instances")
     return scan_instances(
         timeout=min(probe_timeout, remaining),
         deadline=deadline,

@@ -1,22 +1,22 @@
-"""Public exception hierarchy for IDA Code Mode clients."""
+"""Public exception hierarchy for IDA Nexus clients."""
 
 from typing import Any
 
 
-class CodeModeError(RuntimeError):
-    """Base class for recoverable IDA Code Mode service errors."""
+class NexusError(RuntimeError):
+    """Base class for recoverable IDA Nexus service errors."""
 
 
-class CodeModeConnectionError(CodeModeError):
-    """A Code Mode instance could not be reached or used."""
+class NexusConnectionError(NexusError):
+    """A Nexus instance could not be reached or used."""
 
 
-class DatabaseDisconnectedError(CodeModeConnectionError):
+class DatabaseDisconnectedError(NexusConnectionError):
     """A previously attached database instance disconnected permanently."""
 
 
-class RemoteError(CodeModeError):
-    """The Code Mode service rejected an operation with a structured error."""
+class RemoteError(NexusError):
+    """The Nexus service rejected an operation with a structured error."""
 
     def __init__(
         self,
@@ -31,7 +31,7 @@ class RemoteError(CodeModeError):
         self.details = details or {}
 
 
-class DatabaseOpenError(CodeModeError):
+class DatabaseOpenError(NexusError):
     """A requested database instance could not be resolved or opened."""
 
 
@@ -51,5 +51,5 @@ class WorkerStartError(DatabaseOpenError):
     """A managed idalib worker failed to become ready."""
 
 
-class DatabaseSelectionError(CodeModeError):
+class DatabaseSelectionError(NexusError):
     """A multi-database manager has no valid selected target."""

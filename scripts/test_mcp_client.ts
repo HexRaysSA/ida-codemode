@@ -3,7 +3,7 @@
  * Standalone probe for @modelcontextprotocol/sdk timeout and cancellation behavior.
  *
  * It spawns scripts/test_mcp.py over stdio, traces MCP messages, and runs either
- * a short scenario matrix or one configurable call. No ida-codemode code is used.
+ * a short scenario matrix or one configurable call. No ida-nexus code is used.
  *
  * Examples:
  *   node scripts/test_mcp_client.ts
@@ -79,7 +79,8 @@ function parseArgs(argv: string[]): Options {
   const options: Options = {
     scenario: "matrix",
     python:
-      process.env.PYTHON ?? (existsSync(PROJECT_PYTHON) ? PROJECT_PYTHON : "python3"),
+      process.env.PYTHON ??
+      (existsSync(PROJECT_PYTHON) ? PROJECT_PYTHON : "python3"),
     stdioMode: "async",
     seconds: 5,
     pollInterval: 0.05,
@@ -139,17 +140,39 @@ function parseArgs(argv: string[]): Options {
         break;
       case "--help":
       case "-h":
-        process.stdout.write(`Usage: node scripts/test_mcp_client.ts [options]\n\n`);
-        process.stdout.write(`  --scenario matrix|single     Run quick matrix (default) or one call\n`);
-        process.stdout.write(`  --python PATH                Python containing zeromcp\n`);
-        process.stdout.write(`  --stdio-mode async|sync      ZeroMCP stdio dispatcher mode\n`);
-        process.stdout.write(`  --seconds N                  Server-side sleep duration\n`);
-        process.stdout.write(`  --poll-interval N            Cancellation polling interval in seconds\n`);
-        process.stdout.write(`  --timeout-ms N               SDK request timeout; omit for SDK default\n`);
-        process.stdout.write(`  --abort-after-ms N           AbortSignal delay; omit for no abort\n`);
-        process.stdout.write(`  --ignore-cancellation        Server deliberately finishes after cancellation\n`);
-        process.stdout.write(`  --post-wait-ms N             Observe late server activity after rejection\n`);
-        process.stdout.write(`  --no-wire-trace              Hide raw MCP messages\n`);
+        process.stdout.write(
+          `Usage: node scripts/test_mcp_client.ts [options]\n\n`,
+        );
+        process.stdout.write(
+          `  --scenario matrix|single     Run quick matrix (default) or one call\n`,
+        );
+        process.stdout.write(
+          `  --python PATH                Python containing zeromcp\n`,
+        );
+        process.stdout.write(
+          `  --stdio-mode async|sync      ZeroMCP stdio dispatcher mode\n`,
+        );
+        process.stdout.write(
+          `  --seconds N                  Server-side sleep duration\n`,
+        );
+        process.stdout.write(
+          `  --poll-interval N            Cancellation polling interval in seconds\n`,
+        );
+        process.stdout.write(
+          `  --timeout-ms N               SDK request timeout; omit for SDK default\n`,
+        );
+        process.stdout.write(
+          `  --abort-after-ms N           AbortSignal delay; omit for no abort\n`,
+        );
+        process.stdout.write(
+          `  --ignore-cancellation        Server deliberately finishes after cancellation\n`,
+        );
+        process.stdout.write(
+          `  --post-wait-ms N             Observe late server activity after rejection\n`,
+        );
+        process.stdout.write(
+          `  --no-wire-trace              Hide raw MCP messages\n`,
+        );
         process.exit(0);
       default:
         throw new Error(`unknown argument: ${argument}`);
@@ -201,7 +224,8 @@ async function runScenario(client: Client, scenario: Scenario): Promise<void> {
     timeout?: number;
     signal?: AbortSignal;
   } = {};
-  if (scenario.timeoutMs !== undefined) requestOptions.timeout = scenario.timeoutMs;
+  if (scenario.timeoutMs !== undefined)
+    requestOptions.timeout = scenario.timeoutMs;
   if (controller !== undefined) requestOptions.signal = controller.signal;
 
   log("scenario_started", {
@@ -227,13 +251,15 @@ async function runScenario(client: Client, scenario: Scenario): Promise<void> {
     );
     log("scenario_resolved", {
       scenario: scenario.name,
-      client_elapsed_ms: Math.round((performance.now() - started) * 1000) / 1000,
+      client_elapsed_ms:
+        Math.round((performance.now() - started) * 1000) / 1000,
       result,
     });
   } catch (error) {
     log("scenario_rejected", {
       scenario: scenario.name,
-      client_elapsed_ms: Math.round((performance.now() - started) * 1000) / 1000,
+      client_elapsed_ms:
+        Math.round((performance.now() - started) * 1000) / 1000,
       ...errorFields(error),
     });
   } finally {
@@ -242,7 +268,10 @@ async function runScenario(client: Client, scenario: Scenario): Promise<void> {
 
   const postWaitMs = scenario.postWaitMs ?? 900;
   if (postWaitMs > 0) {
-    log("post_wait_started", { scenario: scenario.name, post_wait_ms: postWaitMs });
+    log("post_wait_started", {
+      scenario: scenario.name,
+      post_wait_ms: postWaitMs,
+    });
     await delay(postWaitMs);
   }
   log("scenario_finished", { scenario: scenario.name });

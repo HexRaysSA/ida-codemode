@@ -1,8 +1,8 @@
 {
   "IDAMetadataDescriptorVersion": 1,
   "plugin": {
-    "name": "ida-codemode",
-    "entryPoint": "ida_codemode_plugin.py",
+    "name": "ida-nexus",
+    "entryPoint": "ida_nexus_plugin.py",
     "categories": ["api-scripting-and-automation"],
     "keywords": ["python", "automation", "idalib", "ai"],
     "description": "Authenticated local Python execution for IDA GUI and command-line idalib sessions.",
@@ -16,10 +16,10 @@
       }
     ],
     "urls": {
-      "repository": "https://github.com/HexRaysSA/ida-codemode"
+      "repository": "https://github.com/HexRaysSA/ida-nexus"
     },
     "pythonDependencies": [
-      "ida-codemode==0.6.1"
+      "ida-nexus==0.6.1"
     ]
   }
 }

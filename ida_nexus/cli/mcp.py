@@ -1,6 +1,6 @@
-"""IDA Domain Code Mode MCP server.
+"""IDA Domain Nexus MCP server.
 
-This server exposes a compact Code Mode surface for the ida-domain API:
+This server exposes a compact Nexus surface for the ida-domain API:
 - reference(query): look up the active ida-domain API reference
 - open_database(...): attach to a GUI database or shared idalib worker
 - execute_python(code): run Python against an already-open database
@@ -46,9 +46,9 @@ from urllib.parse import urlparse
 from packaging.version import InvalidVersion, Version
 
 MCP_ENVIRONMENT_VARIABLES = (
-    "IDA_CODEMODE_ID",
+    "ida_nexus_ID",
     "IDAUSR",
-    "IDA_CODEMODE_STATE_DIR",
+    "ida_nexus_STATE_DIR",
 )
 
 
@@ -61,9 +61,9 @@ def _unset_empty_environment_variables() -> None:
 
 from zeromcp import McpServer, McpToolError
 
-from ida_codemode import (
+from ida_nexus import (
     CloseDatabaseResult,
-    CodeModeError,
+    NexusError,
     DatabaseManager,
     DatabaseSelectionError,
     ListDatabasesResult,
@@ -74,17 +74,17 @@ from ida_codemode import (
     get_ida_domain_version,
     get_state_dir,
 )
-from ida_codemode import (
+from ida_nexus import (
     reference as lookup_reference,
 )
-from ida_codemode.paths import _get_idausr_dir
-from ida_codemode.reference import _find_ida_domain_package_path
+from ida_nexus.paths import _get_idausr_dir
+from ida_nexus.reference import _find_ida_domain_package_path
 
 SESSIONS_DIR = get_state_dir() / "sessions"
 OPEN_TIMEOUT_SECONDS = 300
 EXECUTE_TIMEOUT_SECONDS = 360
 
-PACKAGE_VERSION = version("ida-codemode")
+PACKAGE_VERSION = version("ida-nexus")
 mcp = McpServer("ida", version=PACKAGE_VERSION)
 
 
@@ -148,13 +148,13 @@ class _TraceLogger:
 
 TRACE = _TraceLogger()
 _TRACE_CALL_ID: ContextVar[str | None] = ContextVar(
-    "ida_codemode_trace_call_id", default=None
+    "ida_nexus_trace_call_id", default=None
 )
 
 
 def _session_fields_from_meta(meta: dict[str, Any]) -> dict[str, Any]:
     fields: dict[str, Any] = {
-        "codemode_id": os.environ.get("IDA_CODEMODE_ID") or None,
+        "nexus_id": os.environ.get("ida_nexus_ID") or None,
     }
     for name in (
         "claude_session_path",
@@ -249,7 +249,7 @@ def _as_tool_error(error: Exception) -> McpToolError:
             if isinstance(value, str) and value:
                 sections.append(f"{label}:\n{value.rstrip()}")
         return McpToolError("\n\n".join(sections))
-    if isinstance(error, (CodeModeError, FileNotFoundError, ValueError)):
+    if isinstance(error, (NexusError, FileNotFoundError, ValueError)):
         return McpToolError(str(error))
     return McpToolError(str(error) or type(error).__name__)
 
@@ -424,7 +424,7 @@ def reference(
 
 class OpenDatabaseToolResult(OpenDatabaseResult):
     log_path: str
-    codemode_id: str | None
+    nexus_id: str | None
     hint: str
 
 
@@ -443,11 +443,11 @@ def open_database(
 
     result = DATABASE_MANAGER.open_database(path, set_current=set_current)
     session = _session_fields()
-    codemode_id = session.get("codemode_id")
+    nexus_id = session.get("nexus_id")
     return OpenDatabaseToolResult(
         **result,
         log_path=str(TRACE.path),
-        codemode_id=codemode_id if isinstance(codemode_id, str) else None,
+        nexus_id=nexus_id if isinstance(nexus_id, str) else None,
         hint=(
             "Call reference(query) to inspect the IDA Domain API before using "
             "execute_python; `db` and `ida_domain` are available globally."
@@ -535,9 +535,9 @@ async def execute_python(
 
 
 def _compatible_gui_plugin(plugin_dir: Path, required_version: str) -> bool:
-    """Check one plugin directory for a compatible ida-codemode install."""
+    """Check one plugin directory for a compatible ida-nexus install."""
     plugin_manifest = plugin_dir / "ida-plugin.json"
-    plugin_entrypoint = plugin_dir / "ida_codemode_plugin.py"
+    plugin_entrypoint = plugin_dir / "ida_nexus_plugin.py"
     if not plugin_entrypoint.is_file():
         return False
 
@@ -559,7 +559,7 @@ def _compatible_gui_plugin(plugin_dir: Path, required_version: str) -> bool:
 
 
 def _gui_plugin_installed() -> bool:
-    plugin_dir = _get_idausr_dir() / "plugins" / "ida-codemode"
+    plugin_dir = _get_idausr_dir() / "plugins" / "ida-nexus"
     return _compatible_gui_plugin(plugin_dir, PACKAGE_VERSION)
 
 
@@ -573,7 +573,7 @@ def list_databases() -> ListDatabasesToolResult:
     result = ListDatabasesToolResult(**DATABASE_MANAGER.list_databases())
     if not _gui_plugin_installed():
         result["hint"] = (
-            "To enable GUI database discovery: uvx ida-hcli plugin install https://github.com/HexRaysSA/ida-codemode"
+            "To enable GUI database discovery: uvx ida-hcli plugin install https://github.com/HexRaysSA/ida-nexus"
         )
     return result
 
@@ -681,7 +681,7 @@ def _serve(
             file=sys.stderr,
         )
 
-    print("Starting IDA Code Mode MCP server...")
+    print("Starting IDA Nexus MCP server...")
     print(
         f"Using ida-domain {get_ida_domain_version()} from {_find_ida_domain_package_path()}"
     )
@@ -785,8 +785,8 @@ def _report_session_main(platform: str) -> int:
 
 def cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="ida-codemode mcp",
-        description="IDA Domain Code Mode MCP server",
+        prog="ida-nexus mcp",
+        description="IDA Domain Nexus MCP server",
     )
     parser.add_argument(
         "--transport",

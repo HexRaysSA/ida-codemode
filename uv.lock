@@ -12,7 +12,7 @@ wheels = [
 ]
 
 [[package]]
-name = "ida-codemode"
+name = "ida-nexus"
 version = "0.6.1"
 source = { editable = "." }
 dependencies = [

@@ -1,7 +1,7 @@
 import argparse
 import json
 
-from ida_codemode import DatabaseHandle
+from ida_nexus import DatabaseHandle
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Example of using the public API")

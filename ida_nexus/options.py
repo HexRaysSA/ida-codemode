@@ -1,4 +1,4 @@
-"""Public options for opening or spawning an IDA Code Mode database."""
+"""Public options for opening or spawning an IDA Nexus database."""
 
 import math
 from collections.abc import Sequence

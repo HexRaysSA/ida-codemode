@@ -2,14 +2,14 @@ import importlib.util
 import tomllib
 from pathlib import Path
 
-import ida_codemode
+import ida_nexus
 
 
 def test_public_api_is_explicit_and_importable() -> None:
-    assert ida_codemode.__all__ == sorted(ida_codemode.__all__)
-    assert len(ida_codemode.__all__) == len(set(ida_codemode.__all__))
-    for name in ida_codemode.__all__:
-        assert getattr(ida_codemode, name) is not None
+    assert ida_nexus.__all__ == sorted(ida_nexus.__all__)
+    assert len(ida_nexus.__all__) == len(set(ida_nexus.__all__))
+    for name in ida_nexus.__all__:
+        assert getattr(ida_nexus, name) is not None
 
 
 def test_wheel_includes_every_console_script_module() -> None:
@@ -18,7 +18,7 @@ def test_wheel_includes_every_console_script_module() -> None:
         config = tomllib.load(file)
 
     scripts = config["project"]["scripts"]
-    assert scripts == {"ida-codemode": "ida_codemode.cli:main"}
+    assert scripts == {"ida-nexus": "ida_nexus.cli:main"}
 
     included = set(config["tool"]["hatch"]["build"]["targets"]["wheel"]["only-include"])
     for script, target in scripts.items():
@@ -31,16 +31,16 @@ def test_wheel_includes_every_console_script_module() -> None:
 
 def test_removed_public_looking_implementation_modules_are_gone() -> None:
     for module in (
-        "ida_codemode_dashboard",
-        "ida_codemode_exec",
-        "ida_codemode_mcp",
-        "ida_codemode.client",
-        "ida_codemode.database",
-        "ida_codemode.http",
-        "ida_codemode.registry",
-        "ida_codemode.resolver",
-        "ida_codemode.runtime",
-        "ida_codemode.serialization",
-        "ida_codemode.server",
+        "ida_nexus_dashboard",
+        "ida_nexus_exec",
+        "ida_nexus_mcp",
+        "ida_nexus.client",
+        "ida_nexus.database",
+        "ida_nexus.http",
+        "ida_nexus.registry",
+        "ida_nexus.resolver",
+        "ida_nexus.runtime",
+        "ida_nexus.serialization",
+        "ida_nexus.server",
     ):
         assert importlib.util.find_spec(module) is None

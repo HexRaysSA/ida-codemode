@@ -1,10 +1,10 @@
-"""Web dashboard for ida-codemode semantic sessions.
+"""Web dashboard for ida-nexus semantic sessions.
 
 Serves a local HTTP UI (stdlib only, no extra dependencies) that lists the
-JSONL traces under ``<IDAUSR>/codemode/sessions`` and renders each MCP/agent
+JSONL traces under ``<IDAUSR>/nexus/sessions`` and renders each MCP/agent
 session as a timeline linked to its Claude Code, Codex, Pi, or OMP transcript.
 
-Run with: ida-codemode dashboard [--host 127.0.0.1] [--port 8736] [--open]
+Run with: ida-nexus dashboard [--host 127.0.0.1] [--port 8736] [--open]
 """
 
 import argparse
@@ -23,8 +23,8 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
-from ida_codemode.cli.logs import LogArchiveError, open_log_archive
-from ida_codemode.paths import STATE_DIR
+from ida_nexus.cli.logs import LogArchiveError, open_log_archive
+from ida_nexus.paths import STATE_DIR
 
 DEFAULT_SESSIONS_DIR = STATE_DIR / "sessions"
 DEFAULT_HOST = "127.0.0.1"
@@ -205,7 +205,7 @@ class SessionSummary:
     errors: int = 0
     stopped: bool = False
     pid: int | None = None
-    codemode_id: str | None = None
+    nexus_id: str | None = None
     agent: str | None = None
     targets: list[dict[str, Any]] = field(default_factory=list)
     agent_sessions: dict[str, str] = field(default_factory=dict)
@@ -378,9 +378,9 @@ def _summarize_session(
             summary.session_id = server_id
 
         session = _record_session_fields(record)
-        codemode_id = session.get("codemode_id")
-        if isinstance(codemode_id, str) and codemode_id:
-            summary.codemode_id = codemode_id
+        nexus_id = session.get("nexus_id")
+        if isinstance(nexus_id, str) and nexus_id:
+            summary.nexus_id = nexus_id
         for kind in ("claude", "codex", "pi", "omp"):
             session_path = session.get(f"{kind}_session_path")
             if isinstance(session_path, str) and session_path:
@@ -445,7 +445,7 @@ def _scan_benchmark_runs(directory: Path) -> list[SessionSummary]:
     for run_dir in sorted(directory.iterdir()):
         if not run_dir.is_dir() or not _UUID_RE.match(run_dir.name):
             continue
-        mcp_trace = run_dir / "logs" / "ida-codemode" / "session.jsonl"
+        mcp_trace = run_dir / "logs" / "ida-nexus" / "session.jsonl"
         if not mcp_trace.is_file() or not _is_session_jsonl(mcp_trace):
             continue
         agent_transcript = run_dir / "logs" / "session.jsonl"
@@ -673,7 +673,7 @@ def _source_label() -> str:
 
 
 def _page(title: str, body: str, subtitle: str = "", standalone: bool = False) -> str:
-    heading = "ida-codemode dashboard"
+    heading = "ida-nexus dashboard"
     heading_html = (
         f"<h1>{_e(heading)}</h1>"
         if standalone
@@ -880,7 +880,7 @@ def render_index() -> str:
     summaries = _scan_sessions()
     if not summaries:
         return _page(
-            "ida-codemode dashboard",
+            "ida-nexus dashboard",
             '<div class="empty">No sessions found in '
             f"<code>{_e(_source_label())}</code>.<br>"
             "Open a database through the MCP server first.</div>",
@@ -900,7 +900,7 @@ def render_index() -> str:
 </div>
 <p class="muted" style="font-size:12px;margin-top:8px">Click a column header to sort.</p>
 """
-    return _page("ida-codemode dashboard", body)
+    return _page("ida-nexus dashboard", body)
 
 
 # --------------------------------------------------------------------------
@@ -1238,7 +1238,7 @@ def _interleave_transcript(
             if (
                 item.category == "tool"
                 and item.tool_name is not None
-                and _codemode_tool_name(item.tool_name) is not None
+                and _nexus_tool_name(item.tool_name) is not None
             ) or not _in_window(item.ts, lower, upper):
                 continue
             unsupported_class = (
@@ -1345,9 +1345,9 @@ def render_session(name: str, *, export: bool = False) -> str | None:
         meta_rows.append(("Agent", _e(summary.agent)))
     if models:
         meta_rows.append(("Model", _e(models)))
-    if summary.codemode_id:
+    if summary.nexus_id:
         meta_rows.append(
-            ("CodeMode ID", f'<span class="mono">{_e(summary.codemode_id)}</span>')
+            ("Nexus ID", f'<span class="mono">{_e(summary.nexus_id)}</span>')
         )
     if totals["has_tokens"]:
         meta_rows.append(("Tokens", _totals_summary_html(totals)))
@@ -1401,7 +1401,7 @@ def render_session(name: str, *, export: bool = False) -> str | None:
 {"".join(item[2] for item in events)}
 """
     return _page(
-        f"{summary.display_target} — ida-codemode",
+        f"{summary.display_target} — ida-nexus",
         body,
         subtitle=name,
         standalone=export,
@@ -1475,7 +1475,7 @@ def _message_bubble(
     )
 
 
-_CODEMODE_TOOL_NAMES = {
+_NEXUS_TOOL_NAMES = {
     "search",
     "reference",
     "open_database",
@@ -1486,7 +1486,7 @@ _CODEMODE_TOOL_NAMES = {
 }
 
 
-def _codemode_tool_name(tool_name: str) -> str | None:
+def _nexus_tool_name(tool_name: str) -> str | None:
     """Return the underlying IDA tool name across Claude, Codex, and Pi forms."""
     if tool_name.startswith("ida_"):
         candidate = tool_name[4:]
@@ -1498,14 +1498,14 @@ def _codemode_tool_name(tool_name: str) -> str | None:
             return None
     else:
         candidate = tool_name
-    return candidate if candidate in _CODEMODE_TOOL_NAMES else None
+    return candidate if candidate in _NEXUS_TOOL_NAMES else None
 
 
 def _tool_display_name(tool_name: str) -> str:
     """Render names consistently, including Pi's ida_ prefixed tools."""
-    codemode_name = _codemode_tool_name(tool_name)
-    if tool_name.startswith("ida_") and codemode_name:
-        return f"ida · {codemode_name}"
+    nexus_name = _nexus_tool_name(tool_name)
+    if tool_name.startswith("ida_") and nexus_name:
+        return f"ida · {nexus_name}"
     if not tool_name.startswith("mcp__"):
         return tool_name
     parts = tool_name.split("__")
@@ -1520,7 +1520,7 @@ def _tool_input_html(tool_name: str, tool_input: object) -> str:
     if isinstance(tool_input, dict):
         tool_input = {k: v for k, v in tool_input.items() if k != "_meta"}
         code = tool_input.get("code")
-        if _codemode_tool_name(tool_name) in (
+        if _nexus_tool_name(tool_name) in (
             "execute_python",
             "search",
         ) and isinstance(code, str):
@@ -2293,7 +2293,7 @@ def render_agent_session(session_path: str) -> str | None:
             '<div class="empty">Transcript was not included or no longer exists:<br>'
             f"<code>{_e(session_path)}</code></div>"
         )
-        return _page("missing transcript — ida-codemode", body)
+        return _page("missing transcript — ida-nexus", body)
 
     items, meta, kind, totals = _load_agent_items(session_path)
     if kind == "pi":
@@ -2345,7 +2345,7 @@ def render_agent_session(session_path: str) -> str | None:
 {transcript_html}
 """
     return _page(
-        f"{_path_name(session_path)} — ida-codemode",
+        f"{_path_name(session_path)} — ida-nexus",
         body,
         subtitle=f"{kind} session",
     )
@@ -2388,7 +2388,7 @@ def _dashboard_host_allowed(bound_host: str, host_header: str | None) -> bool:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "ida-codemode-dashboard"
+    server_version = "ida-nexus-dashboard"
 
     def log_message(self, format: str, *args: object) -> None:
         pass  # keep the console quiet
@@ -2412,7 +2412,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _not_found(self) -> None:
         self._send_html(
-            _page("not found — ida-codemode", '<div class="empty">Not found.</div>'),
+            _page("not found — ida-nexus", '<div class="empty">Not found.</div>'),
             status=404,
         )
 
@@ -2424,7 +2424,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return True
         self.close_connection = True
         self._send_html(
-            _page("forbidden — ida-codemode", '<div class="empty">Forbidden.</div>'),
+            _page("forbidden — ida-nexus", '<div class="empty">Forbidden.</div>'),
             status=403,
         )
         return False
@@ -2460,7 +2460,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001 -- pragma: no cover - defensive, renders a 500 instead of crashing the handler thread
             self._send_html(
                 _page(
-                    "error — ida-codemode",
+                    "error — ida-nexus",
                     f'<div class="empty">Internal error: {_e(exc)}</div>',
                 ),
                 status=500,
@@ -2476,7 +2476,7 @@ def serve(host: str, port: int, open_browser: bool = False) -> None:
 
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     url = f"http://{host}:{port}/"
-    print(f"ida-codemode dashboard: {url}")
+    print(f"ida-nexus dashboard: {url}")
     if ARCHIVE_PATH is not None:
         print(f"sessions archive: {ARCHIVE_PATH}")
     else:
@@ -2495,8 +2495,8 @@ def cli(argv: list[str] | None = None) -> int:
     global ARCHIVE_PATH, ARCHIVE_PATH_MAP, ARCHIVE_SESSION_AGENT_PATHS
     global ARCHIVE_SOURCE_PATHS, SESSIONS_DIR
     parser = argparse.ArgumentParser(
-        prog="ida-codemode dashboard",
-        description="Web dashboard for ida-codemode semantic sessions",
+        prog="ida-nexus dashboard",
+        description="Web dashboard for ida-nexus semantic sessions",
     )
     parser.add_argument("--host", default=DEFAULT_HOST, help="Bind address")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Bind port")
@@ -2510,7 +2510,7 @@ def cli(argv: list[str] | None = None) -> int:
         "--archive",
         "--sessions-zip",
         type=Path,
-        help="ZIP produced by ida-codemode logs",
+        help="ZIP produced by ida-nexus logs",
     )
     parser.add_argument(
         "--open", action="store_true", help="Open the dashboard in a browser"

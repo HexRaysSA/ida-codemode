@@ -1,13 +1,13 @@
 {
   "name": "ida-mcp",
   "version": "0.6.1",
-  "description": "Code Mode MCP server for the ida-domain API.",
+  "description": "Nexus MCP server for the ida-domain API.",
   "author": {
     "name": "Hex-Rays",
     "url": "https://hex-rays.com/"
   },
-  "homepage": "https://github.com/HexRaysSA/ida-codemode",
-  "repository": "https://github.com/HexRaysSA/ida-codemode.git",
+  "homepage": "https://github.com/HexRaysSA/ida-nexus",
+  "repository": "https://github.com/HexRaysSA/ida-nexus.git",
   "license": "MIT",
   "keywords": [
     "ida",
@@ -26,7 +26,7 @@
       "MCP",
       "Hooks"
     ],
-    "websiteURL": "https://github.com/HexRaysSA/ida-codemode",
+    "websiteURL": "https://github.com/HexRaysSA/ida-nexus",
     "defaultPrompt": [
       "Open an IDA database with the ida MCP server.",
       "Search ida-domain for function APIs.",

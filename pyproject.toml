@@ -1,7 +1,7 @@
 [project]
-name = "ida-codemode"
+name = "ida-nexus"
 version = "0.6.1"
-description = "Code Mode MCP server for the ida-domain API"
+description = "Nexus MCP server for the ida-domain API"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ida-codemode = "ida_codemode.cli:main"
+ida-nexus = "ida_nexus.cli:main"
 
 [dependency-groups]
 dev = [
@@ -26,8 +26,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 only-include = [
     "ida-plugin.json",
-    "ida_codemode_plugin.py",
-    "ida_codemode",
+    "ida_nexus_plugin.py",
+    "ida_nexus",
 ]
 
 [tool.pytest.ini_options]

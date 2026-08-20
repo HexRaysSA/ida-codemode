@@ -30,7 +30,7 @@ MCP lifecycle management. Low-level `DatabaseManager` users can set
 
 ```bash
 uv sync
-uv run ida-codemode mcp
+uv run ida-nexus mcp
 ```
 
 ## Releases
@@ -50,12 +50,12 @@ python scripts/bump_version.py release-minor
 
 An exact version is also accepted. The `--check` command verifies that every
 managed file has the same version. Each GitHub release also includes one
-`ida-codemode-plugin-<version>.zip` asset for direct installation with HCLI.
+`ida-nexus-plugin-<version>.zip` asset for direct installation with HCLI.
 
 The MCP server uses stdio by default. A local HTTP transport is also available:
 
 ```bash
-uv run ida-codemode mcp --transport http://127.0.0.1:5001 --agent inspector
+uv run ida-nexus mcp --transport http://127.0.0.1:5001 --agent inspector
 ```
 
 To manually play with the MCP, use the inspector:
@@ -71,15 +71,15 @@ The plugin registers the MCP server as `ida`, so Claude Code tool names are shor
 Clone the repo and launch Claude Code pointing at the checkout:
 
 ```bash
-git clone https://github.com/HexRaysSA/ida-codemode
-claude --plugin-dir ./ida-codemode
+git clone https://github.com/HexRaysSA/ida-nexus
+claude --plugin-dir ./ida-nexus
 ```
 
 After editing `plugin.json`, hooks, or the Python source, run `/reload-plugins` inside Claude Code to pick up the changes without restarting. The manifest runs the MCP via `uv run --project ${CLAUDE_PLUGIN_ROOT} ...`, so local Python edits are reflected immediately - no rebuild step.
 
 ## Opening databases
 
-Given an executable path, Code Mode normally uses `<executable>.i64`. Given an
+Given an executable path, Nexus normally uses `<executable>.i64`. Given an
 existing `.i64`, it uses that database directly.
 
 ```json
@@ -98,7 +98,7 @@ Resolution proceeds as follows:
 All conceptual database access is read/write. Use `save_database` when an
 explicit save is required.
 
-## Executing Code Mode Python
+## Executing Nexus Python
 
 `execute_python` accepts ordinary Python with the current ida-domain `Database`
 available globally as `db` and the imported package as `ida_domain`. A single
@@ -142,7 +142,7 @@ Run the endpoint benchmark against an existing IDB to compare client-visible
 latency across machines or revisions:
 
 ```bash
-uv run ida-codemode benchmark /path/to/database.i64 \
+uv run ida-nexus benchmark /path/to/database.i64 \
   --output benchmark.json
 ```
 
@@ -181,7 +181,7 @@ lease is exclusive; GUI and shared instances reject the request.
 ## Local state
 
 ```text
-<IDAUSR>/codemode/
+<IDAUSR>/nexus/
   instances/<record-id>.json
   instances/<record-id>.lock
   spawn/<idb-key>.lock
@@ -208,7 +208,7 @@ origins, and enforce bounded request decoding.
 Every MCP process writes one schema-1 JSONL trace:
 
 ```text
-<IDAUSR>/codemode/sessions/<mcp-server-id>.jsonl
+<IDAUSR>/nexus/sessions/<mcp-server-id>.jsonl
 ```
 
 The trace contains:
@@ -218,7 +218,7 @@ The trace contains:
 - executed Python and returned values;
 - database open, reuse, disconnection, save, and release events;
 - GUI or idalib record identity and worker log path;
-- Claude, Codex, Pi, and `IDA_CODEMODE_ID` session metadata.
+- Claude, Codex, Pi, and `ida_nexus_ID` session metadata.
 
 Tool calls and results are paired by `call_id`; the dashboard shows the same
 short call ID on both cards and exposes the full value in the badge tooltip and
@@ -235,9 +235,9 @@ the same way.
 Run the stdlib-only local dashboard with:
 
 ```bash
-uv run ida-codemode dashboard --open
-uv run ida-codemode dashboard --port 9000 \
-  --sessions-dir "$IDAUSR/codemode/sessions"
+uv run ida-nexus dashboard --open
+uv run ida-nexus dashboard --port 9000 \
+  --sessions-dir "$IDAUSR/nexus/sessions"
 ```
 
 The dashboard provides:
@@ -269,20 +269,20 @@ Only transcript paths referenced by semantic sessions may be served.
 
 Create a support ZIP containing every local semantic session, each linked
 Claude, Codex, or Pi transcript, and every file under
-`<IDAUSR>/codemode/logs/`:
+`<IDAUSR>/nexus/logs/`:
 
 ```bash
-uv run ida-codemode logs
-uv run ida-codemode logs --output support.zip
+uv run ida-nexus logs
+uv run ida-nexus logs --output support.zip
 ```
 
 Pass one or more semantic session files to collect only those sessions:
 
 ```bash
-uv run ida-codemode logs session-a.jsonl session-b.jsonl -o selected.zip
+uv run ida-nexus logs session-a.jsonl session-b.jsonl -o selected.zip
 ```
 
-The ZIP contains `ida-codemode-logs.json`, a schema-versioned JSON table of
+The ZIP contains `ida-nexus-logs.json`, a schema-versioned JSON table of
 contents mapping semantic and agent session paths to archive members. Missing
 linked transcripts are recorded in the TOC and reported as warnings.
 Operational logs are preserved beneath `logs/` without TOC entries because the
@@ -290,7 +290,7 @@ dashboard does not resolve or render them. Open a bundle without accessing the
 receiving machine's transcript paths with:
 
 ```bash
-uv run ida-codemode dashboard --archive support.zip --open
+uv run ida-nexus dashboard --archive support.zip --open
 ```
 
 `--sessions-zip` is an alias for `--archive`.
@@ -306,9 +306,9 @@ uv run python scripts/migrate_logs.py --dry-run --verbose  # print every discard
 uv run python scripts/migrate_logs.py
 ```
 
-It reads legacy logs from `<IDAUSR>/codemode/logs`, reconstructs sessions using
+It reads legacy logs from `<IDAUSR>/nexus/logs`, reconstructs sessions using
 per-request agent transcript paths or GUIDs, and writes the 0.2 schema under
-`<IDAUSR>/codemode/sessions`.
+`<IDAUSR>/nexus/sessions`.
 
 Migration never modifies source logs. Known `bridge_output` records are
 operational noise, so the default output reports a count per source file while
@@ -324,14 +324,14 @@ exposed as a console script for reuse and diagnostics. To verify that idalib
 initializes without opening a database:
 
 ```bash
-uv run ida-codemode worker --probe
+uv run ida-nexus worker --probe
 ```
 
 To open one executable or IDB in idalib and serve the same authenticated
 loopback HTTP API:
 
 ```bash
-uv run ida-codemode worker /path/to/target.elf
+uv run ida-nexus worker /path/to/target.elf
 ```
 
 It registers in the private registry just like a resolver-spawned worker, so

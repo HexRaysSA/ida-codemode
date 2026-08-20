@@ -11,9 +11,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
-import ida_codemode._resolver as resolver_mod
-import ida_codemode.handle as client_mod
-from ida_codemode import (
+import ida_nexus._resolver as resolver_mod
+import ida_nexus.handle as client_mod
+from ida_nexus import (
     DatabaseHandle,
     DatabaseManager,
     DatabaseOpenOptions,
@@ -23,8 +23,8 @@ from ida_codemode import (
     find_database_owner,
     wait_database_released,
 )
-from ida_codemode._http import RequestHandler
-from ida_codemode._registry import (
+from ida_nexus._http import RequestHandler
+from ida_nexus._registry import (
     PROTOCOL_VERSION,
     REGISTRY_DIR,
     DatabaseInstance,
@@ -36,17 +36,17 @@ from ida_codemode._registry import (
     find_gui_owner,
     scan_instances,
 )
-from ida_codemode._resolver import resolve_instance
-from ida_codemode._runtime import AnalysisState
-from ida_codemode._server import CodeModeHTTPServer
-from ida_codemode.cli import mcp as mcp_app
-from ida_codemode.cli.worker import (
+from ida_nexus._resolver import resolve_instance
+from ida_nexus._runtime import AnalysisState
+from ida_nexus._server import NexusHTTPServer
+from ida_nexus.cli import mcp as mcp_app
+from ida_nexus.cli.worker import (
     _build_ida_options,
     _image_base_to_paragraphs,
     _parse_image_base,
     _work_around_idapro_idausr_path_list,
 )
-from ida_codemode.cli.worker import (
+from ida_nexus.cli.worker import (
     _parser as worker_parser,
 )
 
@@ -162,7 +162,7 @@ def test_scan_reaps_a_record_after_its_lifetime_lock_dies(tmp_path: Path) -> Non
 
 def test_scan_blocks_an_unsupported_protocol_version(tmp_path: Path) -> None:
     registry_dir = REGISTRY_DIR
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
         AnalysisState(),
@@ -194,7 +194,7 @@ def test_scan_blocks_an_unsupported_protocol_version(tmp_path: Path) -> None:
 
 def test_scan_accepts_additive_protocol_fields() -> None:
     registry_dir = REGISTRY_DIR
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
         AnalysisState(),
@@ -242,7 +242,7 @@ def test_resolver_timeout_is_shared_across_registry_probes(
         time.sleep(timeout)
         return False, "timeout"
 
-    monkeypatch.setattr("ida_codemode._registry.probe_health", slow_probe)
+    monkeypatch.setattr("ida_nexus._registry.probe_health", slow_probe)
     started = time.monotonic()
     try:
         try:
@@ -345,7 +345,7 @@ def test_resolver_builds_worker_import_options(tmp_path: Path) -> None:
     output = tmp_path / "analysis" / "firmware.i64"
     source.write_bytes(b"binary")
     captured = {}
-    servers: list[CodeModeHTTPServer] = []
+    servers: list[NexusHTTPServer] = []
 
     def fake_spawner(
         source_path: str,
@@ -359,7 +359,7 @@ def test_resolver_builds_worker_import_options(tmp_path: Path) -> None:
             lease_grace=lease_grace,
             options=options,
         )
-        server = CodeModeHTTPServer(
+        server = NexusHTTPServer(
             StaticBackend(),
             InstanceIdentity(expected_idb, source_path, "idalib"),
             AnalysisState(),
@@ -445,7 +445,7 @@ def test_handle_close_does_not_wait_for_sse_heartbeat(tmp_path: Path) -> None:
     executable.write_bytes(b"binary")
     idb_path.write_bytes(b"idb")
     registry_dir = REGISTRY_DIR
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity(str(idb_path), str(executable), "gui"),
         AnalysisState(),
@@ -476,7 +476,7 @@ def test_public_discovery_owner_and_release_api(tmp_path: Path) -> None:
     idb_path = tmp_path / "sample.exe.i64"
     executable.write_bytes(b"binary")
     idb_path.write_bytes(b"idb")
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity(str(idb_path), str(executable), "gui"),
         AnalysisState(),
@@ -502,7 +502,7 @@ def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
     funny_idb = tmp_path / "saved-elsewhere.i64"
     executable.write_bytes(b"binary")
     funny_idb.write_bytes(b"idb")
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity(str(funny_idb), str(executable), "gui"),
         AnalysisState(),
@@ -532,21 +532,21 @@ def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
 
 
 def test_mcp_unsets_empty_forwarded_environment_variables(monkeypatch) -> None:
-    monkeypatch.setenv("IDA_CODEMODE_ID", "")
+    monkeypatch.setenv("ida_nexus_ID", "")
     monkeypatch.setenv("IDAUSR", "/tmp/ida-user")
-    monkeypatch.setenv("IDA_CODEMODE_STATE_DIR", "")
+    monkeypatch.setenv("ida_nexus_STATE_DIR", "")
 
     mcp_app._unset_empty_environment_variables()
 
-    assert "IDA_CODEMODE_ID" not in mcp_app.os.environ
+    assert "ida_nexus_ID" not in mcp_app.os.environ
     assert mcp_app.os.environ["IDAUSR"] == "/tmp/ida-user"
-    assert "IDA_CODEMODE_STATE_DIR" not in mcp_app.os.environ
+    assert "ida_nexus_STATE_DIR" not in mcp_app.os.environ
 
 
 def test_mcp_gui_plugin_requires_current_or_newer_version(tmp_path: Path) -> None:
-    plugin_dir = tmp_path / "plugins" / "ida-codemode"
+    plugin_dir = tmp_path / "plugins" / "ida-nexus"
     plugin_dir.mkdir(parents=True)
-    (plugin_dir / "ida_codemode_plugin.py").touch()
+    (plugin_dir / "ida_nexus_plugin.py").touch()
     manifest = plugin_dir / "ida-plugin.json"
 
     cases = {
@@ -564,9 +564,9 @@ def test_mcp_gui_plugin_requires_current_or_newer_version(tmp_path: Path) -> Non
 
 
 def test_mcp_gui_plugin_rejects_missing_or_invalid_version(tmp_path: Path) -> None:
-    plugin_dir = tmp_path / "plugins" / "ida-codemode"
+    plugin_dir = tmp_path / "plugins" / "ida-nexus"
     plugin_dir.mkdir(parents=True)
-    (plugin_dir / "ida_codemode_plugin.py").touch()
+    (plugin_dir / "ida_nexus_plugin.py").touch()
     manifest = plugin_dir / "ida-plugin.json"
 
     assert mcp_app._compatible_gui_plugin(plugin_dir, "1.2.3") is False
@@ -878,7 +878,7 @@ def test_mcp_session_fields_accept_omp_transcript() -> None:
             "unrelated": "ignored",
         }
     ) == {
-        "codemode_id": None,
+        "nexus_id": None,
         "omp_session_path": "/tmp/omp-session.jsonl",
     }
 
@@ -952,7 +952,7 @@ def test_list_databases_uses_idb_when_gui_executable_is_missing(tmp_path: Path) 
     registry_dir = REGISTRY_DIR
     idb_path = tmp_path / "open.i64"
     idb_path.write_bytes(b"idb")
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity(str(idb_path), str(tmp_path / "missing.exe"), "gui"),
         AnalysisState(),
@@ -986,7 +986,7 @@ def test_list_databases_prefers_existing_gui_executable(tmp_path: Path) -> None:
     executable = tmp_path / "open.exe"
     idb_path.write_bytes(b"idb")
     executable.write_bytes(b"binary")
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity(str(idb_path), str(executable), "gui"),
         AnalysisState(),
@@ -1009,7 +1009,7 @@ def test_paths_preserve_case_but_matching_is_case_insensitive(tmp_path: Path) ->
     # executable or the .i64 path.
     import sys
 
-    from ida_codemode._resolver import expected_idb_path, resolve_instance
+    from ida_nexus._resolver import expected_idb_path, resolve_instance
 
     idb_path = tmp_path / "MixedCase.exe.i64"
     executable = tmp_path / "MixedCase.exe"
@@ -1021,7 +1021,7 @@ def test_paths_preserve_case_but_matching_is_case_insensitive(tmp_path: Path) ->
     assert expected_idb_path(executable).endswith("MixedCase.exe.i64")
 
     registry_dir = REGISTRY_DIR
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity(str(idb_path), str(executable), "gui"),
         AnalysisState(),
@@ -1053,7 +1053,7 @@ def test_resolves_live_instance_when_idb_not_on_disk(tmp_path: Path) -> None:
     # saved. Attaching to that live instance must work via either the .i64 path
     # (which does not exist yet) or the executable path, without a premature
     # "database path does not exist" rejection.
-    from ida_codemode._resolver import resolve_instance
+    from ida_nexus._resolver import resolve_instance
 
     executable = tmp_path / "Fresh.exe"
     executable.write_bytes(b"binary")
@@ -1061,7 +1061,7 @@ def test_resolves_live_instance_when_idb_not_on_disk(tmp_path: Path) -> None:
     assert not idb_path.exists()
 
     registry_dir = REGISTRY_DIR
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity(str(idb_path), str(executable), "gui"),
         AnalysisState(),
@@ -1231,7 +1231,7 @@ def test_mcp_execution_waits_for_autoanalysis_once_per_database(
     idb_path.write_bytes(b"idb")
     analysis = AnalysisState()
     backend = RecordingBackend(analysis)
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         backend,
         InstanceIdentity(str(idb_path), str(executable), "gui"),
         analysis,
@@ -1275,7 +1275,7 @@ def test_gui_disconnect_invalidates_mcp_instance_without_spawning(
     executable = tmp_path / "open.exe"
     idb_path.write_bytes(b"idb")
     executable.write_bytes(b"binary")
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity(str(idb_path), str(executable), "gui"),
         AnalysisState(),
@@ -1303,7 +1303,7 @@ def test_gui_disconnect_invalidates_mcp_instance_without_spawning(
 
 
 def test_database_handle_reuses_http11_rpc_connection(tmp_path: Path) -> None:
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib"),
         AnalysisState(),
@@ -1384,11 +1384,11 @@ def test_fresh_worker_opens_source_instead_of_existing_idb(tmp_path: Path) -> No
             image_base=0x8000,
             new_database=True,
         ),
-        launcher=["ida-codemode", "worker"],
+        launcher=["ida-nexus", "worker"],
         record_suffix="abcdef",
     )
 
-    assert command[:3] == ["ida-codemode", "worker", str(source)]
+    assert command[:3] == ["ida-nexus", "worker", str(source)]
     assert command[command.index("--output-database") + 1] == str(expected_idb)
     assert command[command.index("--image-base") + 1] == "0x8000"
     assert "--new-database" in command
@@ -1409,11 +1409,11 @@ def test_existing_idb_drops_source_import_options(tmp_path: Path) -> None:
             processor="arm",
             file_type="Raw",
         ),
-        launcher=["ida-codemode", "worker"],
+        launcher=["ida-nexus", "worker"],
         record_suffix="abcdef",
     )
 
-    assert command[:3] == ["ida-codemode", "worker", str(expected_idb)]
+    assert command[:3] == ["ida-nexus", "worker", str(expected_idb)]
     assert "--image-base" not in command
     assert "--processor" not in command
     assert "--file-type" not in command
@@ -1457,11 +1457,11 @@ def test_worker_launch_forwards_all_ida_command_options(tmp_path: Path) -> None:
             no_segmentation=True,
             debug_flags=("ldr", "debugger"),
         ),
-        launcher=["ida-codemode", "worker"],
+        launcher=["ida-nexus", "worker"],
         record_suffix="abcdef",
     )
 
-    assert command[:2] == ["ida-codemode", "worker"]
+    assert command[:2] == ["ida-nexus", "worker"]
     assert "--auto-analysis" in command
     assert command[command.index("--image-base") + 1] == "0x8000"
     assert "--new-database" in command
@@ -1523,7 +1523,7 @@ def test_worker_launch_forwards_all_ida_command_options(tmp_path: Path) -> None:
 
 def test_await_ready_accepts_console_launcher_child_pid(tmp_path: Path) -> None:
     expected_idb = str(tmp_path / "sample.i64")
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity(expected_idb, str(tmp_path / "sample"), "idalib"),
         AnalysisState(),
@@ -1550,7 +1550,7 @@ def test_await_ready_accepts_console_launcher_child_pid(tmp_path: Path) -> None:
 
 def test_database_handle_attach_and_poll_use_exact_entry(tmp_path: Path) -> None:
     analysis = AnalysisState()
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
         analysis,
@@ -1580,7 +1580,7 @@ def test_database_handle_attach_and_poll_use_exact_entry(tmp_path: Path) -> None
 
 def test_multiple_leases_share_one_managed_server(tmp_path: Path) -> None:
     stopped = threading.Event()
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
         AnalysisState(),
@@ -1614,7 +1614,7 @@ def test_multiple_leases_share_one_managed_server(tmp_path: Path) -> None:
 
 def test_exclusive_managed_worker_can_shutdown_without_saving(tmp_path: Path) -> None:
     stopped = threading.Event()
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
         AnalysisState(),
@@ -1639,7 +1639,7 @@ def test_exclusive_managed_worker_can_shutdown_without_saving(tmp_path: Path) ->
 
 
 def test_managed_worker_shutdown_rejects_another_lease(tmp_path: Path) -> None:
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
         AnalysisState(),
@@ -1666,7 +1666,7 @@ def test_managed_worker_shutdown_rejects_another_lease(tmp_path: Path) -> None:
 
 def test_final_explicit_release_skips_startup_grace(tmp_path: Path) -> None:
     stopped = threading.Event()
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
         AnalysisState(),
@@ -1692,7 +1692,7 @@ def test_draining_owner_remains_discoverable_until_database_close(
     idb.write_bytes(b"database")
     stopped = threading.Event()
     registry_dir = REGISTRY_DIR
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
         AnalysisState(),
@@ -1741,7 +1741,7 @@ def test_draining_owner_remains_discoverable_until_database_close(
 
 def test_handle_keepalive_retains_idle_managed_worker(tmp_path: Path) -> None:
     stopped = threading.Event()
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         StaticBackend(),
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "idalib", managed=True),
         AnalysisState(),
@@ -1781,7 +1781,7 @@ def test_operation_cancellation_cannot_reach_successor(tmp_path: Path) -> None:
             self.cancelled_target = self.current
 
     backend = HandoffBackend()
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         backend,
         InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
         AnalysisState(),
@@ -1870,7 +1870,7 @@ def test_cancel_active_preserves_database_handle(tmp_path: Path) -> None:
     executable.write_bytes(b"binary")
     idb.write_bytes(b"idb")
     backend = CancellableBackend()
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         backend,
         InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
         AnalysisState(),
@@ -1935,7 +1935,7 @@ def test_database_close_cancels_its_active_execution(tmp_path: Path) -> None:
     executable.write_bytes(b"binary")
     idb.write_bytes(b"idb")
     backend = BlockingBackend()
-    server = CodeModeHTTPServer(
+    server = NexusHTTPServer(
         backend,
         InstanceIdentity(str(idb), str(executable), "idalib", managed=True),
         AnalysisState(),

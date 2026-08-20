@@ -18,11 +18,11 @@ def _get_idausr_dir() -> Path:
 
 
 def get_state_dir() -> Path:
-    """Return the directory where IDA Code Mode state is stored."""
-    state_dir = os.environ.get("IDA_CODEMODE_STATE_DIR")
+    """Return the directory where IDA Nexus state is stored."""
+    state_dir = os.environ.get("ida_nexus_STATE_DIR")
     if state_dir:
         return Path(state_dir).expanduser()
-    return _get_idausr_dir() / "codemode"
+    return _get_idausr_dir() / "nexus"
 
 
 def _find_console_script(name: str) -> str:

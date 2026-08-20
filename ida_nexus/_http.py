@@ -50,7 +50,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     """Authenticated HTTP/1.1 handler with bounded request decoding."""
 
     server: "LocalHTTPServer"  # pyright: ignore[reportIncompatibleVariableOverride]
-    server_version = "ida-codemode/0.6.1"  # NOTE: we cannot use importlib.metadata because ida-codemode is not a package in IDA
+    server_version = "ida-nexus/0.6.1"  # NOTE: we cannot use importlib.metadata because ida-nexus is not a package in IDA
     sys_version = ""
     protocol_version = "HTTP/1.1"
     timeout = 30
@@ -420,7 +420,7 @@ class LocalHTTPServer(HTTPServer):
         self._worker_count += 1
         worker = threading.Thread(
             target=self._connection_worker,
-            name=f"ida-codemode-http-{self._worker_count}",
+            name=f"ida-nexus-http-{self._worker_count}",
             daemon=True,
         )
         worker.start()

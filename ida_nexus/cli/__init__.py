@@ -1,4 +1,4 @@
-"""Command-line interface for ida-codemode."""
+"""Command-line interface for ida-nexus."""
 
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ class _HelpFormatter(argparse.HelpFormatter):
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="ida-codemode",
-        description="IDA Code Mode command-line tools",
+        prog="ida-nexus",
+        description="IDA Nexus command-line tools",
         formatter_class=_HelpFormatter,
     )
     commands = parser.add_subparsers(dest="command", metavar="COMMAND")
@@ -51,7 +51,7 @@ def _command(name: str) -> Callable[[list[str] | None], int]:
 
         return cli
     if name == "reference":
-        from ida_codemode.reference import cli
+        from ida_nexus.reference import cli
 
         return cli
     if name == "dashboard":

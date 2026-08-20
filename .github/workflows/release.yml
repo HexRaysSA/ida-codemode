@@ -79,17 +79,17 @@ jobs:
         run: |
           uv run --no-project python scripts/check_wheel.py dist/*.whl
           wheel=(dist/*.whl)
-          uvx --from "${wheel[0]}" ida-codemode --help >/dev/null
+          uvx --from "${wheel[0]}" ida-nexus --help >/dev/null
           for command in mcp dashboard exec logs benchmark worker; do
-            uvx --from "${wheel[0]}" ida-codemode "$command" --help >/dev/null
+            uvx --from "${wheel[0]}" ida-nexus "$command" --help >/dev/null
           done
 
       - name: Build IDA plugin archive
         run: |
           mkdir -p release-assets
           uv run --no-project python -m zipfile -c \
-            "release-assets/ida-codemode-plugin-$VERSION.zip" \
-            ida-plugin.json ida_codemode_plugin.py README.md
+            "release-assets/ida-nexus-plugin-$VERSION.zip" \
+            ida-plugin.json ida_nexus_plugin.py README.md
         env:
           VERSION: ${{ steps.version.outputs.version }}
 
@@ -99,7 +99,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add \
             package.json package-lock.json pyproject.toml uv.lock \
-            ida-plugin.json ida_codemode/_http.py \
+            ida-plugin.json ida_nexus/_http.py \
             .claude-plugin/plugin.json .codex-plugin/plugin.json
           git diff --cached --check
           if [[ "$RELEASE_TYPE" == "release-current" ]]; then

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep every ida-codemode version declaration in sync.
+"""Keep every ida-nexus version declaration in sync.
 
 The release workflow calls this script with one of ``dev``, ``release-patch``,
 or ``release-minor``. An exact version can also be supplied for local use.
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-PROJECT_NAME = "ida-codemode"
+PROJECT_NAME = "ida-nexus"
 VERSION_RE = re.compile(
     r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
     r"(?:(?:-dev\.|\.dev)(?P<dev>[1-9]\d*))?$"
@@ -37,7 +37,7 @@ MANAGED_FILES = (
     "pyproject.toml",
     "uv.lock",
     "ida-plugin.json",
-    "ida_codemode/_http.py",
+    "ida_nexus/_http.py",
     ".claude-plugin/plugin.json",
     ".codex-plugin/plugin.json",
 )
@@ -139,19 +139,19 @@ def _updated_files(old: str, new: str) -> dict[str, str]:
         )
     texts["uv.lock"] = uv_text
 
-    texts["ida_codemode/_http.py"] = _replace_exact(
-        texts["ida_codemode/_http.py"],
-        f'server_version = "ida-codemode/{old}"',
-        f'server_version = "ida-codemode/{new}"',
-        "ida_codemode/_http.py",
+    texts["ida_nexus/_http.py"] = _replace_exact(
+        texts["ida_nexus/_http.py"],
+        f'server_version = "ida-nexus/{old}"',
+        f'server_version = "ida-nexus/{new}"',
+        "ida_nexus/_http.py",
     )
 
-    # The plugin archive ships only the entry point; ida_codemode itself is
+    # The plugin archive ships only the entry point; ida_nexus itself is
     # installed from PyPI as a pythonDependency, pinned to this same release.
     texts["ida-plugin.json"] = _replace_exact(
         texts["ida-plugin.json"],
-        f'"ida-codemode=={old}"',
-        f'"ida-codemode=={new}"',
+        f'"ida-nexus=={old}"',
+        f'"ida-nexus=={new}"',
         "ida-plugin.json",
     )
     return texts

@@ -1,4 +1,4 @@
-"""Public discovery and lifecycle helpers for Code Mode instances."""
+"""Public discovery and lifecycle helpers for Nexus instances."""
 
 import math
 import time

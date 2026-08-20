@@ -1,9 +1,9 @@
-"""Public Python API for authenticated IDA Code Mode database sessions."""
+"""Public Python API for authenticated IDA Nexus database sessions."""
 
 from .errors import (
     AmbiguousDatabaseError,
-    CodeModeConnectionError,
-    CodeModeError,
+    NexusConnectionError,
+    NexusError,
     DatabaseBusyError,
     DatabaseDisconnectedError,
     DatabaseOpenError,
@@ -40,8 +40,8 @@ __all__ = [
     "AmbiguousDatabaseError",
     "AnalysisResult",
     "CloseDatabaseResult",
-    "CodeModeConnectionError",
-    "CodeModeError",
+    "NexusConnectionError",
+    "NexusError",
     "DatabaseBusyError",
     "DatabaseDisconnectedError",
     "DatabaseEventCallback",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke-test a live IDA Code Mode GUI or idalib endpoint."""
+"""Smoke-test a live IDA Nexus GUI or idalib endpoint."""
 
 import argparse
 import gzip
@@ -11,7 +11,7 @@ import time
 from http.client import HTTPConnection
 from urllib.parse import urlsplit
 
-from ida_codemode import InstanceState, discover_databases
+from ida_nexus import InstanceState, discover_databases
 
 
 class CheckFailed(RuntimeError):

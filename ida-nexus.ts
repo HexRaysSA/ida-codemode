@@ -28,7 +28,7 @@ const PACKAGE_VERSION = (
 // operation-specific timeouts.
 const CALL_TIMEOUT_MS = 2_147_483_647;
 const STDERR_CAPTURE_MAX_CHARS = 1024 * 1024;
-const STATUS_WIDGET_KEY = "ida-codemode:status-bar";
+const STATUS_WIDGET_KEY = "ida-nexus:status-bar";
 const STATUS_HIDE_DELAY_MS = 4000;
 
 type PiContent =
@@ -85,7 +85,7 @@ function renderToolCall(
   return new Text(text, 0, 0);
 }
 
-export default function idaCodemode(pi: ExtensionAPI) {
+export default function idaNexus(pi: ExtensionAPI) {
   const agentKind = "arktype" in pi && "zod" in pi ? "omp" : "pi";
   const sessionPathField = `${agentKind}_session_path`;
   let client: Client | undefined;
@@ -199,19 +199,19 @@ export default function idaCodemode(pi: ExtensionAPI) {
         "--with=ida-hcli",
         "--project",
         PACKAGE_ROOT,
-        "ida-codemode",
+        "ida-nexus",
         "mcp",
         `--agent=${agentKind}`,
       ],
       cwd: PACKAGE_ROOT,
       stderr: "pipe",
       env: {
-        ...(process.env.IDA_CODEMODE_ID
-          ? { IDA_CODEMODE_ID: process.env.IDA_CODEMODE_ID }
+        ...(process.env.ida_nexus_ID
+          ? { ida_nexus_ID: process.env.ida_nexus_ID }
           : {}),
         ...(process.env.IDAUSR ? { IDAUSR: process.env.IDAUSR } : {}),
-        ...(process.env.IDA_CODEMODE_STATE_DIR
-          ? { IDA_CODEMODE_STATE_DIR: process.env.IDA_CODEMODE_STATE_DIR }
+        ...(process.env.ida_nexus_STATE_DIR
+          ? { ida_nexus_STATE_DIR: process.env.ida_nexus_STATE_DIR }
           : {}),
       },
     });

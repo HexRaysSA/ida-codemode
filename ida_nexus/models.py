@@ -1,4 +1,4 @@
-"""Public result models returned by Code Mode database operations."""
+"""Public result models returned by Nexus database operations."""
 
 from typing import Any, TypedDict
 
