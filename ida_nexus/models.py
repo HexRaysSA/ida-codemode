@@ -1,6 +1,6 @@
 """Public result models returned by Nexus database operations."""
 
-from typing import Any, TypedDict
+from typing import Any, TypeAlias, TypedDict
 
 
 class PythonExecutionResult(TypedDict):
@@ -14,13 +14,8 @@ class AnalysisResult(TypedDict):
     complete: bool
 
 
-class DatabaseChangeEvent(TypedDict):
-    event_name: str
-    timestamp: int
-    revision: int
-    operation_id: str | None
-    operation_label: str | None
-    origin_id: str | None
+# IDB change payloads combine common metadata with event-specific fields.
+DatabaseChangeEvent: TypeAlias = dict[str, Any]
 
 
 class SaveResult(TypedDict):

@@ -4,7 +4,7 @@ import json
 import os
 import sys
 
-from ida_nexus import DatabaseHandle, NexusError, RemoteError
+from ida_nexus import DatabaseHandle, NexusError, RemoteError, RemoteExecutor
 
 try:
     import readline  # noqa: F401  -- enables line editing in input()
@@ -13,7 +13,7 @@ except ImportError:
 
 
 def exec(
-    handle: DatabaseHandle,
+    handle: RemoteExecutor,
     code: str,
     filename: str,
     json_mode: bool,
@@ -65,7 +65,7 @@ def exec(
     return True
 
 
-def repl(handle: DatabaseHandle) -> None:
+def repl(handle: RemoteExecutor) -> None:
     compiler, buf = codeop.CommandCompiler(), []
     interactive = sys.stdin.isatty()
     operation_label = "REPL: interactive" if interactive else "REPL: stdin"

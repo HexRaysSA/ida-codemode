@@ -611,9 +611,7 @@ class DatabaseHandle:
                 # Do not retry automatically: a POST may have executed before
                 # the connection failed. The next operation gets a fresh socket.
                 self._discard_rpc_connection(connection)
-                raise NexusConnectionError(
-                    f"Nexus request failed: {exc}"
-                ) from exc
+                raise NexusConnectionError(f"Nexus request failed: {exc}") from exc
             finally:
                 if operation_id is not None:
                     with self._lock:
@@ -630,9 +628,7 @@ class DatabaseHandle:
                 raise NexusConnectionError(
                     f"Nexus request failed with HTTP {status}"
                 ) from exc
-            raise NexusConnectionError(
-                "Nexus response was not valid JSON"
-            ) from exc
+            raise NexusConnectionError("Nexus response was not valid JSON") from exc
         if not isinstance(response_payload, dict):
             raise NexusConnectionError("Nexus response was not a JSON object")
         if status != 200 or (unwrap_result and not response_payload.get("ok")):
@@ -649,9 +645,7 @@ class DatabaseHandle:
                     status,
                     details,
                 )
-            raise NexusConnectionError(
-                f"Nexus request failed with HTTP {status}"
-            )
+            raise NexusConnectionError(f"Nexus request failed with HTTP {status}")
         return response_payload.get("result") if unwrap_result else response_payload
 
     def execute_python(
@@ -700,9 +694,7 @@ class DatabaseHandle:
             unwrap_result=False,
         )
         if not isinstance(result, dict) or not isinstance(result.get("complete"), bool):
-            raise NexusConnectionError(
-                "poll_autoanalysis returned an invalid result"
-            )
+            raise NexusConnectionError("poll_autoanalysis returned an invalid result")
         return result
 
     def wait_autoanalysis(
@@ -724,9 +716,7 @@ class DatabaseHandle:
             operation_id=operation_id or uuid.uuid4().hex,
         )
         if not isinstance(result, dict) or not isinstance(result.get("complete"), bool):
-            raise NexusConnectionError(
-                "wait_autoanalysis returned an invalid result"
-            )
+            raise NexusConnectionError("wait_autoanalysis returned an invalid result")
         return result
 
     def cancel_operation(self, operation_id: str) -> bool:
@@ -810,9 +800,7 @@ class DatabaseHandle:
             or result.get("shutting_down") is not True
             or result.get("save") is not save
         ):
-            raise NexusConnectionError(
-                "shutdown_database returned an invalid result"
-            )
+            raise NexusConnectionError("shutdown_database returned an invalid result")
         return result
 
     def _release_remote_lease(self) -> bool:

@@ -42,7 +42,7 @@ def read_with_helpers(db: Database, address: int) -> bytes:
     return keep_bytes(read_pair(db, address))
 
 
-@remote_ida
+@remote_ida(database=False)
 def direct_idapython(value: int) -> int:
     return value
 
@@ -53,7 +53,7 @@ def implicit_factory(db: Database, value: int) -> int:
     return value
 
 
-@remote_ida
+@remote_ida(database=False)
 def preserve_named_database(database: Database, value: int) -> int:
     del database
     return value

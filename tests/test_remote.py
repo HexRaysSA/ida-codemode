@@ -301,7 +301,8 @@ def test_remote_module_is_typed_persistent_source(
     module = RemoteModule(path, operation_label="module client")
 
     @module.function(timeout=3.0)
-    def add(value: int, step: int = 1) -> tuple[int, int]: ...
+    def add(value: int, step: int = 1) -> tuple[int, int]:
+        raise NotImplementedError
 
     handle = InProcessHandle(object())
     assert add(handle, 2) == (3, 1)
@@ -322,7 +323,8 @@ def test_remote_module_can_bind_database_aware_implementations(tmp_path) -> None
     module = RemoteModule(path)
 
     @module.function()
-    def read_byte(db: Database, address: int) -> bytes: ...
+    def read_byte(db: Database, address: int) -> bytes:
+        raise NotImplementedError
 
     handle = InProcessHandle(FakeDatabase())
     assert read_byte(handle, 0) == b"\x00"
@@ -350,7 +352,8 @@ def test_remote_module_json_codec_skips_typed_value_transform(tmp_path) -> None:
     module = RemoteModule(path, codec="json")
 
     @module.function
-    def payload(value: int) -> dict[str, int]: ...
+    def payload(value: int) -> dict[str, int]:
+        raise NotImplementedError
 
     handle = InProcessHandle(object())
     assert payload(handle, 7) == {"value": 7}
@@ -368,7 +371,8 @@ def test_remote_module_json_result_cannot_collide_with_retry_control(tmp_path) -
     module = RemoteModule(path, codec="json")
 
     @module.function
-    def payload() -> dict[str, object]: ...
+    def payload() -> dict[str, object]:
+        raise NotImplementedError
 
     handle = InProcessHandle(object())
     assert payload(handle) == {
@@ -414,7 +418,8 @@ def test_remote_module_rejects_signature_drift(tmp_path) -> None:
     with pytest.raises(TypeError, match="does not match"):
 
         @module.function
-        def operation(value: int, extra: int) -> int: ...
+        def operation(value: int, extra: int) -> int:
+            raise NotImplementedError
 
 
 def test_remote_module_rejects_different_default_values(tmp_path) -> None:
@@ -430,12 +435,14 @@ def test_remote_module_rejects_different_default_values(tmp_path) -> None:
     with pytest.raises(TypeError, match="does not match"):
 
         @module.function
-        def positional(step: int = 1) -> int: ...
+        def positional(step: int = 1) -> int:
+            raise NotImplementedError
 
     with pytest.raises(TypeError, match="does not match"):
 
         @module.function
-        def keyword(*, step: int = 1) -> int: ...
+        def keyword(*, step: int = 1) -> int:
+            raise NotImplementedError
 
 
 def test_remote_module_is_published_while_its_source_executes(tmp_path) -> None:
@@ -449,7 +456,8 @@ def test_remote_module_is_published_while_its_source_executes(tmp_path) -> None:
     module = RemoteModule(path)
 
     @module.function
-    def publication_state() -> bool: ...
+    def publication_state() -> bool:
+        raise NotImplementedError
 
     assert publication_state(InProcessHandle(object())) is True
 
@@ -469,7 +477,8 @@ def test_failed_remote_module_installation_is_removed_from_sys_modules(
     module = RemoteModule(path)
 
     @module.function
-    def operation() -> None: ...
+    def operation() -> None:
+        raise NotImplementedError
 
     modules_before = set(sys.modules)
     with pytest.raises(RuntimeError, match="installation failed"):

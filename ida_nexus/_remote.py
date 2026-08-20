@@ -277,7 +277,12 @@ def _validate_options(timeout: float | None, operation_label: OperationLabel) ->
 
 
 def _resolve_operation_label(operation_label: OperationLabel) -> str | None:
-    value = operation_label() if callable(operation_label) else operation_label
+    if isinstance(operation_label, str):
+        value = operation_label
+    elif operation_label is None:
+        return None
+    else:
+        value = operation_label()
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
@@ -387,12 +392,21 @@ def _stub_is_empty(definition: ast.FunctionDef) -> bool:
         and isinstance(body[0].value.value, str)
     ):
         body.pop(0)
-    return len(body) == 1 and (
-        isinstance(body[0], ast.Pass)
+    if len(body) != 1:
+        return False
+    statement = body[0]
+    return (
+        isinstance(statement, ast.Pass)
         or (
-            isinstance(body[0], ast.Expr)
-            and isinstance(body[0].value, ast.Constant)
-            and body[0].value.value is Ellipsis
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Constant)
+            and statement.value.value is Ellipsis
+        )
+        or (
+            isinstance(statement, ast.Raise)
+            and isinstance(statement.exc, ast.Name)
+            and statement.exc.id == "NotImplementedError"
+            and statement.cause is None
         )
     )
 
@@ -925,7 +939,6 @@ def remote_ida(
             (*helper_sources, function_source)
         )
         program = _RemoteProgram(source, filename)
-        declaration = cast(Callable[..., Any], selected)
         remote = RemoteFunction(
             program,
             function_name,
@@ -933,7 +946,7 @@ def remote_ida(
             timeout=timeout,
             operation_label=operation_label,
             codec="typed",
-            wrapped=declaration,
+            wrapped=selected,
         )
         if inject_database:
             remote.__signature__ = inspect.signature(selected).replace(

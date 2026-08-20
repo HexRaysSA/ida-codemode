@@ -229,9 +229,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             probe()
         except Exception as exc:  # noqa: BLE001 -- idalib may raise arbitrary errors
-            print(
-                f"[ida-nexus] idalib initialization failed: {exc}", file=sys.stderr
-            )
+            print(f"[ida-nexus] idalib initialization failed: {exc}", file=sys.stderr)
             return 1
         return 0
     if args.input is None:

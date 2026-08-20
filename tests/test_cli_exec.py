@@ -9,6 +9,8 @@ from typing import Any, Self
 
 import pytest
 
+from ida_nexus.models import PythonExecutionResult
+
 exec_module = importlib.import_module("ida_nexus.cli.exec")
 
 
@@ -22,7 +24,13 @@ class FakeHandle:
     def __exit__(self, *_args: object) -> None:
         pass
 
-    def execute_python(self, code: str, **kwargs: Any) -> dict[str, Any]:
+    def execute_python(
+        self,
+        code: str,
+        timeout: float | None = None,
+        **kwargs: Any,
+    ) -> PythonExecutionResult:
+        del timeout
         self.calls.append({"code": code, **kwargs})
         return {"result": None, "stdout": "", "stderr": ""}
 

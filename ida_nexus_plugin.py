@@ -160,9 +160,7 @@ class NexusPlugin(idaapi.plugin_t):
                 try:
                     self._runtime.database.unhook()
                 except Exception as exc:  # noqa: BLE001 -- best-effort SWIG cleanup
-                    ida_kernwin.msg(
-                        f"[ida-nexus] failed to detach database: {exc}\n"
-                    )
+                    ida_kernwin.msg(f"[ida-nexus] failed to detach database: {exc}\n")
             self._runtime = None
         if server is not None:
             # Release the lifetime lock only after detaching from the GUI IDB.

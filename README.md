@@ -265,8 +265,7 @@ tools = RemoteModule("remote_tools.py", operation_label="firmware browser")
 
 
 @tools.function(timeout=15)
-def decompile(address: str, include_addresses: bool = True) -> dict:
-    ...
+def decompile(address: str, include_addresses: bool = True) -> dict: ...
 
 
 result = decompile(handle, "0x401000")

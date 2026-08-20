@@ -50,7 +50,7 @@ class AnalysisState:
     def __init__(self) -> None:
         self.complete = threading.Event()
         self._completion_lock = threading.Lock()
-        self._completion_callbacks: list[Callable[[], None]] = []
+        self._completion_callbacks: list[Callable[[], object]] = []
 
     def mark_complete(self) -> None:
         with self._completion_lock:
@@ -62,7 +62,7 @@ class AnalysisState:
         for callback in callbacks:
             callback()
 
-    def add_completion_callback(self, callback: Callable[[], None]) -> None:
+    def add_completion_callback(self, callback: Callable[[], object]) -> None:
         with self._completion_lock:
             if self.complete.is_set():
                 run_now = True
