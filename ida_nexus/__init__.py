@@ -1,18 +1,26 @@
 """Public Python API for authenticated IDA Nexus database sessions."""
 
+from ._remote import (
+    OperationLabel,
+    RemoteCodec,
+    RemoteExecutor,
+    RemoteFunction,
+    RemoteModule,
+    remote_ida,
+)
 from .errors import (
     AmbiguousDatabaseError,
-    NexusConnectionError,
-    NexusError,
     DatabaseBusyError,
     DatabaseDisconnectedError,
     DatabaseOpenError,
     DatabaseSelectionError,
+    NexusConnectionError,
+    NexusError,
     NoDatabaseInstanceError,
     RemoteError,
     WorkerStartError,
 )
-from .handle import DatabaseHandle
+from .handle import DatabaseChangeSubscription, DatabaseHandle
 from .instances import (
     DatabaseInstance,
     DiscoveredDatabase,
@@ -31,7 +39,13 @@ from .manager import (
     SaveDatabaseResult,
     WaitAutoanalysisResult,
 )
-from .models import AnalysisResult, PythonExecutionResult, SaveResult, ShutdownResult
+from .models import (
+    AnalysisResult,
+    DatabaseChangeEvent,
+    PythonExecutionResult,
+    SaveResult,
+    ShutdownResult,
+)
 from .options import DatabaseOpenOptions
 from .paths import get_state_dir
 from .reference import get_ida_domain_version, reference
@@ -40,9 +54,9 @@ __all__ = [
     "AmbiguousDatabaseError",
     "AnalysisResult",
     "CloseDatabaseResult",
-    "NexusConnectionError",
-    "NexusError",
     "DatabaseBusyError",
+    "DatabaseChangeEvent",
+    "DatabaseChangeSubscription",
     "DatabaseDisconnectedError",
     "DatabaseEventCallback",
     "DatabaseHandle",
@@ -55,10 +69,17 @@ __all__ = [
     "DiscoveredDatabase",
     "InstanceState",
     "ListDatabasesResult",
+    "NexusConnectionError",
+    "NexusError",
     "NoDatabaseInstanceError",
     "OpenDatabaseResult",
+    "OperationLabel",
     "PythonExecutionResult",
+    "RemoteCodec",
     "RemoteError",
+    "RemoteExecutor",
+    "RemoteFunction",
+    "RemoteModule",
     "SaveDatabaseResult",
     "SaveResult",
     "ShutdownResult",
@@ -69,5 +90,6 @@ __all__ = [
     "get_ida_domain_version",
     "get_state_dir",
     "reference",
+    "remote_ida",
     "wait_database_released",
 ]

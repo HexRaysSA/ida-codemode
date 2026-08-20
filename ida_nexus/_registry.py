@@ -22,9 +22,17 @@ HOST = "127.0.0.1"
 REGISTRY_DIR = STATE_DIR / "instances"
 SPAWN_DIR = STATE_DIR / "spawn"
 LOG_DIR = STATE_DIR / "logs"
-PROTOCOL_VERSION = 5
+PROTOCOL_VERSION = 6
 DEFAULT_TIMEOUT = 1.0
 BackendName = Literal["gui", "idalib"]
+
+
+def _event_origin_id(lease_id: str) -> str:
+    """Derive a public event origin without exposing the control-capable lease ID."""
+    digest = hashlib.sha256(
+        b"ida-nexus-event-origin\0" + lease_id.encode("utf-8")
+    ).hexdigest()
+    return digest[:32]
 
 
 class InstanceState(str, Enum):

@@ -35,6 +35,8 @@ class NexusBackend(Protocol):
         timeout: float | None,
         *,
         lease_id: str | None = None,
+        operation_id: str | None = None,
+        operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
     ) -> Any: ...
@@ -46,6 +48,16 @@ class NexusBackend(Protocol):
     def wait_autoanalysis(self, timeout: float | None) -> dict[str, Any]: ...
 
     def save_database(self) -> dict[str, Any]: ...
+
+    def enable_idb_change_hook(self) -> None: ...
+
+    def disable_idb_change_hook(self) -> None: ...
+
+    def subscribe_idb_changes(self) -> Any: ...
+
+    def wait_idb_change(
+        self, subscriber: Any, timeout: float
+    ) -> dict[str, Any] | None: ...
 
 
 class NexusHTTPServer:
@@ -98,6 +110,10 @@ class NexusHTTPServer:
         self._pending_operations: set[tuple[str | None, str]] = set()
         self._cancelled_operations: set[tuple[str | None, str]] = set()
         self._stream_stop = threading.Event()
+        self._idb_event_subscribers = 0
+        self._idb_event_hook_lock = threading.Lock()
+        self._idb_event_hook_enabled = False
+        self.analysis_state.add_completion_callback(self._enable_idb_event_hook)
 
     @property
     def port(self) -> int | None:
@@ -255,29 +271,58 @@ class NexusHTTPServer:
             self._activity.notify_all()
             return lease
 
-    def _lease_closed(self, lease_id: str) -> None:
+    def _detach_lease(self, lease_id: str) -> tuple[bool, bool]:
+        """Detach a lease and report whether final managed shutdown is committed."""
+
         with self._activity:
             lease = self._leases.pop(lease_id, None)
             if lease is None:
-                return
+                # Preserve the final-shutdown result if the SSE disconnect
+                # raced an idempotent explicit release of the same lease.
+                shutdown_pending = bool(
+                    self.identity.managed
+                    and self._shutdown_requested
+                    and self._active_leases == 0
+                )
+                return False, shutdown_pending
             lease.stop.set()
             self._active_leases = len(self._leases)
-            if self._running_lease_id == lease_id:
-                # Keep operation handoff blocked until cancellation reaches the
-                # backend; otherwise a successor can become active and receive
-                # cancellation intended for the released lease.
+            # Treat cancellation and session cleanup like an active request so
+            # managed shutdown cannot close the IDB before cleanup completes.
+            self._active_requests += 1
+            shutdown_pending = False
+            if self._active_leases == 0:
+                self._shutdown_at = time.monotonic() + lease.keepalive
+                if self.identity.managed and lease.keepalive == 0:
+                    # Make a zero-keepalive final release deterministic: reject
+                    # a racing replacement lease while existing work unwinds.
+                    self._shutdown_requested = True
+                    shutdown_pending = True
+            self._activity.notify_all()
+            return True, shutdown_pending
+
+    def _finish_lease_close(self, lease_id: str) -> None:
+        try:
+            with self._activity:
+                owns_running_operation = self._running_lease_id == lease_id
+            if owns_running_operation:
+                # The backend lock keeps operation handoff blocked until this
+                # cancellation reaches the operation owned by the released lease.
                 try:
                     self.backend.cancel_active()
                 except Exception:
                     logger.exception("Nexus operation cancellation failed")
-            if self._active_leases == 0:
-                self._shutdown_at = time.monotonic() + lease.keepalive
-            self._activity.notify_all()
+            try:
+                self.backend.release_session(lease_id)
+            except Exception:
+                logger.exception("Nexus lease session cleanup failed")
+        finally:
+            self._request_finished()
 
-        try:
-            self.backend.release_session(lease_id)
-        except Exception:
-            logger.exception("Nexus lease session cleanup failed")
+    def _lease_closed(self, lease_id: str) -> None:
+        released, _shutdown_pending = self._detach_lease(lease_id)
+        if released:
+            self._finish_lease_close(lease_id)
 
     def _request_started(self, lease_id: str | None) -> None:
         with self._activity:
@@ -489,6 +534,90 @@ class NexusHTTPServer:
             after_send=lambda: self._lease_closed(lease_id),
         )
 
+    def _idb_event_subscribe(self) -> None:
+        with self._activity:
+            if self._draining or self._shutdown_requested:
+                raise APIError(
+                    "instance_draining", "The instance is shutting down", status=503
+                )
+            self._idb_event_subscribers += 1
+        if self.analysis_state.complete.is_set():
+            try:
+                self._enable_idb_event_hook()
+            except Exception:
+                self._idb_event_unsubscribe()
+                raise
+
+    def _enable_idb_event_hook(self) -> bool:
+        """Install the hook once analysis is complete and a subscriber remains."""
+        with self._idb_event_hook_lock:
+            with self._activity:
+                wanted = (
+                    self.analysis_state.complete.is_set()
+                    and self._idb_event_subscribers > 0
+                    and not self._draining
+                    and not self._shutdown_requested
+                )
+            if wanted and not self._idb_event_hook_enabled:
+                self.backend.enable_idb_change_hook()
+                self._idb_event_hook_enabled = True
+            return wanted
+
+    def _idb_event_unsubscribe(self) -> None:
+        with self._activity:
+            self._idb_event_subscribers -= 1
+            idle = self._idb_event_subscribers == 0
+        if not idle:
+            return
+        with self._idb_event_hook_lock:
+            with self._activity:
+                idle = self._idb_event_subscribers == 0
+            if idle and self._idb_event_hook_enabled:
+                self.backend.disable_idb_change_hook()
+                self._idb_event_hook_enabled = False
+
+    def _idb_events_response(self) -> HTTPResponse:
+        subscriber = self.backend.subscribe_idb_changes()
+        self._idb_event_subscribe()
+        unsubscribed = False
+
+        def unsubscribe_once() -> None:
+            nonlocal unsubscribed
+            if not unsubscribed:
+                unsubscribed = True
+                self._idb_event_unsubscribe()
+
+        def stream(file: BufferedIOBase) -> None:
+            while not self.analysis_state.complete.wait(self.heartbeat_interval):
+                if self._stream_stop.is_set():
+                    return
+                file.write(b": keepalive\n\n")
+                file.flush()
+            if self._stream_stop.is_set() or not self._enable_idb_event_hook():
+                return
+            while not self._stream_stop.is_set():
+                try:
+                    event = self.backend.wait_idb_change(
+                        subscriber, self.heartbeat_interval
+                    )
+                except OverflowError:
+                    return
+                if self._stream_stop.is_set():
+                    return
+                if event is None:
+                    file.write(b": keepalive\n\n")
+                else:
+                    payload = json.dumps(event, separators=(",", ":"))
+                    file.write(f"event: idb_changed\ndata: {payload}\n\n".encode())
+                file.flush()
+
+        return HTTPResponse(
+            status=200,
+            content_type="text/event-stream",
+            stream=stream,
+            after_send=unsubscribe_once,
+        )
+
     @staticmethod
     def _decode_object(body: bytes | None) -> dict[str, Any]:
         if not body:
@@ -525,6 +654,22 @@ class NexusHTTPServer:
                 "operation_id must be 1 to 128 characters",
             )
         return operation_id
+
+    @staticmethod
+    def _operation_label(payload: dict[str, Any]) -> str | None:
+        operation_label = payload.get("operation_label")
+        if operation_label is None:
+            return None
+        if (
+            not isinstance(operation_label, str)
+            or not operation_label.strip()
+            or len(operation_label) > 1024
+        ):
+            raise APIError(
+                "invalid_operation_label",
+                "operation_label must be 1 to 1024 non-whitespace characters",
+            )
+        return operation_label
 
     @staticmethod
     def _persist_globals(payload: dict[str, Any]) -> bool:
@@ -602,20 +747,31 @@ class NexusHTTPServer:
                     return self._lease_response(parameters)
                 return json_response(200, self._health_payload())
 
+            if method == "GET" and path == "/idb_events":
+                return self._idb_events_response()
+
             if method == "POST" and path == "/release_lease":
                 payload = self._decode_object(body)
                 lease_id = self._payload_lease_id(payload)
                 if lease_id is None:
                     raise APIError("invalid_lease", "lease_id is required")
                 release_id: str = lease_id
+                released, shutdown_pending = self._detach_lease(release_id)
 
-                def release() -> None:
-                    self._lease_closed(release_id)
+                def finish_release() -> None:
+                    if released:
+                        self._finish_lease_close(release_id)
 
                 return json_response(
                     200,
-                    {"ok": True, "result": {"released": True}},
-                    after_send=release,
+                    {
+                        "ok": True,
+                        "result": {
+                            "released": True,
+                            "shutdown_pending": shutdown_pending,
+                        },
+                    },
+                    after_send=finish_release,
                 )
 
             payload = (
@@ -667,6 +823,8 @@ class NexusHTTPServer:
                             "persist_globals requires an active lease",
                         )
                     filename = self._filename(payload)
+                    operation_id = self._operation_id(payload)
+                    operation_label = self._operation_label(payload)
                     return self._success(
                         self._run_operation(
                             lease_id,
@@ -674,10 +832,12 @@ class NexusHTTPServer:
                                 code,
                                 self._timeout(payload),
                                 lease_id=lease_id,
+                                operation_id=operation_id,
+                                operation_label=operation_label,
                                 persist_globals=persist_globals,
                                 filename=filename,
                             ),
-                            self._operation_id(payload),
+                            operation_id,
                         )
                     )
                 if method == "POST" and path == "/cancel_operation":

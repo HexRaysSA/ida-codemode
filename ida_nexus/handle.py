@@ -9,20 +9,228 @@ from collections.abc import Callable
 from types import TracebackType
 from typing import Any, Self
 
-from ._registry import HOST, DatabaseInstance
+from ._registry import HOST, DatabaseInstance, _event_origin_id
 from ._resolver import resolve_instance
 from .errors import (
-    NexusConnectionError,
     DatabaseDisconnectedError,
+    NexusConnectionError,
     RemoteError,
 )
-from .models import AnalysisResult, PythonExecutionResult, SaveResult, ShutdownResult
+from .instances import wait_database_released
+from .models import (
+    AnalysisResult,
+    DatabaseChangeEvent,
+    PythonExecutionResult,
+    SaveResult,
+    ShutdownResult,
+)
 from .options import MAX_KEEPALIVE_SECONDS, DatabaseOpenOptions
+
+# Closing an IDB may include a final save. Allow the same five-minute budget as
+# explicit saving plus a small margin for worker and registry teardown.
+DATABASE_CLOSE_TIMEOUT_SECONDS = 305.0
 
 # The server reaps an idle HTTP/1.1 connection after 30 seconds. Reconnect
 # proactively with headroom rather than discovering the close during a POST,
 # which cannot safely be retried after its execution status becomes ambiguous.
 RPC_CONNECTION_MAX_IDLE_SECONDS = 20.0
+
+
+class DatabaseChangeSubscription:
+    """A closeable iterator over one handle's IDB change notifications."""
+
+    def __init__(self, handle: "DatabaseHandle") -> None:
+        self._handle = handle
+        self._lock = threading.Lock()
+        self._closed = threading.Event()
+        self._connection: http.client.HTTPConnection | None = None
+        self._response: http.client.HTTPResponse | None = None
+        self._socket: socket.socket | None = None
+        with handle._lock:
+            if handle._closed.is_set():
+                raise NexusConnectionError("database handle is closed")
+            if handle._disconnected.is_set():
+                raise DatabaseDisconnectedError(
+                    handle._disconnect_reason or "database instance disconnected"
+                )
+            entry = handle._instance
+        self._open(entry)
+        with handle._lock:
+            if handle._closed.is_set() or handle._disconnected.is_set():
+                if handle._disconnected.is_set():
+                    error: NexusConnectionError = DatabaseDisconnectedError(
+                        handle._disconnect_reason or "database instance disconnected"
+                    )
+                else:
+                    error = NexusConnectionError("database handle is closed")
+            else:
+                handle._idb_subscriptions.add(self)
+                return
+        self._close(detach=False)
+        raise error
+
+    def _open(self, entry: DatabaseInstance) -> None:
+        connection = http.client.HTTPConnection(HOST, entry.port, timeout=10.0)
+        try:
+            connection.request(
+                "GET",
+                "/idb_events",
+                headers={
+                    "Accept": "text/event-stream",
+                    "Authorization": f"Bearer {entry._token}",
+                },
+            )
+            response = connection.getresponse()
+        except (OSError, http.client.HTTPException) as exc:
+            connection.close()
+            raise NexusConnectionError(
+                f"failed to subscribe to database changes: {exc}"
+            ) from exc
+        if response.status != 200:
+            body = response.read(4096).decode("utf-8", errors="replace")
+            connection.close()
+            raise NexusConnectionError(
+                "failed to subscribe to database changes: "
+                f"HTTP {response.status}: {body}"
+            )
+        stream_socket = connection.sock
+        if stream_socket is None and response.fp is not None:
+            raw = getattr(response.fp, "raw", None)
+            stream_socket = getattr(raw, "_sock", None)
+        if stream_socket is None:
+            response.close()
+            connection.close()
+            raise NexusConnectionError(
+                "failed to subscribe to database changes: socket unavailable"
+            )
+        stream_socket.settimeout(None)
+        self._connection = connection
+        self._response = response
+        self._socket = stream_socket
+
+    @property
+    def closed(self) -> bool:
+        return self._closed.is_set()
+
+    def __iter__(self) -> Self:
+        return self
+
+    def __next__(self) -> DatabaseChangeEvent:
+        event_name: bytes | None = None
+        event_data: list[bytes] = []
+        while True:
+            with self._lock:
+                if self._closed.is_set() or self._response is None:
+                    raise StopIteration
+                response = self._response
+            try:
+                line = response.readline()
+            except (
+                AttributeError,
+                OSError,
+                ValueError,
+                http.client.HTTPException,
+            ) as exc:
+                if self._handle._closed.is_set():
+                    raise StopIteration from None
+                if self._handle._disconnected.is_set():
+                    raise DatabaseDisconnectedError(
+                        self._handle.disconnect_reason
+                        or "database instance disconnected"
+                    ) from exc
+                if self._closed.is_set():
+                    raise StopIteration from None
+                self.close()
+                raise NexusConnectionError(
+                    f"database change stream failed: {exc}"
+                ) from exc
+            if not line:
+                if self._handle._closed.is_set():
+                    raise StopIteration
+                if self._handle._disconnected.is_set():
+                    raise DatabaseDisconnectedError(
+                        self._handle.disconnect_reason
+                        or "database instance disconnected"
+                    )
+                if self._closed.is_set():
+                    raise StopIteration
+                self.close()
+                raise NexusConnectionError("database change stream closed")
+
+            line = line.rstrip(b"\r\n")
+            if not line:
+                if event_name != b"idb_changed":
+                    event_name = None
+                    event_data = []
+                    continue
+                try:
+                    payload = json.loads(b"\n".join(event_data))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    self.close()
+                    raise NexusConnectionError(
+                        "database change event was not valid JSON"
+                    ) from exc
+                if not isinstance(payload, dict):
+                    self.close()
+                    raise NexusConnectionError(
+                        "database change event was not an object"
+                    )
+                return payload
+            if line.startswith(b":"):
+                continue
+            if line.startswith(b"event:"):
+                event_name = line[len(b"event:") :].lstrip()
+            elif line.startswith(b"data:"):
+                event_data.append(line[len(b"data:") :].lstrip())
+
+    def _close(self, *, detach: bool) -> None:
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        with self._lock:
+            response = self._response
+            connection = self._connection
+            stream_socket = self._socket
+            self._response = None
+            self._connection = None
+            self._socket = None
+        if stream_socket is not None:
+            try:
+                stream_socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        raw_stream = None
+        if response is not None and response.fp is not None:
+            raw_stream = getattr(response.fp, "raw", None)
+        if raw_stream is not None:
+            try:
+                raw_stream.close()
+            except OSError:
+                pass
+        if response is not None:
+            try:
+                response.close()
+            except (OSError, ValueError):
+                pass
+        if connection is not None:
+            connection.close()
+        if detach:
+            self._handle._forget_idb_subscription(self)
+
+    def close(self) -> None:
+        """Close this subscription without closing its database handle."""
+        self._close(detach=True)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.close()
 
 
 class DatabaseHandle:
@@ -43,6 +251,7 @@ class DatabaseHandle:
         self.path = path
         self.keepalive = float(keepalive)
         self._lease_id = uuid.uuid4().hex
+        self._event_origin_id = _event_origin_id(self._lease_id)
         self._on_disconnect = on_disconnect
         self._lock = threading.Lock()
         self._request_lock = threading.Lock()
@@ -57,6 +266,7 @@ class DatabaseHandle:
         self._lease_response: http.client.HTTPResponse | None = None
         self._lease_socket: socket.socket | None = None
         self._lease_thread: threading.Thread | None = None
+        self._idb_subscriptions: set[DatabaseChangeSubscription] = set()
         self._install_lease(instance)
         thread = threading.Thread(
             target=self._monitor_lease,
@@ -166,6 +376,15 @@ class DatabaseHandle:
     def disconnect_reason(self) -> str | None:
         return self._disconnect_reason
 
+    @property
+    def event_origin_id(self) -> str:
+        """Opaque identity attached to events produced through this handle."""
+        return self._event_origin_id
+
+    def owns_event(self, event: DatabaseChangeEvent) -> bool:
+        """Return whether an IDB event was produced through this handle."""
+        return event.get("origin_id") == self._event_origin_id
+
     def set_disconnect_callback(
         self,
         callback: Callable[["DatabaseHandle", str], None],
@@ -173,6 +392,23 @@ class DatabaseHandle:
         self._on_disconnect = callback
         if self._disconnected.is_set():
             callback(self, self._disconnect_reason or "database connection closed")
+
+    def subscribe_idb_events(self) -> DatabaseChangeSubscription:
+        """Open a closeable iterator of structured IDB events.
+
+        Each event includes its revision and execution attribution. The stream
+        can be opened while autoanalysis is running; the server sends its first
+        event only after initial autoanalysis has finished. A subscriber that
+        cannot keep up with the bounded server queue is disconnected rather
+        than receiving an incomplete event history.
+        """
+        return DatabaseChangeSubscription(self)
+
+    def _forget_idb_subscription(
+        self, subscription: DatabaseChangeSubscription
+    ) -> None:
+        with self._lock:
+            self._idb_subscriptions.discard(subscription)
 
     def _open_lease(
         self, entry: DatabaseInstance
@@ -263,11 +499,15 @@ class DatabaseHandle:
             response = self._lease_response
             connection = self._lease_connection
             rpc_connection = self._rpc_connection
+            subscriptions = tuple(self._idb_subscriptions)
+            self._idb_subscriptions.clear()
             self._lease_response = None
             self._lease_connection = None
             self._lease_socket = None
             self._rpc_connection = None
             self._rpc_last_used = None
+        for subscription in subscriptions:
+            subscription._close(detach=False)
         if response is not None:
             response.close()
         if connection is not None:
@@ -420,15 +660,22 @@ class DatabaseHandle:
         timeout: float | None = None,
         *,
         operation_id: str | None = None,
+        operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
     ) -> PythonExecutionResult:
-        """Execute Python; stateless execution resets this handle's namespace."""
+        """Execute Python with optional display attribution.
+
+        Stateless execution resets this handle's namespace. ``operation_label``
+        is opaque, untrusted display text propagated to IDB change events.
+        """
 
         payload: dict[str, Any] = {
             "code": code,
             "persist_globals": persist_globals,
         }
+        if operation_label is not None:
+            payload["operation_label"] = operation_label
         if filename is not None:
             payload["filename"] = filename
         if timeout is not None:
@@ -568,8 +815,8 @@ class DatabaseHandle:
             )
         return result
 
-    def _release_remote_lease(self) -> None:
-        """Best-effort lease release over a connection independent of RPC work."""
+    def _release_remote_lease(self) -> bool:
+        """Best-effort release; return whether it committed final IDB shutdown."""
 
         entry = self.instance
         connection = http.client.HTTPConnection(HOST, entry.port, timeout=2.0)
@@ -587,20 +834,51 @@ class DatabaseHandle:
             )
             response = connection.getresponse()
             try:
-                response.read()
+                payload = json.loads(response.read())
+                result = payload.get("result") if isinstance(payload, dict) else None
+                return bool(
+                    isinstance(result, dict) and result.get("shutdown_pending") is True
+                )
             finally:
                 response.close()
-        except (TimeoutError, OSError, http.client.HTTPException):
+        except (
+            TimeoutError,
+            OSError,
+            http.client.HTTPException,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ):
             # Closing the SSE socket below remains the authoritative fallback.
-            pass
+            return False
         finally:
             connection.close()
 
-    def close(self) -> None:
+    def close(
+        self,
+        *,
+        wait_for_database: bool = False,
+        timeout: float = DATABASE_CLOSE_TIMEOUT_SECONDS,
+    ) -> None:
+        """Release this lease and optionally wait for a final managed IDB close."""
+
+        if not isinstance(wait_for_database, bool):
+            raise TypeError("wait_for_database must be a boolean")
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout < 0
+        ):
+            raise ValueError("timeout must be a finite non-negative number")
         if self._closed.is_set():
             return
         self._closed.set()
-        self._release_remote_lease()
+        with self._lock:
+            subscriptions = tuple(self._idb_subscriptions)
+            self._idb_subscriptions.clear()
+        for subscription in subscriptions:
+            subscription._close(detach=False)
+        shutdown_pending = self._release_remote_lease()
         with self._lock:
             response = self._lease_response
             connection = self._lease_connection
@@ -642,6 +920,18 @@ class DatabaseHandle:
                 pass
         if connection is not None:
             connection.close()
+
+        if (
+            wait_for_database
+            and shutdown_pending
+            and not wait_database_released(
+                self.instance,
+                timeout=float(timeout),
+            )
+        ):
+            raise NexusConnectionError(
+                f"timed out after {float(timeout):g}s waiting for the IDB to close"
+            )
 
     def __enter__(self) -> Self:
         return self

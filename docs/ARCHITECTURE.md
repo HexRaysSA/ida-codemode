@@ -33,7 +33,7 @@ connection expresses one client's interest in an already-running database.
 | `ida_nexus/_server.py` | Nexus routes, instance publication, SSE lease/request accounting, and managed idle shutdown. |
 | `ida_nexus/_registry.py` | Canonical identity, cross-platform file locks, atomic records, health classification, and stale-record cleanup. |
 | `ida_nexus/_resolver.py` | GUI discovery, expected-IDB resolution, serialized worker spawning, import options, and startup diagnostics. |
-| `ida_nexus/handle.py` | Public `DatabaseHandle`, exact instance attachment, SSE lease monitoring, reusable HTTP RPC, execution, analysis polling/waiting, saving, and exclusive worker shutdown. |
+| `ida_nexus/handle.py` | Public `DatabaseHandle`, exact instance attachment, SSE lease and IDB-event streams, reusable HTTP RPC, execution, analysis polling/waiting, saving, and exclusive worker shutdown. |
 | `ida_nexus/manager.py` | Protocol-agnostic database attachment, local selection, per-handle operation serialization, lease cleanup, and lifecycle events. |
 | `ida_nexus/_runtime.py` | Serializes IDA operations onto IDA's main thread and provides the Nexus Python runtime. |
 | `ida_nexus/reference.py` | Builds and searches an AST-based reference from the installed ida-domain package and examples without importing ida-domain in the MCP process. |
@@ -185,6 +185,7 @@ Important routes are:
 |---|---|
 | `GET /health` | Authenticated record identity and liveness probe. |
 | `GET /health?sse=1` | Persistent client lease with periodic heartbeat and optional keepalive. |
+| `GET /idb_events` | Structured database-operation events after initial autoanalysis finishes. |
 | `POST /release_lease` | Idempotently release one identified client lease. |
 | `POST /execute_python` | Execute Nexus Python against the open database. |
 | `POST /cancel_operation` | Cooperatively cancel one lease-owned operation without releasing the database handle. |
@@ -222,14 +223,14 @@ poisoning the next operation.
 
 ## Protocol contract and versioning
 
-`PROTOCOL_VERSION` is currently `5`. It is an exact compatibility version for
+`PROTOCOL_VERSION` is currently `6`. It is an exact compatibility version for
 the private discovery registry and per-database HTTP API. There is no downgrade
 or highest-common-version negotiation: a scanner whose local version differs
 from a lock-held record marks that owner `BLOCKED` before probing HTTP. This is
 deliberate—starting a replacement could corrupt an IDB already owned by a peer
 that the scanner does not understand.
 
-Protocol version 5 consists of the following interoperable contracts.
+Protocol version 6 consists of the following interoperable contracts.
 
 ### Discovery contract
 
@@ -264,8 +265,9 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 |---|---|
 | `GET /health` | Raw health identity object described above. |
 | `GET /health?sse=1` | `text/event-stream`; accepts `lease_id` and bounded `keepalive` query values, emits one initial `health` event and heartbeat comments. |
-| `POST /release_lease` | `{lease_id}`; idempotently releases that lease after acknowledging the request. |
-| `POST /execute_python` | `{code, timeout?, lease_id?, operation_id?, persist_globals?, filename?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. Persistence defaults to false and requires an active lease. Execution does not implicitly wait for autoanalysis. |
+| `GET /idb_events` | `text/event-stream`; accepts subscribers immediately but installs its structured IDB hook only after initial autoanalysis completes. Each `idb_changed` payload is one event containing `event_name`, nanosecond Unix `timestamp`, monotonically increasing `revision`, event-specific fields, and nullable `origin_id`, `operation_id`, and `operation_label`. `origin_id` is an opaque, one-way-derived identity for the executing lease; it supports handle-local event recognition without disclosing the control-capable `lease_id`. The GUI plugin uses `IDA GUI` as the operation label outside `execute_python()` calls, covering direct UI actions and GUI-process background work. The hook is removed after the final subscriber disconnects. A subscriber that exceeds its bounded queue is disconnected rather than receiving an incomplete history. |
+| `POST /release_lease` | `{lease_id}`; idempotently detaches that lease and returns `{"released":true,"shutdown_pending":bool}`. A true `shutdown_pending` commits final zero-keepalive managed shutdown so the client may wait for the lifetime lock to be released. |
+| `POST /execute_python` | `{code, timeout?, lease_id?, operation_id?, operation_label?, persist_globals?, filename?}`; success is `{"ok":true,"result":{"result":...,"stdout":...,"stderr":...}}`. The optional operation label is opaque display text containing 1 to 1024 characters and at least one non-whitespace character. Persistence defaults to false and requires an active lease. Execution does not implicitly wait for autoanalysis. |
 | `POST /cancel_operation` | `{lease_id, operation_id}`; success is `{"ok":true,"result":{"cancelled":bool}}`. Cancellation is lease-scoped and preserves the handle. |
 | `POST /save_database` | `{lease_id?}`; success is `{"ok":true,"result":{"saved":true,"idb_path":...}}`. |
 | `POST /shutdown_database` | `{lease_id, save}`; the active lease must be exclusive and own a managed idalib worker. Success is `{"ok":true,"result":{"shutting_down":true,"save":bool}}`, after which teardown uses `Database.close(save=save)`. |
@@ -275,6 +277,7 @@ All non-streaming request bodies are JSON objects. The operation contracts are:
 Request-owned cancellation requires registry protocol version 3. Version 4 adds
 opt-in lease-scoped persistent Python namespaces. Version 5 requires execution
 results to be directly JSON-serializable and adds exclusive managed-worker
+shutdown. Version 6 reports when explicit lease release commits final managed
 shutdown. This prevents a new client from silently attaching to a GUI plugin or
 worker that cannot provide the lifecycle and execution semantics on which it
 relies.
@@ -303,6 +306,15 @@ They must already be JSON-compatible; unsupported Python or IDA objects and
 non-finite floats fail with `invalid_result` rather than being coerced into
 lossy strings or containers.
 
+The typed `remote_ida` and `RemoteModule` layer deliberately has a different
+lifetime from `persist_globals`. It installs content-addressed modules in the
+remote interpreter's `sys.modules`, following ordinary Python import semantics.
+Every handle attached to the same IDA process therefore observes the same module
+object, globals, caches, mutations, and cache eviction. A local per-handle
+installation marker only suppresses redundant checks; it is not an ownership or
+isolation boundary. Lease release does not unload these modules. A source change
+selects a new module name, and normal interpreter teardown releases all versions.
+
 ### When to bump the version
 
 The protocol version is not the package or release version. Readers and writers
@@ -327,8 +339,14 @@ protocol bump; it must not silently reinterpret an existing field.
 ## Shared leases and managed shutdown
 
 Each `DatabaseHandle` owns one authenticated SSE lease connection in addition
-to its on-demand RPC connection. Multiple handles, MCP servers, and agents may
-share the same instance. Closing one handle closes only its own connections.
+to its on-demand RPC connection. `subscribe_idb_events()` opens an optional,
+closeable SSE iterator whose revisions signal consumers to refresh cached IDB
+data. Multiple handles, MCP servers, and agents may share the same instance.
+Closing one handle closes only its own connections and event subscriptions.
+Each handle exposes its opaque `event_origin_id`; `owns_event()` compares it to
+an event's optional `origin_id`. The origin is derived from the private lease ID,
+so it remains stable for the handle lifetime without revealing the identifier
+used for cancellation, release, or persistent namespace ownership.
 
 The server emits heartbeat comments so crashed clients are detected when the
 next write fails. A fixed startup grace protects the race between worker
@@ -352,6 +370,12 @@ worker waits only for safe unwinding, not successful completion. Once no leases
 remain and the final lease's keepalive has expired, the worker stops serving,
 returns to the idalib main thread, saves/closes the IDB, then withdraws its
 registry record and exits.
+
+The `ida-nexus exec` adapter supplies an operation label for every execution:
+`REPL: interactive`, `REPL: stdin`, `REPL: command`, or
+`REPL: script <absolute path>`. Script labels retain the path suffix when the
+1024-character protocol limit requires truncation.
+
 A new lease before shutdown begins cancels pending shutdown. GUI instances are
 unmanaged and ignore zero leases.
 
@@ -380,7 +404,7 @@ Tools are:
 | `execute_python(code, instance_id=None, timeout=360, filename=None)` | Wait without a deadline for initial autoanalysis once through a separate handle request, then execute Python against the selected handle with the numeric execution-only timeout. |
 | `list_databases()` | Discover registered instances and identify this MCP server's handles. |
 | `save_database(instance_id=None)` | Explicitly save the selected database. |
-| `close_database(instance_id=None)` | Release this MCP server's handle; it is not a global close. |
+| `close_database(instance_id=None)` | Release this MCP server's handle. If that commits final managed shutdown, wait up to 305 seconds for the IDB close and lifetime-lock release; it is not a global close. |
 
 `--database` schedules a startup attachment without blocking MCP
 initialization; an operation that needs the current target waits for that

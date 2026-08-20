@@ -21,7 +21,7 @@ from ida_nexus._registry import (
     scan_instances,
 )
 from ida_nexus._resolver import expected_idb_path
-from ida_nexus.errors import NexusConnectionError, DatabaseSelectionError
+from ida_nexus.errors import DatabaseSelectionError, NexusConnectionError
 from ida_nexus.handle import DatabaseHandle
 from ida_nexus.models import PythonExecutionResult
 from ida_nexus.options import MAX_KEEPALIVE_SECONDS, DatabaseOpenOptions
@@ -397,6 +397,7 @@ class DatabaseManager:
         timeout: float | None = None,
         *,
         operation_id: str | None = None,
+        operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
     ) -> PythonExecutionResult:
@@ -417,6 +418,7 @@ class DatabaseManager:
                     code,
                     timeout=float(effective_timeout),
                     operation_id=operation_id,
+                    operation_label=operation_label,
                     persist_globals=persist_globals,
                     filename=filename,
                 )
@@ -573,9 +575,10 @@ class DatabaseManager:
             self._instances.pop(target_id)
             if self._current_instance_id == target_id:
                 self._current_instance_id = next(iter(self._instances), None)
-        # Do not wait for an operation owned by this handle. Releasing its lease
-        # asks the worker to cancel orphaned execution before shutting down.
-        session.handle.close()
+        # Do not take the operation lock: releasing the lease asks the worker to
+        # cancel orphaned execution. If this commits final managed shutdown,
+        # wait for the lifetime lock released after the IDB has finished closing.
+        session.handle.close(wait_for_database=True)
         self._emit(
             "database_released",
             instance_id=target_id,

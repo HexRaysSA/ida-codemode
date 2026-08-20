@@ -120,6 +120,11 @@ uvx ida-nexus reference "decompile function"
 uvx ida-nexus exec tests/crackme03/elf -c 'db.functions.get_all()'
 ```
 
+`exec` labels resulting database events by input mode: `REPL: interactive` for
+a terminal session, `REPL: stdin` for piped input, `REPL: command` for `-c`,
+and `REPL: script <absolute path>` for a script file. These labels are restored
+between executions like every other `execute_python()` provenance label.
+
 Run `uvx ida-nexus COMMAND --help` for command-specific options.
 
 ## Python Package (Developers)
@@ -163,6 +168,131 @@ IDA import settings in `DatabaseOpenOptions` apply only when Nexus imports a
 new source file. They do not reconfigure a reused GUI, worker, or existing IDB.
 `execute_python()` is stateless by default; pass `persist_globals=True` to keep
 a lease-scoped Python namespace between calls.
+
+Database changes are available as a closeable, blocking iterator. Each item is
+one structured IDB hook event with a monotonically increasing `revision`, a
+nanosecond Unix `timestamp`, the `operation_id` and optional untrusted
+`operation_label` active when IDA emitted it, and a nullable opaque `origin_id`.
+The origin is derived from the producing handle's private lease without exposing
+that control-capable lease ID. The GUI plugin labels events outside an
+`execute_python()` operation as `IDA GUI`; its background analysis and direct UI
+actions share that source:
+
+```python
+with handle.subscribe_idb_events() as events:
+    for event in events:
+        print(
+            event["event_name"],
+            event["revision"],
+            event["operation_id"],
+            event["operation_label"],
+            handle.owns_event(event),
+        )
+```
+
+`handle.owns_event(event)` identifies changes made through that handle without
+requiring the consumer to generate or retain operation IDs. `operation_id`
+remains available when correlation with one specific execution is useful.
+
+Each subscriber buffers at most 4096 events. A subscriber that falls behind is
+disconnected rather than receiving an incomplete history. The subscription can
+be opened before autoanalysis completes; hooks are installed after initial
+autoanalysis and removed when the final subscriber disconnects.
+
+`@remote_ida` turns an ordinary typed function into a synchronous remote
+callable. It can use IDAPython directly; no `db` parameter is required:
+
+```python
+from ida_nexus import DatabaseHandle, remote_ida
+
+
+@remote_ida(operation_label=lambda: f"IDA TUI: {active_user()}")
+def screen_address() -> int:
+    import ida_kernwin
+
+    return int(ida_kernwin.get_screen_ea())
+
+
+with DatabaseHandle.open("firmware.bin") as handle:
+    address = screen_address(handle)
+```
+
+When the first parameter is named `db`, ida-domain's database is injected
+automatically and removed from the caller signature:
+
+```python
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ida_domain import Database
+
+
+@remote_ida(timeout=10, operation_label="firmware browser")
+def read_bytes(db: Database, address: int, size: int) -> bytes:
+    return db.bytes.get_bytes_at(address, size) or b""
+
+
+header = read_bytes(handle, 0x401000, 16)
+```
+
+Use `database=True` to inject an unusually named first positional parameter, or
+`database=False` to treat a parameter named `db` as ordinary caller data. The
+explicit flag is also the static typing discriminator for those overrides.
+
+String labels and zero-argument label callables are supported. Callables are
+evaluated once per invocation, so a `ContextVar` or application user/session
+provider can produce labels such as `IDA TUI: alice`; installation and execution
+of that call receive the same resolved label.
+
+The first call installs a content-addressed module through any object satisfying
+`RemoteExecutor`; later calls send only encoded arguments and a short invocation.
+`RemoteExecutor` is structural, so tests can use an ordinary fake with
+`execute_python()`. Remote functions must be synchronous, source-backed `def`
+functions without closures or stacked decorators. Explicit `helpers=(...)`
+bundle reusable plain functions into the same installed module.
+
+Large or stateful implementations belong in a real Python module, not a string.
+`RemoteModule` reads and content-hashes that file, installs it once per IDA
+Python interpreter, keeps its module globals and caches alive, and validates
+declarations against the implementation signature:
+
+```python
+from ida_nexus import RemoteModule
+
+tools = RemoteModule("remote_tools.py", operation_label="firmware browser")
+
+
+@tools.function(timeout=15)
+def decompile(address: str, include_addresses: bool = True) -> dict:
+    ...
+
+
+result = decompile(handle, "0x401000")
+```
+
+`RemoteModule.function()` follows the same `db` naming convention and supports
+the same explicit `database=True` and `database=False` decorator-factory forms.
+Declarations for ordinary module functions have an empty body; database-aware
+functions may be their real import-safe implementation. Parameter names, kinds,
+and default expressions are checked against the implementation while the
+application imports.
+
+Installed remote modules use normal Python `sys.modules` semantics. Two handles
+attached to the same IDA process share the module object, including mutable
+globals, caches, and cache eviction. The client-side per-handle record is only an
+installation-check optimization; closing a handle does not unload the module.
+Use lease-scoped `persist_globals=True` execution instead when state must be
+private to one handle.
+
+The default `codec="typed"` preserves bytes and tuples. A module whose boundary
+is guaranteed JSON-native can use `codec="json"` to return large dictionaries
+and lists without an additional Python-level value walk.
+
+Arguments and results may recursively contain `None`, booleans, integers, finite
+floats, strings, bytes, lists, tuples, and string-keyed dictionaries. Unsupported
+values fail at the call boundary rather than silently degrading to strings.
 
 Discovery returns public instance descriptors that support exact attachment:
 

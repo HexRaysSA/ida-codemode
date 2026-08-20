@@ -10,13 +10,15 @@ import threading
 import time
 import traceback
 import warnings
+from collections import deque
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
+from weakref import WeakSet
 
-from ._registry import BackendName
-from .models import PythonExecutionResult
+from ._registry import BackendName, _event_origin_id
+from .models import DatabaseChangeEvent, PythonExecutionResult
 
 DEFAULT_TIMEOUT_SECONDS = 60.0
 SAVE_TIMEOUT_SECONDS = 300.0
@@ -47,9 +49,28 @@ class AnalysisState:
 
     def __init__(self) -> None:
         self.complete = threading.Event()
+        self._completion_lock = threading.Lock()
+        self._completion_callbacks: list[Callable[[], None]] = []
 
     def mark_complete(self) -> None:
-        self.complete.set()
+        with self._completion_lock:
+            if self.complete.is_set():
+                return
+            self.complete.set()
+            callbacks = tuple(self._completion_callbacks)
+            self._completion_callbacks.clear()
+        for callback in callbacks:
+            callback()
+
+    def add_completion_callback(self, callback: Callable[[], None]) -> None:
+        with self._completion_lock:
+            if self.complete.is_set():
+                run_now = True
+            else:
+                self._completion_callbacks.append(callback)
+                run_now = False
+        if run_now:
+            callback()
 
     def snapshot(self) -> dict[str, Any]:
         complete = self.complete.is_set()
@@ -278,6 +299,82 @@ def create_autoanalysis_hook(analysis_state: AnalysisState) -> Any:
     return hook_type()
 
 
+IDB_EVENT_QUEUE_LIMIT = 4096
+
+
+class IdbChangeSubscriber:
+    """One /idb_events connection's pending event queue."""
+
+    def __init__(self) -> None:
+        self.events: deque[DatabaseChangeEvent] = deque()
+        self.overflowed = False
+
+
+class IdbChangeState:
+    """Fan out structured IDB events to active subscribers."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._revision = 0
+        self._subscribers: WeakSet[IdbChangeSubscriber] = WeakSet()
+
+    def subscribe(self) -> IdbChangeSubscriber:
+        subscriber = IdbChangeSubscriber()
+        with self._condition:
+            self._subscribers.add(subscriber)
+        return subscriber
+
+    def record(
+        self,
+        event: dict[str, Any],
+        operation_id: str | None = None,
+        operation_label: str | None = None,
+        origin_id: str | None = None,
+    ) -> None:
+        with self._condition:
+            self._revision += 1
+            recorded_event: DatabaseChangeEvent = {
+                **event,
+                "revision": self._revision,
+                "operation_id": operation_id,
+                "operation_label": operation_label,
+                "origin_id": origin_id,
+            }
+            for subscriber in self._subscribers:
+                if subscriber.overflowed:
+                    continue
+                if len(subscriber.events) == IDB_EVENT_QUEUE_LIMIT:
+                    subscriber.events.clear()
+                    subscriber.overflowed = True
+                else:
+                    subscriber.events.append(recorded_event)
+            self._condition.notify_all()
+
+    def wait(
+        self, subscriber: IdbChangeSubscriber, timeout: float
+    ) -> DatabaseChangeEvent | None:
+        with self._condition:
+            changed = self._condition.wait_for(
+                lambda: bool(subscriber.events) or subscriber.overflowed,
+                timeout=timeout,
+            )
+            if not changed:
+                return None
+            if subscriber.overflowed:
+                raise OverflowError("IDB event subscriber fell behind")
+            return subscriber.events.popleft()
+
+
+def create_idb_change_hook(state: IdbChangeState) -> Any:
+    """Create the structured IDB hook without importing IDA at module load."""
+
+    from ._idb_events import IDBEventHook
+
+    # The IDA stubs model SWIG constructors with spurious args/kwargs.
+    hook_type: Any = IDBEventHook
+    return hook_type(state.record)
+
+
 class IDARuntime:
     """One uniform execute_sync runtime for GUI and idalib sessions."""
 
@@ -287,7 +384,9 @@ class IDARuntime:
         backend: BackendName,
         database: Any,
         analysis_state: AnalysisState,
+        idb_change_state: IdbChangeState,
         default_timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        unattributed_operation_label: str | None = None,
     ) -> None:
         # Library warnings would otherwise be captured as stderr and returned
         # to the agent alongside execution output.
@@ -310,7 +409,9 @@ class IDARuntime:
         self.backend = backend
         self.database = database
         self.analysis_state = analysis_state
+        self.idb_change_state = idb_change_state
         self.default_timeout = default_timeout
+        self.unattributed_operation_label = unattributed_operation_label
 
         self._operation_lock = threading.Lock()
         self._active_lock = threading.Lock()
@@ -320,6 +421,7 @@ class IDARuntime:
         self._active_thread_id: int | None = None
         self._active_interrupt_error: APIError | None = None
         self._session_namespaces: dict[str, dict[str, Any]] = {}
+        self._idb_change_hook: Any = None
 
     def _interrupt_active(
         self,
@@ -557,12 +659,55 @@ class IDARuntime:
                 ),
             )
 
+    def enable_idb_change_hook(self) -> None:
+        """Install the database-change hook. Idempotent."""
+
+        import ida_kernwin
+
+        def install() -> int:
+            if self._idb_change_hook is None:
+                hook = create_idb_change_hook(self.idb_change_state)
+                hook.operation_label = self.unattributed_operation_label
+                if not hook.hook():
+                    raise RuntimeError("IDA refused the database-change hook")
+                self._idb_change_hook = hook
+            return 1
+
+        ida_kernwin.execute_sync(install, ida_kernwin.MFF_FAST)
+        if self._idb_change_hook is None:
+            raise RuntimeError("IDA did not install the database-change hook")
+
+    def disable_idb_change_hook(self) -> None:
+        """Remove the database-change hook. Idempotent."""
+
+        import ida_kernwin
+
+        def uninstall() -> int:
+            if self._idb_change_hook is not None:
+                self._idb_change_hook.unhook()
+                self._idb_change_hook = None
+            return 1
+
+        ida_kernwin.execute_sync(uninstall, ida_kernwin.MFF_FAST)
+        if self._idb_change_hook is not None:
+            raise RuntimeError("IDA did not remove the database-change hook")
+
+    def subscribe_idb_changes(self) -> IdbChangeSubscriber:
+        return self.idb_change_state.subscribe()
+
+    def wait_idb_change(
+        self, subscriber: IdbChangeSubscriber, timeout: float
+    ) -> DatabaseChangeEvent | None:
+        return self.idb_change_state.wait(subscriber, timeout)
+
     def execute_python(
         self,
         code: str,
         timeout: float | None,
         *,
         lease_id: str | None = None,
+        operation_id: str | None = None,
+        operation_label: str | None = None,
         persist_globals: bool = False,
         filename: str | None = None,
     ) -> PythonExecutionResult:
@@ -572,40 +717,61 @@ class IDARuntime:
             filename = USER_CODE_FILENAME
 
         def execute() -> Any:
-            runtime = {
-                "db": self.database,
-                "ida_domain": ida_domain,
-            }
-            if not persist_globals:
-                if lease_id is not None:
-                    previous = self._session_namespaces.pop(lease_id, None)
-                    if previous is not None:
-                        previous.clear()
-                namespace = {
-                    "__builtins__": builtins.__dict__,
-                    "__name__": "__ida_nexus_execute__",
-                    **runtime,
+            hook = self._idb_change_hook
+            previous_operation: tuple[str | None, str | None, str | None] | None = None
+            if hook is not None:
+                previous_operation = (
+                    hook.operation_id,
+                    hook.operation_label,
+                    hook.origin_id,
+                )
+                hook.operation_id = operation_id
+                hook.operation_label = operation_label
+                hook.origin_id = (
+                    _event_origin_id(lease_id) if lease_id is not None else None
+                )
+            try:
+                runtime = {
+                    "db": self.database,
+                    "ida_domain": ida_domain,
                 }
-            else:
-                if lease_id is None:
-                    raise APIError(
-                        "invalid_lease",
-                        "persist_globals requires an active lease",
-                    )
-                namespace = self._session_namespaces.setdefault(lease_id, {})
-                # Runtime-owned globals remain valid even if a prior snippet
-                # rebound or deleted them; all other names behave like a REPL.
-                namespace.update(
-                    {
+                if not persist_globals:
+                    if lease_id is not None:
+                        previous = self._session_namespaces.pop(lease_id, None)
+                        if previous is not None:
+                            previous.clear()
+                    namespace = {
                         "__builtins__": builtins.__dict__,
                         "__name__": "__ida_nexus_execute__",
                         **runtime,
                     }
-                )
-            result = _execute_user_code(code, namespace, runtime, filename)
-            if inspect.isawaitable(result):
-                result = asyncio.run(result)
-            return result
+                else:
+                    if lease_id is None:
+                        raise APIError(
+                            "invalid_lease",
+                            "persist_globals requires an active lease",
+                        )
+                    namespace = self._session_namespaces.setdefault(lease_id, {})
+                    # Runtime-owned globals remain valid even if a prior snippet
+                    # rebound or deleted them; all other names behave like a REPL.
+                    namespace.update(
+                        {
+                            "__builtins__": builtins.__dict__,
+                            "__name__": "__ida_nexus_execute__",
+                            **runtime,
+                        }
+                    )
+                result = _execute_user_code(code, namespace, runtime, filename)
+                if inspect.isawaitable(result):
+                    result = asyncio.run(result)
+                return result
+            finally:
+                if previous_operation is not None:
+                    (
+                        hook.operation_id,
+                        hook.operation_label,
+                        hook.origin_id,
+                    ) = previous_operation
 
         return self._run_sync(
             execute,
