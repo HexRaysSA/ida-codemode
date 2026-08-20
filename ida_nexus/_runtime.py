@@ -49,9 +49,28 @@ class AnalysisState:
 
     def __init__(self) -> None:
         self.complete = threading.Event()
+        self._completion_lock = threading.Lock()
+        self._completion_callbacks: list[Callable[[], None]] = []
 
     def mark_complete(self) -> None:
-        self.complete.set()
+        with self._completion_lock:
+            if self.complete.is_set():
+                return
+            self.complete.set()
+            callbacks = tuple(self._completion_callbacks)
+            self._completion_callbacks.clear()
+        for callback in callbacks:
+            callback()
+
+    def add_completion_callback(self, callback: Callable[[], None]) -> None:
+        with self._completion_lock:
+            if self.complete.is_set():
+                run_now = True
+            else:
+                self._completion_callbacks.append(callback)
+                run_now = False
+        if run_now:
+            callback()
 
     def snapshot(self) -> dict[str, Any]:
         complete = self.complete.is_set()
@@ -655,6 +674,8 @@ class IDARuntime:
             return 1
 
         ida_kernwin.execute_sync(install, ida_kernwin.MFF_FAST)
+        if self._idb_change_hook is None:
+            raise RuntimeError("IDA did not install the database-change hook")
 
     def disable_idb_change_hook(self) -> None:
         """Remove the database-change hook. Idempotent."""
@@ -668,6 +689,8 @@ class IDARuntime:
             return 1
 
         ida_kernwin.execute_sync(uninstall, ida_kernwin.MFF_FAST)
+        if self._idb_change_hook is not None:
+            raise RuntimeError("IDA did not remove the database-change hook")
 
     def subscribe_idb_changes(self) -> IdbChangeSubscriber:
         return self.idb_change_state.subscribe()

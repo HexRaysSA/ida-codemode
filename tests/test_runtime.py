@@ -196,6 +196,25 @@ def test_idb_hook_starts_with_runtime_unattributed_label(
     assert hook.operation_label == "IDA GUI"
 
 
+def test_idb_hook_installation_requires_execute_sync_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _inline_runtime(monkeypatch)
+    monkeypatch.setattr(
+        runtime_module,
+        "create_idb_change_hook",
+        lambda _state: SimpleNamespace(operation_label=None, hook=lambda: True),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_kernwin",
+        SimpleNamespace(MFF_FAST=0, execute_sync=lambda _callback, _flags: -1),
+    )
+
+    with pytest.raises(RuntimeError, match="did not install"):
+        runtime.enable_idb_change_hook()
+
+
 def test_structured_hook_captures_renamed_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -242,6 +261,45 @@ def test_structured_hook_captures_renamed_event(
         "origin_id": None,
     }
     assert isinstance(event["timestamp"], int)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "idc",
+        SimpleNamespace(BADADDR=-1, get_name=lambda _ea: "target"),
+    )
+    refinfo = SimpleNamespace(
+        target=0x401000,
+        base=0,
+        tdelta=4,
+        flags=8,
+        type=lambda: 1,
+    )
+    hook.changing_op_type(
+        0x402000,
+        0,
+        SimpleNamespace(
+            ri=refinfo,
+            ec=SimpleNamespace(tid=0),
+            path=SimpleNamespace(len=0),
+            tid=0,
+            strtype=0,
+        ),
+    )
+
+    operand_event = state.wait(subscriber, timeout=1.0)
+    assert operand_event is not None
+    assert operand_event["event_name"] == "changing_op_type"
+    assert operand_event["opinfo"] == {
+        "kind": "offset",
+        "refinfo": {
+            "target": 0x401000,
+            "base": 0,
+            "tdelta": 4,
+            "flags": 8,
+            "ref_type": 1,
+            "target_name": "target",
+        },
+    }
 
 
 def test_stateless_execution_discards_persistent_lease_namespace(

@@ -113,6 +113,7 @@ class NexusHTTPServer:
         self._idb_event_subscribers = 0
         self._idb_event_hook_lock = threading.Lock()
         self._idb_event_hook_enabled = False
+        self.analysis_state.add_completion_callback(self._enable_idb_event_hook)
 
     @property
     def port(self) -> int | None:
@@ -540,6 +541,12 @@ class NexusHTTPServer:
                     "instance_draining", "The instance is shutting down", status=503
                 )
             self._idb_event_subscribers += 1
+        if self.analysis_state.complete.is_set():
+            try:
+                self._enable_idb_event_hook()
+            except Exception:
+                self._idb_event_unsubscribe()
+                raise
 
     def _enable_idb_event_hook(self) -> bool:
         """Install the hook once analysis is complete and a subscriber remains."""

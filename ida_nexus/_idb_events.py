@@ -427,20 +427,20 @@ class OpInfoModel(_Record):
 
         if opinfo is None:
             return None
-        ri = opinfo.ri_
+        ri = opinfo.ri
         if ri.type() != 0:
             return cls(kind="offset", refinfo=RefInfoModel.from_refinfo_t(ri))
-        ec = opinfo.ec_
+        ec = opinfo.ec
         if ec.tid != 0 and ec.tid != idc.BADADDR:
             return cls(kind="enum", enum_const=EnumConstModel.from_enum_const_t(ec))
-        path = opinfo.path_
+        path = opinfo.path
         if path.len > 0:
             return cls(kind="stroff", strpath=StrPathModel.from_strpath_t(path))
-        tid = opinfo.tid_
+        tid = opinfo.tid
         if tid != 0 and tid != idc.BADADDR:
             struct_name = ida_typeinf.get_tid_name(tid) or None
             return cls(kind="struct", struct_tid=tid, struct_name=struct_name)
-        strtype = opinfo.strtype_
+        strtype = opinfo.strtype
         if strtype != 0:
             return cls(kind="string", strtype=strtype)
         return None
@@ -461,20 +461,20 @@ class OpInfoModel(_Record):
             opinfo = ida_nalt.opinfo_t()
             if ida_bytes.get_opinfo(opinfo, ea, n, flags):
                 return cls(
-                    kind="enum", enum_const=EnumConstModel.from_enum_const_t(opinfo.ec_)
+                    kind="enum", enum_const=EnumConstModel.from_enum_const_t(opinfo.ec)
                 )
         if ida_bytes.is_stroff(flags, n):
             opinfo = ida_nalt.opinfo_t()
             if ida_bytes.get_opinfo(opinfo, ea, n, flags):
                 return cls(
-                    kind="stroff", strpath=StrPathModel.from_strpath_t(opinfo.path_)
+                    kind="stroff", strpath=StrPathModel.from_strpath_t(opinfo.path)
                 )
         if ida_bytes.is_struct(flags):
             opinfo = ida_nalt.opinfo_t()
             if ida_bytes.get_opinfo(opinfo, ea, n, flags):
-                struct_name = ida_typeinf.get_tid_name(opinfo.tid_) or None
+                struct_name = ida_typeinf.get_tid_name(opinfo.tid) or None
                 return cls(
-                    kind="struct", struct_tid=opinfo.tid_, struct_name=struct_name
+                    kind="struct", struct_tid=opinfo.tid, struct_name=struct_name
                 )
         return None
 

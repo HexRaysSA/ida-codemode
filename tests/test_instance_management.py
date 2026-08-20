@@ -14,6 +14,8 @@ from typing import Any, cast
 import ida_nexus._resolver as resolver_mod
 import ida_nexus.handle as client_mod
 from ida_nexus import (
+    DatabaseChangeSubscription,
+    DatabaseDisconnectedError,
     DatabaseHandle,
     DatabaseManager,
     DatabaseOpenOptions,
@@ -1659,9 +1661,6 @@ def test_database_handle_exposes_closeable_idb_event_iterator(tmp_path: Path) ->
         with handle.subscribe_idb_events() as events:
             assert events in handle._idb_subscriptions
             analysis.mark_complete()
-            deadline = time.monotonic() + 1
-            while not server._idb_event_hook_enabled and time.monotonic() < deadline:
-                time.sleep(0.01)
             assert server._idb_event_hook_enabled
             backend.record_idb_change(
                 "first",
@@ -1719,6 +1718,68 @@ def test_database_handle_closes_idb_event_iterators(tmp_path: Path) -> None:
         assert stopped.wait(1)
         reader.join(timeout=1)
         assert not reader.is_alive()
+    finally:
+        handle.close()
+        server.stop()
+        server.release_registration()
+
+
+def test_public_idb_event_subscription_closes_with_handle(tmp_path: Path) -> None:
+    analysis = AnalysisState()
+    analysis.mark_complete()
+    server = NexusHTTPServer(
+        StaticBackend(),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
+        analysis,
+        REGISTRY_DIR,
+        heartbeat_interval=0.02,
+    )
+    server.start()
+    assert server.entry is not None
+    handle = DatabaseHandle.attach(server.entry)
+    events = DatabaseChangeSubscription(handle)
+    try:
+        assert events in handle._idb_subscriptions
+        handle.close()
+        assert events.closed
+    finally:
+        handle.close()
+        server.stop()
+        server.release_registration()
+
+
+def test_idb_event_iterator_reports_handle_disconnect(tmp_path: Path) -> None:
+    analysis = AnalysisState()
+    analysis.mark_complete()
+    server = NexusHTTPServer(
+        StaticBackend(),
+        InstanceIdentity("/tmp/test.i64", "/tmp/test", "gui"),
+        analysis,
+        REGISTRY_DIR,
+        heartbeat_interval=0.02,
+    )
+    server.start()
+    assert server.entry is not None
+    handle = DatabaseHandle.attach(server.entry)
+    events = handle.subscribe_idb_events()
+    errors: list[DatabaseDisconnectedError] = []
+
+    def read_event() -> None:
+        try:
+            next(events)
+        except DatabaseDisconnectedError as exc:
+            errors.append(exc)
+
+    reader = threading.Thread(target=read_event, daemon=True)
+    reader.start()
+    try:
+        time.sleep(0.05)
+        handle._mark_disconnected("database connection lost")
+        reader.join(timeout=1)
+        assert not reader.is_alive()
+        assert len(errors) == 1
+        assert isinstance(errors[0], DatabaseDisconnectedError)
+        assert str(errors[0]) == "database connection lost"
     finally:
         handle.close()
         server.stop()

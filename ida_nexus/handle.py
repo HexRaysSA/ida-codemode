@@ -39,14 +39,35 @@ RPC_CONNECTION_MAX_IDLE_SECONDS = 20.0
 class DatabaseChangeSubscription:
     """A closeable iterator over one handle's IDB change notifications."""
 
-    def __init__(self, handle: "DatabaseHandle", entry: DatabaseInstance) -> None:
+    def __init__(self, handle: "DatabaseHandle") -> None:
         self._handle = handle
         self._lock = threading.Lock()
         self._closed = threading.Event()
         self._connection: http.client.HTTPConnection | None = None
         self._response: http.client.HTTPResponse | None = None
         self._socket: socket.socket | None = None
+        with handle._lock:
+            if handle._closed.is_set():
+                raise NexusConnectionError("database handle is closed")
+            if handle._disconnected.is_set():
+                raise DatabaseDisconnectedError(
+                    handle._disconnect_reason or "database instance disconnected"
+                )
+            entry = handle._instance
         self._open(entry)
+        with handle._lock:
+            if handle._closed.is_set() or handle._disconnected.is_set():
+                if handle._disconnected.is_set():
+                    error: NexusConnectionError = DatabaseDisconnectedError(
+                        handle._disconnect_reason or "database instance disconnected"
+                    )
+                else:
+                    error = NexusConnectionError("database handle is closed")
+            else:
+                handle._idb_subscriptions.add(self)
+                return
+        self._close(detach=False)
+        raise error
 
     def _open(self, entry: DatabaseInstance) -> None:
         connection = http.client.HTTPConnection(HOST, entry.port, timeout=10.0)
@@ -110,21 +131,30 @@ class DatabaseChangeSubscription:
                 ValueError,
                 http.client.HTTPException,
             ) as exc:
-                if self._closed.is_set() or self._handle._closed.is_set():
+                if self._handle._closed.is_set():
+                    raise StopIteration from None
+                if self._handle._disconnected.is_set():
+                    raise DatabaseDisconnectedError(
+                        self._handle.disconnect_reason
+                        or "database instance disconnected"
+                    ) from exc
+                if self._closed.is_set():
                     raise StopIteration from None
                 self.close()
                 raise NexusConnectionError(
                     f"database change stream failed: {exc}"
                 ) from exc
             if not line:
-                if self._closed.is_set() or self._handle._closed.is_set():
+                if self._handle._closed.is_set():
                     raise StopIteration
-                self.close()
                 if self._handle._disconnected.is_set():
                     raise DatabaseDisconnectedError(
                         self._handle.disconnect_reason
                         or "database instance disconnected"
                     )
+                if self._closed.is_set():
+                    raise StopIteration
+                self.close()
                 raise NexusConnectionError("database change stream closed")
 
             line = line.rstrip(b"\r\n")
@@ -372,29 +402,7 @@ class DatabaseHandle:
         cannot keep up with the bounded server queue is disconnected rather
         than receiving an incomplete event history.
         """
-        with self._lock:
-            if self._closed.is_set():
-                raise NexusConnectionError("database handle is closed")
-            if self._disconnected.is_set():
-                raise DatabaseDisconnectedError(
-                    self._disconnect_reason or "database instance disconnected"
-                )
-            entry = self._instance
-        subscription = DatabaseChangeSubscription(self, entry)
-        with self._lock:
-            if self._closed.is_set() or self._disconnected.is_set():
-                error: NexusConnectionError
-                if self._disconnected.is_set():
-                    error = DatabaseDisconnectedError(
-                        self._disconnect_reason or "database instance disconnected"
-                    )
-                else:
-                    error = NexusConnectionError("database handle is closed")
-            else:
-                self._idb_subscriptions.add(subscription)
-                return subscription
-        subscription._close(detach=False)
-        raise error
+        return DatabaseChangeSubscription(self)
 
     def _forget_idb_subscription(
         self, subscription: DatabaseChangeSubscription
