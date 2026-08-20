@@ -306,6 +306,15 @@ They must already be JSON-compatible; unsupported Python or IDA objects and
 non-finite floats fail with `invalid_result` rather than being coerced into
 lossy strings or containers.
 
+The typed `remote_ida` and `RemoteModule` layer deliberately has a different
+lifetime from `persist_globals`. It installs content-addressed modules in the
+remote interpreter's `sys.modules`, following ordinary Python import semantics.
+Every handle attached to the same IDA process therefore observes the same module
+object, globals, caches, mutations, and cache eviction. A local per-handle
+installation marker only suppresses redundant checks; it is not an ownership or
+isolation boundary. Lease release does not unload these modules. A source change
+selects a new module name, and normal interpreter teardown releases all versions.
+
 ### When to bump the version
 
 The protocol version is not the package or release version. Readers and writers

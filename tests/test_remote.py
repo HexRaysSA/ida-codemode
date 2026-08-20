@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import builtins
 import io
+import sys
 from collections import namedtuple
 from contextlib import redirect_stderr, redirect_stdout
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+import ida_codemode._remote as remote_impl
 from ida_codemode import RemoteExecutor, RemoteModule, remote_ida
 from ida_codemode._runtime import _execute_user_code
 from ida_codemode.models import PythonExecutionResult
@@ -226,6 +228,26 @@ def test_remote_ida_supports_direct_idapython_style_functions() -> None:
     assert direct_identity(handle, 7) == 7
 
 
+def test_database_injection_uses_the_parameter_name_or_explicit_flag() -> None:
+    @remote_ida
+    def preserve_database_argument(database: str, value: int) -> tuple[str, int]:
+        return database, value
+
+    @remote_ida(database=True)
+    def inject_unusually_named_database(
+        database: Database,
+        address: int,
+    ) -> bytes:
+        return database.bytes.get_bytes_at(address, 1) or b""
+
+    handle = InProcessHandle(FakeDatabase())
+    assert preserve_database_argument(handle, "caller value", 7) == (
+        "caller value",
+        7,
+    )
+    assert inject_unusually_named_database(handle, 0) == b"\x00"
+
+
 def test_operation_label_callable_is_evaluated_once_per_call() -> None:
     user = ["alice"]
     calls = 0
@@ -299,8 +321,24 @@ def test_remote_module_can_bind_database_aware_implementations(tmp_path) -> None
     )
     module = RemoteModule(path)
 
-    @module.function
+    @module.function()
     def read_byte(db: Database, address: int) -> bytes: ...
+
+    handle = InProcessHandle(FakeDatabase())
+    assert read_byte(handle, 0) == b"\x00"
+
+
+def test_remote_module_factory_supports_explicit_database_injection(tmp_path) -> None:
+    path = tmp_path / "remote_module.py"
+    path.write_text(
+        "def read_byte(database, address):\n"
+        "    return database.bytes.get_bytes_at(address, 1) or b''\n"
+    )
+    module = RemoteModule(path)
+
+    @module.function(database=True)
+    def read_byte(database: Database, address: int) -> bytes:
+        return database.bytes.get_bytes_at(address, 1) or b""
 
     handle = InProcessHandle(FakeDatabase())
     assert read_byte(handle, 0) == b"\x00"
@@ -318,11 +356,54 @@ def test_remote_module_json_codec_skips_typed_value_transform(tmp_path) -> None:
     assert payload(handle, 7) == {"value": 7}
 
 
+def test_remote_module_json_result_cannot_collide_with_retry_control(tmp_path) -> None:
+    path = tmp_path / "remote_module.py"
+    path.write_text(
+        "calls = 0\n\n"
+        "def payload():\n"
+        "    global calls\n"
+        "    calls += 1\n"
+        "    return {'__remote_ida_missing_module__': True, 'calls': calls}\n"
+    )
+    module = RemoteModule(path, codec="json")
+
+    @module.function
+    def payload() -> dict[str, object]: ...
+
+    handle = InProcessHandle(object())
+    assert payload(handle) == {
+        "__remote_ida_missing_module__": True,
+        "calls": 1,
+    }
+    assert len(handle.calls) == 2
+
+
 def test_remote_module_rejects_unknown_codec(tmp_path) -> None:
     path = tmp_path / "remote_module.py"
     path.write_text("def operation():\n    return None\n")
     with pytest.raises(ValueError, match="codec"):
         RemoteModule(path, codec=cast(Any, "unknown"))
+
+
+def test_remote_module_identity_includes_codec_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = "def operation():\n    return None\n"
+    original_runtime = remote_impl._REMOTE_CODEC_SOURCE
+    original_version = remote_impl._CODEC_VERSION
+    original = remote_impl._RemoteProgram(source, "remote.py").module_name
+
+    monkeypatch.setattr(
+        remote_impl,
+        "_REMOTE_CODEC_SOURCE",
+        original_runtime + "\n# changed runtime",
+    )
+    changed_runtime = remote_impl._RemoteProgram(source, "remote.py").module_name
+    monkeypatch.setattr(remote_impl, "_REMOTE_CODEC_SOURCE", original_runtime)
+    monkeypatch.setattr(remote_impl, "_CODEC_VERSION", original_version + 1)
+    changed_version = remote_impl._RemoteProgram(source, "remote.py").module_name
+
+    assert len({original, changed_runtime, changed_version}) == 3
 
 
 def test_remote_module_rejects_signature_drift(tmp_path) -> None:
@@ -334,6 +415,66 @@ def test_remote_module_rejects_signature_drift(tmp_path) -> None:
 
         @module.function
         def operation(value: int, extra: int) -> int: ...
+
+
+def test_remote_module_rejects_different_default_values(tmp_path) -> None:
+    path = tmp_path / "remote_module.py"
+    path.write_text(
+        "def positional(step=2):\n"
+        "    return step\n\n"
+        "def keyword(*, step=2):\n"
+        "    return step\n"
+    )
+    module = RemoteModule(path)
+
+    with pytest.raises(TypeError, match="does not match"):
+
+        @module.function
+        def positional(step: int = 1) -> int: ...
+
+    with pytest.raises(TypeError, match="does not match"):
+
+        @module.function
+        def keyword(*, step: int = 1) -> int: ...
+
+
+def test_remote_module_is_published_while_its_source_executes(tmp_path) -> None:
+    path = tmp_path / "remote_module.py"
+    path.write_text(
+        "import sys\n\n"
+        "published = sys.modules[__name__].__dict__ is globals()\n\n"
+        "def publication_state():\n"
+        "    return published\n"
+    )
+    module = RemoteModule(path)
+
+    @module.function
+    def publication_state() -> bool: ...
+
+    assert publication_state(InProcessHandle(object())) is True
+
+
+def test_failed_remote_module_installation_is_removed_from_sys_modules(
+    tmp_path,
+) -> None:
+    path = tmp_path / "remote_module.py"
+    path.write_text(
+        "import sys\n"
+        "import types\n\n"
+        "sys.modules[__name__] = types.ModuleType(__name__)\n"
+        "raise RuntimeError('installation failed')\n\n"
+        "def operation():\n"
+        "    return None\n"
+    )
+    module = RemoteModule(path)
+
+    @module.function
+    def operation() -> None: ...
+
+    modules_before = set(sys.modules)
+    with pytest.raises(RuntimeError, match="installation failed"):
+        operation(InProcessHandle(object()))
+    assert set(sys.modules) == modules_before
 
 
 def test_remote_ida_rejects_async_functions() -> None:

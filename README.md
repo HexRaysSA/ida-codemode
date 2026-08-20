@@ -225,6 +225,8 @@ When the first parameter is named `db`, ida-domain's database is injected
 automatically and removed from the caller signature:
 
 ```python
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -239,6 +241,10 @@ def read_bytes(db: Database, address: int, size: int) -> bytes:
 header = read_bytes(handle, 0x401000, 16)
 ```
 
+Use `database=True` to inject an unusually named first positional parameter, or
+`database=False` to treat a parameter named `db` as ordinary caller data. The
+explicit flag is also the static typing discriminator for those overrides.
+
 String labels and zero-argument label callables are supported. Callables are
 evaluated once per invocation, so a `ContextVar` or application user/session
 provider can produce labels such as `IDA TUI: alice`; installation and execution
@@ -252,9 +258,9 @@ functions without closures or stacked decorators. Explicit `helpers=(...)`
 bundle reusable plain functions into the same installed module.
 
 Large or stateful implementations belong in a real Python module, not a string.
-`RemoteModule` reads and content-hashes that file, installs it once per handle,
-keeps its module globals and caches alive, and validates declarations against the
-implementation signature:
+`RemoteModule` reads and content-hashes that file, installs it once per IDA
+Python interpreter, keeps its module globals and caches alive, and validates
+declarations against the implementation signature:
 
 ```python
 from ida_codemode import RemoteModule
@@ -270,10 +276,19 @@ def decompile(address: str, include_addresses: bool = True) -> dict:
 result = decompile(handle, "0x401000")
 ```
 
-`RemoteModule.function()` follows the same `db` naming convention. Declarations
-for ordinary module functions have an empty body; database-aware functions may
-be their real import-safe implementation. Signature drift fails immediately
-while the application imports.
+`RemoteModule.function()` follows the same `db` naming convention and supports
+the same explicit `database=True` and `database=False` decorator-factory forms.
+Declarations for ordinary module functions have an empty body; database-aware
+functions may be their real import-safe implementation. Parameter names, kinds,
+and default expressions are checked against the implementation while the
+application imports.
+
+Installed remote modules use normal Python `sys.modules` semantics. Two handles
+attached to the same IDA process share the module object, including mutable
+globals, caches, and cache eviction. The client-side per-handle record is only an
+installation-check optimization; closing a handle does not unload the module.
+Use lease-scoped `persist_globals=True` execution instead when state must be
+private to one handle.
 
 The default `codec="typed"` preserves bytes and tuples. A module whose boundary
 is guaranteed JSON-native can use `codec="json"` to return large dictionaries

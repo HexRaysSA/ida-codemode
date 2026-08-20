@@ -47,6 +47,24 @@ def direct_idapython(value: int) -> int:
     return value
 
 
+@remote_ida()
+def implicit_factory(db: Database, value: int) -> int:
+    del db
+    return value
+
+
+@remote_ida
+def preserve_named_database(database: Database, value: int) -> int:
+    del database
+    return value
+
+
+@remote_ida(database=True)
+def explicit_database(database: Database, value: int) -> int:
+    del database
+    return value
+
+
 module = RemoteModule(__file__)
 
 
@@ -57,9 +75,32 @@ def module_read(db: Database, address: int) -> bytes:
 remote_module_read = module.function(module_read)
 
 
-def check_remote_ida_types(handle: DatabaseHandle, executor: RemoteExecutor) -> None:
+def module_read_factory(db: Database, address: int) -> bytes:
+    return db.bytes.get_bytes_at(address, 1) or b""
+
+
+remote_module_read_factory = module.function()(module_read_factory)
+
+
+def module_read_explicit(database: Database, address: int) -> bytes:
+    return database.bytes.get_bytes_at(address, 1) or b""
+
+
+remote_module_read_explicit = module.function(database=True)(module_read_explicit)
+
+
+def check_remote_ida_types(
+    handle: DatabaseHandle,
+    executor: RemoteExecutor,
+    database: Database,
+) -> None:
     assert_type(read_bytes(handle, 0x401000, 4), bytes)
     assert_type(describe_bytes(handle, 0x401000, b"\x7fELF"), tuple[int, bytes])
     assert_type(read_with_helpers(handle, 0x401000), bytes)
     assert_type(remote_module_read(executor, 0x401000), bytes)
+    assert_type(remote_module_read_factory(executor, 0x401000), bytes)
+    assert_type(remote_module_read_explicit(executor, 0x401000), bytes)
     assert_type(direct_idapython(executor, 7), int)
+    assert_type(implicit_factory(executor, 7), int)
+    assert_type(preserve_named_database(executor, database, 7), int)
+    assert_type(explicit_database(executor, 7), int)

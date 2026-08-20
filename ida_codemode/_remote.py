@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 P = ParamSpec("P")
 R = TypeVar("R")
+R_co = TypeVar("R_co", covariant=True)
 OperationLabel = str | Callable[[], str | None] | None
 RemoteCodec = Literal["typed", "json"]
 
@@ -44,7 +45,10 @@ _BYTES_TAG = "$bytes"
 _TUPLE_TAG = "$tuple"
 _DICT_TAG = "$dict"
 _RESERVED_TAGS = frozenset((_BYTES_TAG, _TUPLE_TAG, _DICT_TAG))
-_MISSING_MODULE = "__remote_ida_missing_module__"
+_INVOCATION_STATUS = "__remote_ida_status__"
+_INVOCATION_VALUE = "__remote_ida_value__"
+_STATUS_MISSING_MODULE = "missing_module"
+_STATUS_OK = "ok"
 _RUNTIME_PREFIX = "__remote_ida_"
 _SUPPORTED_VALUES = (
     "None, bool, int, finite float, str, bytes, list, tuple, and dict[str, value]"
@@ -330,54 +334,48 @@ def _extract_definition(
 
 def _parameter_shape_from_ast(definition: ast.FunctionDef) -> tuple[Any, ...]:
     args = definition.args
+
+    def default_shape(default: ast.expr | None) -> str | None:
+        return (
+            None
+            if default is None
+            else ast.dump(default, annotate_fields=True, include_attributes=False)
+        )
+
     return (
         tuple(item.arg for item in args.posonlyargs),
         tuple(item.arg for item in args.args),
         args.vararg.arg if args.vararg else None,
         tuple(item.arg for item in args.kwonlyargs),
-        tuple(default is not None for default in args.kw_defaults),
+        tuple(default_shape(default) for default in args.kw_defaults),
         args.kwarg.arg if args.kwarg else None,
-        len(args.defaults),
+        tuple(default_shape(default) for default in args.defaults),
     )
 
 
-def _parameter_shape_from_signature(signature: inspect.Signature) -> tuple[Any, ...]:
-    posonly: list[str] = []
-    positional: list[str] = []
-    kwonly: list[str] = []
-    kw_defaults: list[bool] = []
-    vararg = kwarg = None
-    positional_defaults = 0
-    for parameter in signature.parameters.values():
-        if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
-            posonly.append(parameter.name)
-        elif parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD:
-            positional.append(parameter.name)
-        elif parameter.kind is inspect.Parameter.VAR_POSITIONAL:
-            vararg = parameter.name
-        elif parameter.kind is inspect.Parameter.KEYWORD_ONLY:
-            kwonly.append(parameter.name)
-            kw_defaults.append(parameter.default is not inspect.Parameter.empty)
-        elif parameter.kind is inspect.Parameter.VAR_KEYWORD:
-            kwarg = parameter.name
-        if (
-            parameter.kind
-            in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            )
-            and parameter.default is not inspect.Parameter.empty
-        ):
-            positional_defaults += 1
-    return (
-        tuple(posonly),
-        tuple(positional),
-        vararg,
-        tuple(kwonly),
-        tuple(kw_defaults),
-        kwarg,
-        positional_defaults,
-    )
+def _passes_database(
+    parameters: list[inspect.Parameter],
+    database: bool | None,
+    *,
+    role: str,
+) -> bool:
+    first = parameters[0] if parameters else None
+    if database is None:
+        return bool(
+            first is not None
+            and first.name == "db"
+            and first.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        )
+    if not database:
+        return False
+    if first is None or first.kind not in (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    ):
+        raise TypeError(
+            f"database-aware {role} must accept a first positional parameter"
+        )
+    return True
 
 
 def _stub_is_empty(definition: ast.FunctionDef) -> bool:
@@ -400,10 +398,18 @@ def _stub_is_empty(definition: ast.FunctionDef) -> bool:
 
 
 class _RemoteProgram:
+    """A content-addressed module shared by one remote Python interpreter.
+
+    Installation uses the remote interpreter's ``sys.modules``.  The weak
+    per-handle map below only avoids redundant installation checks; it does not
+    own or isolate the module.
+    """
+
     def __init__(self, source: str, filename: str) -> None:
         self.source = source
         self.filename = filename
-        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:20]
+        identity = f"{_CODEC_VERSION}\0{_REMOTE_CODEC_SOURCE}\0{source}"
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
         self.module_name = f"_ida_codemode_remote_{digest}"
         self._installed: weakref.WeakKeyDictionary[object, bool] = (
             weakref.WeakKeyDictionary()
@@ -438,9 +444,13 @@ class _RemoteProgram:
 if {self.module_name!r} not in __remote_ida_sys.modules:
     __remote_ida_module = __remote_ida_types.ModuleType({self.module_name!r})
     __remote_ida_module.__file__ = {self.filename!r}
-    exec(compile({self.source!r}, {self.filename!r}, "exec"), __remote_ida_module.__dict__)
-    exec(compile({_REMOTE_CODEC_SOURCE!r}, {runtime_filename!r}, "exec"), __remote_ida_module.__dict__)
     __remote_ida_sys.modules[{self.module_name!r}] = __remote_ida_module
+    try:
+        exec(compile({self.source!r}, {self.filename!r}, "exec"), __remote_ida_module.__dict__)
+        exec(compile({_REMOTE_CODEC_SOURCE!r}, {runtime_filename!r}, "exec"), __remote_ida_module.__dict__)
+    except BaseException:
+        __remote_ida_sys.modules.pop({self.module_name!r}, None)
+        raise
 True
 """
             execution = handle.execute_python(
@@ -484,15 +494,18 @@ True
             code = f"""import json as __remote_ida_json, sys as __remote_ida_sys
 __remote_ida_module = __remote_ida_sys.modules.get({self.module_name!r})
 __remote_ida_result = (
-    {{{_MISSING_MODULE!r}: True}}
+    {{{_INVOCATION_STATUS!r}: {_STATUS_MISSING_MODULE!r}}}
     if __remote_ida_module is None
-    else __remote_ida_module.__remote_ida_invoke(
-        db,
-        {function_name!r},
-        {pass_database!r},
-        {typed_codec!r},
-        __remote_ida_json.loads({payload!r}),
-    )
+    else {{
+        {_INVOCATION_STATUS!r}: {_STATUS_OK!r},
+        {_INVOCATION_VALUE!r}: __remote_ida_module.__remote_ida_invoke(
+            db,
+            {function_name!r},
+            {pass_database!r},
+            {typed_codec!r},
+            __remote_ida_json.loads({payload!r}),
+        ),
+    }}
 )
 __remote_ida_result
 """
@@ -504,8 +517,23 @@ __remote_ida_result
                 filename=self.filename,
             )
 
+        def unwrap(execution: PythonExecutionResult) -> tuple[bool, Any]:
+            envelope = execution["result"]
+            if envelope == {_INVOCATION_STATUS: _STATUS_MISSING_MODULE}:
+                return True, None
+            if (
+                type(envelope) is dict
+                and set(envelope) == {_INVOCATION_STATUS, _INVOCATION_VALUE}
+                and envelope[_INVOCATION_STATUS] == _STATUS_OK
+            ):
+                return False, envelope[_INVOCATION_VALUE]
+            raise CodeModeConnectionError(
+                "remote_ida returned an invalid invocation envelope"
+            )
+
         execution = invoke()
-        if execution["result"] == {_MISSING_MODULE: True}:
+        missing, result = unwrap(execution)
+        if missing:
             self.ensure(
                 handle,
                 timeout=timeout,
@@ -513,17 +541,24 @@ __remote_ida_result
                 force=True,
             )
             execution = invoke()
+            missing, result = unwrap(execution)
+            if missing:
+                raise CodeModeConnectionError(
+                    "remote_ida module is unavailable after installation"
+                )
         if execution["stdout"]:
             sys.stdout.write(execution["stdout"])
         if execution["stderr"]:
             sys.stderr.write(execution["stderr"])
-        return (
-            _decode_result(execution["result"]) if typed_codec else execution["result"]
-        )
+        return _decode_result(result) if typed_codec else result
 
 
 class RemoteFunction(Generic[P, R]):
-    """A typed, source-backed callable executed through a RemoteExecutor."""
+    """A typed callable backed by a process-scoped remote Python module.
+
+    Handles attached to the same IDA process use the same module object, so
+    module globals and caches follow normal Python import sharing semantics.
+    """
 
     def __init__(
         self,
@@ -574,8 +609,25 @@ class RemoteFunction(Generic[P, R]):
         )
 
 
+class _ImplicitDatabaseCallable(Protocol[P, R_co]):
+    """A callable whose first positional parameter is statically named ``db``."""
+
+    def __call__(
+        self,
+        db: Any,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R_co: ...
+
+
 class RemoteModule:
-    """A content-addressed Python module installed once per database handle."""
+    """A content-addressed module shared by one remote Python interpreter.
+
+    The installed object lives in the IDA process's ``sys.modules``.  Separate
+    database handles attached to that process therefore share its globals,
+    caches, mutations, and cache eviction.  Closing one handle does not unload
+    the module; changing the source selects a new content-addressed module.
+    """
 
     def __init__(
         self,
@@ -607,7 +659,7 @@ class RemoteModule:
     @overload
     def function(
         self,
-        function: Callable[Concatenate[Database, P], R],
+        function: _ImplicitDatabaseCallable[P, R],
         /,
         *,
         database: None = None,
@@ -654,7 +706,32 @@ class RemoteModule:
         function: None = None,
         /,
         *,
-        database: Literal[False] | None = None,
+        database: None = None,
+        timeout: float | None = None,
+        operation_label: OperationLabel = None,
+    ) -> _AutoRemoteDecorator: ...
+
+    @overload
+    def function(
+        self,
+        function: None = None,
+        /,
+        *,
+        database: Literal[True],
+        timeout: float | None = None,
+        operation_label: OperationLabel = None,
+    ) -> Callable[
+        [Callable[Concatenate[Database, P], R]],
+        RemoteFunction[P, R],
+    ]: ...
+
+    @overload
+    def function(
+        self,
+        function: None = None,
+        /,
+        *,
+        database: Literal[False],
         timeout: float | None = None,
         operation_label: OperationLabel = None,
     ) -> Callable[[Callable[P, R]], RemoteFunction[P, R]]: ...
@@ -671,25 +748,21 @@ class RemoteModule:
         def bind(declaration: Callable[..., Any]) -> RemoteFunction[Any, Any]:
             _, _, name, definition = _extract_definition(declaration)
             parameters = list(inspect.signature(declaration).parameters.values())
-            inject_database = (
-                bool(parameters and parameters[0].name == "db")
-                if database is None
-                else database
+            inject_database = _passes_database(
+                parameters,
+                database,
+                role="RemoteModule function",
             )
             if not inject_database and not _stub_is_empty(definition):
                 raise TypeError(
                     "RemoteModule function declarations must have an empty body"
                 )
-            if inject_database and (not parameters or parameters[0].name != "db"):
-                raise TypeError(
-                    "database-aware RemoteModule functions must declare 'db' first"
-                )
             implementation = self._definitions.get(name)
             if implementation is None:
                 raise TypeError(f"remote module {self.path} has no function {name!r}")
-            if _parameter_shape_from_ast(
-                implementation
-            ) != _parameter_shape_from_signature(inspect.signature(declaration)):
+            if _parameter_shape_from_ast(implementation) != _parameter_shape_from_ast(
+                definition
+            ):
                 raise TypeError(
                     f"remote module function {name!r} does not match its declaration"
                 )
@@ -718,7 +791,9 @@ class RemoteModule:
 class _AutoRemoteDecorator(Protocol):
     @overload
     def __call__(
-        self, function: Callable[Concatenate[Database, P], R], /
+        self,
+        function: _ImplicitDatabaseCallable[P, R],
+        /,
     ) -> RemoteFunction[P, R]: ...
 
     @overload
@@ -727,7 +802,7 @@ class _AutoRemoteDecorator(Protocol):
 
 @overload
 def remote_ida(
-    function: Callable[Concatenate[Database, P], R],
+    function: _ImplicitDatabaseCallable[P, R],
     /,
     *,
     database: None = None,
@@ -823,24 +898,21 @@ def remote_ida(
 ) -> Any:
     """Declare a typed function that runs in IDA through a RemoteExecutor.
 
-    A first parameter named ``db`` receives ida-domain's database and disappears
-    from the caller signature. Functions without it run exactly as declared,
-    which is ideal for direct IDAPython. ``database=`` can override the
-    convention for unusual signatures.
+    A first positional-or-keyword parameter named ``db`` receives ida-domain's
+    database and disappears from the caller signature. Functions without it run
+    exactly as declared, which is ideal for direct IDAPython. ``database=True``
+    explicitly injects any first positional parameter; ``database=False``
+    disables the naming convention.
     """
 
     def decorate(selected: Callable[..., Any]) -> RemoteFunction[Any, Any]:
         function_source, filename, function_name, _ = _extract_definition(selected)
         parameters = list(inspect.signature(selected).parameters.values())
-        inject_database = (
-            bool(parameters and parameters[0].name == "db")
-            if database is None
-            else database
+        inject_database = _passes_database(
+            parameters,
+            database,
+            role="remote_ida function",
         )
-        if inject_database and (not parameters or parameters[0].name != "db"):
-            raise TypeError(
-                "database-aware remote_ida functions must declare 'db' first"
-            )
         helper_sources: list[str] = []
         helper_names: set[str] = set()
         for helper in helpers:
