@@ -46,9 +46,9 @@ from urllib.parse import urlparse
 from packaging.version import InvalidVersion, Version
 
 MCP_ENVIRONMENT_VARIABLES = (
-    "ida_nexus_ID",
+    "IDA_NEXUS_ID",
     "IDAUSR",
-    "ida_nexus_STATE_DIR",
+    "IDA_NEXUS_STATE_DIR",
 )
 
 
@@ -154,7 +154,7 @@ _TRACE_CALL_ID: ContextVar[str | None] = ContextVar(
 
 def _session_fields_from_meta(meta: dict[str, Any]) -> dict[str, Any]:
     fields: dict[str, Any] = {
-        "nexus_id": os.environ.get("ida_nexus_ID") or None,
+        "nexus_id": os.environ.get("IDA_NEXUS_ID") or None,
     }
     for name in (
         "claude_session_path",

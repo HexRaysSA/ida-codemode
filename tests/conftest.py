@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 _STATE_DIR = Path(tempfile.mkdtemp(prefix="ida-nexus-tests-"))
-os.environ["ida_nexus_STATE_DIR"] = str(_STATE_DIR)
+os.environ["IDA_NEXUS_STATE_DIR"] = str(_STATE_DIR)
 
 
 @pytest.fixture(autouse=True)

@@ -9,6 +9,6 @@
       "--agent=codex"
     ],
     "cwd": ".",
-    "env_vars": ["ida_nexus_ID", "IDAUSR", "ida_nexus_STATE_DIR"]
+    "env_vars": ["IDA_NEXUS_ID", "IDAUSR", "IDA_NEXUS_STATE_DIR"]
   }
 }

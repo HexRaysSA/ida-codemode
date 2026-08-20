@@ -19,7 +19,7 @@ def _get_idausr_dir() -> Path:
 
 def get_state_dir() -> Path:
     """Return the directory where IDA Nexus state is stored."""
-    state_dir = os.environ.get("ida_nexus_STATE_DIR")
+    state_dir = os.environ.get("IDA_NEXUS_STATE_DIR")
     if state_dir:
         return Path(state_dir).expanduser()
     return _get_idausr_dir() / "nexus"

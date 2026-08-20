@@ -206,12 +206,12 @@ export default function idaNexus(pi: ExtensionAPI) {
       cwd: PACKAGE_ROOT,
       stderr: "pipe",
       env: {
-        ...(process.env.ida_nexus_ID
-          ? { ida_nexus_ID: process.env.ida_nexus_ID }
+        ...(process.env.IDA_NEXUS_ID
+          ? { IDA_NEXUS_ID: process.env.IDA_NEXUS_ID }
           : {}),
         ...(process.env.IDAUSR ? { IDAUSR: process.env.IDAUSR } : {}),
-        ...(process.env.ida_nexus_STATE_DIR
-          ? { ida_nexus_STATE_DIR: process.env.ida_nexus_STATE_DIR }
+        ...(process.env.IDA_NEXUS_STATE_DIR
+          ? { IDA_NEXUS_STATE_DIR: process.env.IDA_NEXUS_STATE_DIR }
           : {}),
       },
     });

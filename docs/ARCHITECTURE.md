@@ -56,7 +56,7 @@ connection expresses one client's interest in an already-running database.
   sessions/<mcp-server-id>.jsonl   semantic MCP/agent trace
 ```
 
-`<state-dir>` is `ida_nexus_STATE_DIR` when that variable is set. Otherwise
+`<state-dir>` is `IDA_NEXUS_STATE_DIR` when that variable is set. Otherwise
 it is `<IDAUSR>/nexus`, where `<IDAUSR>` is the first directory in the
 `IDAUSR` environment variable. When `IDAUSR` is unset, IDA's platform default
 is used (`~/.idapro` on Unix-like systems or `%APPDATA%/Hex-Rays/IDA Pro` on

@@ -218,7 +218,7 @@ The trace contains:
 - executed Python and returned values;
 - database open, reuse, disconnection, save, and release events;
 - GUI or idalib record identity and worker log path;
-- Claude, Codex, Pi, and `ida_nexus_ID` session metadata.
+- Claude, Codex, Pi, and `IDA_NEXUS_ID` session metadata.
 
 Tool calls and results are paired by `call_id`; the dashboard shows the same
 short call ID on both cards and exposes the full value in the badge tooltip and

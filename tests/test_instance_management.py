@@ -532,15 +532,15 @@ def test_resolver_prefers_gui_executable_identity(tmp_path: Path) -> None:
 
 
 def test_mcp_unsets_empty_forwarded_environment_variables(monkeypatch) -> None:
-    monkeypatch.setenv("ida_nexus_ID", "")
+    monkeypatch.setenv("IDA_NEXUS_ID", "")
     monkeypatch.setenv("IDAUSR", "/tmp/ida-user")
-    monkeypatch.setenv("ida_nexus_STATE_DIR", "")
+    monkeypatch.setenv("IDA_NEXUS_STATE_DIR", "")
 
     mcp_app._unset_empty_environment_variables()
 
-    assert "ida_nexus_ID" not in mcp_app.os.environ
+    assert "IDA_NEXUS_ID" not in mcp_app.os.environ
     assert mcp_app.os.environ["IDAUSR"] == "/tmp/ida-user"
-    assert "ida_nexus_STATE_DIR" not in mcp_app.os.environ
+    assert "IDA_NEXUS_STATE_DIR" not in mcp_app.os.environ
 
 
 def test_mcp_gui_plugin_requires_current_or_newer_version(tmp_path: Path) -> None:
