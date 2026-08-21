@@ -55,7 +55,7 @@ pi install git:github.com/HexRaysSA/ida-nexus@latest
 ### [oh-my-pi](https://github.com/can1357/oh-my-pi)
 
 ```bash
-omp plugin install github:HexRaysSA/ida-nexus@latest
+omp plugin install github:HexRaysSA/ida-nexus#latest
 ```
 
 ### Other agents
